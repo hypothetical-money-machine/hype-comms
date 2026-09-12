@@ -11,7 +11,7 @@ import {
   workspaceEventSchema,
 } from "@hype-comms/contracts";
 import { type Pool, type QueryResultRow } from "pg";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
 
 import { runMigrations } from "../src/db/migrate.js";
@@ -19,7 +19,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 let database: TestDatabase;
 
@@ -86,7 +86,7 @@ async function withoutDesktopAuthVariantMigration(fn: (migrationsDirectory: URL)
   await withoutMigration("0019_desktop_auth_variants.sql", fn);
 }
 
-describeWithPostgres("runMigrations", () => {
+describe("runMigrations", () => {
   beforeAll(async () => {
     database = await createTestDatabase({ migrate: false, poolSize: 2 });
   });

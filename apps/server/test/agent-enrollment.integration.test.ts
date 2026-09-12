@@ -24,7 +24,7 @@ import {
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
 import { type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { createPool } from "../src/db/pool.js";
@@ -40,7 +40,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -85,7 +85,7 @@ function candidateInput(
   };
 }
 
-describeWithPostgres("AgentEnrollmentModule", () => {
+describe("AgentEnrollmentModule", () => {
   const applicationName = `agent_enrollment_${process.pid}_${randomUUID().slice(0, 8)}`;
   const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
   let database: TestDatabase;
