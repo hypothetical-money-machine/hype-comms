@@ -284,6 +284,9 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
       return bootstrapResponse;
     },
     getConversationMessages: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: testPosition("10"),
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
@@ -298,11 +301,21 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
       reactionHydrations += 1;
       return { reactions: [] };
     },
-    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listConversationFiles: async () => ({
+      snapshotPosition: testPosition("10"),
+      files: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     listMessageAttachments: async () => ({ attachments: [] }),
     chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
     openConversationFile: async () => ({ opened: true }),
-    listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
+    listConversationTasks: async () => ({
+      snapshotPosition: testPosition("10"),
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     syncWorkspace: async (after: string) =>
       ({
         status: "accepted",

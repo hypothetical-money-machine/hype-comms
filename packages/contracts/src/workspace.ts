@@ -452,6 +452,11 @@ export const messageThreadSummarySchema = z
 
 export const messageHistoryResponseSchema = z
   .object({
+    snapshotPosition: syncPositionSchema,
+    reactions: z
+      .array(reactionSchema)
+      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * REACTIONS_PER_MESSAGE_MAX)
+      .default([]),
     messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     threadSummaries: z.array(messageThreadSummarySchema).max(MESSAGE_HISTORY_MAX_LIMIT).default([]),
     threadsSupported: z.boolean().default(false),
@@ -724,6 +729,11 @@ export const agentContextHistoryResponseSchema = z
 
 export const messageThreadResponseSchema = z
   .object({
+    snapshotPosition: syncPositionSchema,
+    reactions: z
+      .array(reactionSchema)
+      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * REACTIONS_PER_MESSAGE_MAX)
+      .default([]),
     root: messageSchema,
     replies: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     attachments: z

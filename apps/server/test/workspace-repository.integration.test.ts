@@ -674,6 +674,41 @@ describe("WorkspaceRepository", () => {
     });
   });
 
+  it("anchors a history page and its reactions to one PostgreSQL read snapshot", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Snapshot root"),
+      mentionedUserIds: [],
+    });
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE attachments IN ACCESS EXCLUSIVE MODE");
+    const reading = repository.history(member, generalId, undefined, 50);
+    try {
+      await expect
+        .poll(async () => {
+          const waiting = await pool.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'
+              AND query LIKE '%FROM attachments AS attachment%'`,
+          );
+          return Number(waiting.rows[0]?.count ?? 0);
+        })
+        .toBe(1);
+      await repository.addReaction(member, sent.message.id, "🎉");
+    } finally {
+      await blocker.query("ROLLBACK");
+      blocker.release();
+    }
+    const page = await reading;
+    expect(page.snapshotPosition).toEqual(sent.syncCursor);
+    expect(page.reactions).toEqual([]);
+    const current = await repository.history(member, generalId, undefined, 50);
+    expect(current.reactions).toHaveLength(1);
+    expect(BigInt(current.snapshotPosition.sequence)).toBeGreaterThan(
+      BigInt(page.snapshotPosition.sequence),
+    );
+  });
+
   it("projects roots in history and paginates replies inside one thread", async () => {
     const root = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "thread root"),
@@ -1369,6 +1404,10 @@ describe("WorkspaceRepository", () => {
       ),
     ).rejects.toMatchObject(taskless);
     await expect(repository.listMyTasks(member, undefined, 50)).resolves.toEqual({
+      snapshotPosition: expect.objectContaining({
+        epoch: protocolEpoch,
+        sequence: expect.any(String),
+      }),
       tasks: [],
       nextCursor: null,
       hasMore: false,
