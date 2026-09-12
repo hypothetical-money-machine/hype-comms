@@ -81,6 +81,15 @@ describe("operational routes", () => {
     expect(missing.statusCode).toBe(401);
     expect(incorrect.statusCode).toBe(401);
     expect(authorized.statusCode).toBe(200);
+    for (const prefix of ["bearer ", "BEARER\t", "bEaReR \t  "]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: prefix + token },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
     expect(authorized.headers["cache-control"]).toBe("no-store");
     expect(authorized.body).toContain(
       'hype_comms_http_requests_total{method="GET",route="/livez",status_code="200"} 1',

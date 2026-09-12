@@ -8,6 +8,7 @@ import {
 import type { FastifyRequest } from "fastify";
 
 import { ApiError } from "../../errors.js";
+import { parseBearerAuthorization } from "../../http/bearer-authorization.js";
 import type {
   AuthenticatedAgentIdentity,
   AuthenticatedHumanIdentity,
@@ -26,22 +27,11 @@ function cookieValue(request: FastifyRequest, cookieName: string): string | unde
   return undefined;
 }
 
-function bearerValue(request: FastifyRequest): string | undefined {
-  const authorization = request.headers.authorization;
-  if (authorization === undefined) return undefined;
-  const match = /^Bearer[ \t]+([^ \t]+)$/i.exec(authorization);
-  return match?.[1];
-}
-
-function carriesBearerCredential(request: FastifyRequest): boolean {
-  return /^Bearer(?:[ \t]|$)/i.test(request.headers.authorization ?? "");
-}
-
 /** Reject credential confusion before a route can accidentally prefer one principal over another. */
 export function rejectAmbiguousCredentials(request: FastifyRequest): void {
   if (
     cookieValue(request, IDENTITY_COOKIE_NAME) !== undefined &&
-    carriesBearerCredential(request)
+    parseBearerAuthorization(request.headers.authorization).scheme === "bearer"
   ) {
     throw new ApiError(
       400,
@@ -67,8 +57,9 @@ export async function requireAuthenticatedIdentity(
 ): Promise<AuthenticatedRequestIdentity> {
   rejectAmbiguousCredentials(request);
 
-  if (carriesBearerCredential(request)) {
-    const parsed = agentTokenSecretSchema.safeParse(bearerValue(request));
+  const bearer = parseBearerAuthorization(request.headers.authorization);
+  if (bearer.scheme === "bearer") {
+    const parsed = agentTokenSecretSchema.safeParse(bearer.token);
     if (!parsed.success) {
       throw new ApiError(401, "UNAUTHORIZED", "Agent token is invalid or revoked");
     }

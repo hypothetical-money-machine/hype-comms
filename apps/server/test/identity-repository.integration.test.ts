@@ -102,6 +102,7 @@ describe("IdentityRepository", () => {
         createdAt: now,
         lastSeenAt: now,
         expiresAt: later,
+        workosSessionId: "session_01ABC",
       }),
       repository.insertDeviceSession({
         id: magicLinkSessionId,
@@ -112,10 +113,6 @@ describe("IdentityRepository", () => {
         lastSeenAt: now,
         expiresAt: later,
       }),
-    ]);
-    await pool.query("UPDATE device_sessions SET workos_session_id = $2 WHERE id = $1", [
-      authKitSessionId,
-      "session_01ABC",
     ]);
 
     await expect(repository.revokeDeviceSessionByTokenHash(authKitHash, later)).resolves.toBe(

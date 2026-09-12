@@ -272,6 +272,14 @@ command, not by a permanent unauthenticated endpoint. Cloudflare routes only thi
 path to Fastify's verification handler; the page does not store a cookie, token, or chat
 state.
 
+`IdentityRepository.insertDeviceSession` owns session insertion for both login paths. AuthKit
+supplies the optional WorkOS session ID through a repository bound to the transaction that consumes
+the handoff. A failed commit leaves neither a session nor a consumed handoff; magic-link sessions
+omit provider metadata. Existing provider revocation and session rotation keep their own lifecycles.
+Agent, bot, and metrics credentials share case-insensitive Bearer syntax with spaces or tabs before
+the token. Credential-specific schemas and authorization remain separate: malformed bot headers
+cannot fall back to a human cookie, and identity routes reject mixed cookie/Bearer credentials.
+
 Main obtains a single-use realtime ticket over authenticated HTTP, then opens
 `wss://chat-api.example.invalid/v1/realtime?ticket=...&after=...`. The ticket expires after 30
 seconds, is stored only as a hash, is consumed atomically during upgrade, and is bound to the

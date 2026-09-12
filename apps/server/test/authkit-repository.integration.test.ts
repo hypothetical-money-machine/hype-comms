@@ -404,10 +404,15 @@ describe("AuthKitRepository", () => {
       userId: ownerId,
       label: "Morgan's laptop",
     });
-    const persisted = await pool.query<{ workos_session_id: string }>(
-      "SELECT workos_session_id FROM device_sessions",
+    const persisted = await pool.query<{ workos_session_id: string; same_transaction: boolean }>(
+      `SELECT session.workos_session_id, session.xmin = handoff.xmin AS same_transaction
+         FROM device_sessions AS session
+         JOIN authkit_handoffs AS handoff ON handoff.workos_session_id = session.workos_session_id`,
     );
-    expect(persisted.rows[0]?.workos_session_id).toBe("session_owner1");
+    expect(persisted.rows[0]).toEqual({
+      workos_session_id: "session_owner1",
+      same_transaction: true,
+    });
 
     await expect(
       repository.exchangeHandoff({
@@ -417,6 +422,49 @@ describe("AuthKitRepository", () => {
         now,
       }),
     ).rejects.toBeInstanceOf(AuthKitCredentialRejectedError);
+  });
+
+  it("rolls back session insertion and handoff consumption together when commit fails", async () => {
+    await seedOwner();
+    const handoff = await repository.admitIdentity({
+      providerSubject: "user_rollback1",
+      verifiedEmail: "owner@example.com",
+      workosSessionId: "session_rollback1",
+      desktopCodeChallenge: desktopChallenge,
+      now,
+    });
+    await pool.query(`CREATE FUNCTION reject_test_session_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'test session commit failure'; END;
+    $$`);
+    await pool.query(`CREATE CONSTRAINT TRIGGER reject_test_session_commit
+      AFTER INSERT ON device_sessions DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW EXECUTE FUNCTION reject_test_session_commit()`);
+    try {
+      await expect(
+        repository.exchangeHandoff({
+          handoffCode: handoff.handoffCode,
+          codeVerifier: desktopVerifier,
+          label: "Rollback test",
+          now,
+        }),
+      ).rejects.toThrow("test session commit failure");
+      expect((await pool.query("SELECT id FROM device_sessions")).rows).toEqual([]);
+      expect((await pool.query("SELECT consumed_at FROM authkit_handoffs")).rows).toEqual([
+        { consumed_at: null },
+      ]);
+    } finally {
+      await pool.query("DROP TRIGGER reject_test_session_commit ON device_sessions");
+      await pool.query("DROP FUNCTION reject_test_session_commit()");
+    }
+    const session = await repository.exchangeHandoff({
+      handoffCode: handoff.handoffCode,
+      codeVerifier: desktopVerifier,
+      label: "Retry after rollback",
+      now,
+    });
+    await expect(
+      identityRepository.findDeviceSessionByTokenHash(hashToken(session.token)),
+    ).resolves.toMatchObject({ userId: ownerId, label: "Retry after rollback" });
   });
 
   it("activates an unexpired invitation with current username collision rules", async () => {

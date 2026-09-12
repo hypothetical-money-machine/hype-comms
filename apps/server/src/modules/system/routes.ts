@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import type { HealthResponse, ReadinessResponse } from "@hype-comms/contracts";
+import { parseBearerAuthorization } from "../../http/bearer-authorization.js";
 import { routeModule } from "../../http/route-registrar.js";
 import { publicPolicy } from "../../http/authentication-policies.js";
 
@@ -17,8 +18,9 @@ interface SystemRoutesOptions {
 }
 
 function hasMetricsAccess(header: string | string[] | undefined, token: string): boolean {
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
-  const supplied = Buffer.from(header.slice("Bearer ".length));
+  const { token: suppliedToken } = parseBearerAuthorization(header);
+  if (suppliedToken === null) return false;
+  const supplied = Buffer.from(suppliedToken);
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
