@@ -20,7 +20,12 @@ await rm(evidenceFile, { force: true });
 
 async function protectedFiles() {
   const profile = path.join(directory, "profile");
-  const files = (await readdir(path.join(profile, "cache"))).sort();
+  // On case-insensitive filesystems Chromium's Cache directory shares this name.
+  // Compare our protected keys, not Chromium's independently changing cache folders.
+  const files = (await readdir(path.join(profile, "cache"), { withFileTypes: true }))
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".bin"))
+    .map((entry) => entry.name)
+    .sort();
   assert.ok(files.length > 0, "No protected cache key was created");
   files.push("../hype-comms-settings/device-preferences.json");
   return Object.fromEntries(
