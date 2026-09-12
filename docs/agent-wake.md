@@ -1,9 +1,9 @@
 # Agent wake pilot
 
 Status: the default-off transport, broker, private startup-repair core, fresh-authorization gate,
-post-provider durable-write recovery, executable identity pinning, subprocess close barrier,
-strict rollout-evidence manifest validator, and credential-free local evidence journal are
-implemented and verified. The implementation is ready for review. Live Grok Bot activation, an
+post-provider durable-write recovery, executable identity pinning, and subprocess close barrier are
+implemented and verified. Rollout evidence is recorded manually by the rollout owner rather than by
+tooling in this repository. The implementation is ready for review. Live Grok Bot activation, an
 installed signed/notarized pilot, the 24-hour soak, and retirement of the external 15-minute poll
 are owner-run post-merge rollout work, not this PR's definition of done. Wren is the current name of
 the agent formerly called Jules and owns the desktop Wake slice; Wren is not a rollout identity.
@@ -19,8 +19,8 @@ Use this statement for the implementation task:
 > runtime. The runtime can fetch exactly the referenced message through the existing Comms CLI but
 > never receives injected history. Delivery survives reconnects, duplicates, and crashes; keeps
 > credentials out of renderer IPC and logs; and fails visibly on cursor loss or ambiguous
-> activation. Include the signed pilot build lane and strict rollout-evidence tooling. Keep the
-> feature default-off outside explicitly selected builds. Do not change presence, typing, read
+> activation. Include the signed pilot build lane and a documented rollout-evidence record. Keep
+> the feature default-off outside explicitly selected builds. Do not change presence, typing, read
 > receipts, or held work #201, #203, #212, or #223.
 
 Wren owns the desktop implementation slice. The owner-run rollout will select one actual named Grok
@@ -40,8 +40,8 @@ identities are outside this path.
 - The signed macOS arm64 pilot workflow and package verifier assert Wake enablement, updater
   isolation, signing/notarization gates, package contents, and Electron fuses. Normal package and
   release jobs explicitly compile Wake out.
-- The strict evidence validator and credential-free collector are present for the rollout owner;
-  invalid, stale, body-bearing, or unauthoritative evidence fails closed.
+- Rollout evidence is recorded manually by the rollout owner against the documented record format;
+  invalid, stale, body-bearing, or unauthoritative evidence must be treated as failing closed.
 - `npm run check`, `npm run test:db`, the arm64 package verifier, and independent Standards/Spec
   review pass with no P1/P2 findings. No files under the renderer change.
 
@@ -78,9 +78,8 @@ identities are outside this path.
 4. **Expose the target boundary — complete.** The desktop invokes one pinned native adapter through
    a body-free, receipt-aware protocol. Selecting and configuring an actual Grok Bot adapter is
    owner-run rollout work.
-5. **Ship rollout tooling — complete.** The repository includes the signed pilot workflow, private
-   operator surface, evidence collector, and strict validator invoked with
-   `npm run validate:agent-wake-evidence-manifest -- --artifacts /absolute/artifacts /absolute/rollout.ndjson`.
+5. **Ship rollout tooling — complete.** The repository includes the signed pilot workflow and
+   private operator surface; rollout evidence is collected and validated manually.
 6. **Run the rollout — post-merge owner checklist.** Bind the selected Grok Bot, run the packaged
    matrix and soak, then identify and retire exactly its separately managed 15-minute polling job.
 
@@ -441,8 +440,8 @@ default-off build does not count as live target evidence.
   `wakeHostClockMs - serverClockMs`. `messageCommittedAt` and `soakStartedAt` are server-clock
   timestamps. `recordedAt`, broker/provider/fetch/activity observations, and manifest copies of
   external-authority times are wake-host-clock timestamps; retain the authority's original clock in
-  its separately reviewed subject. The verifier subtracts each record's `clockSkewMs` whenever it
-  compares host observations across records or with a server timestamp. Scheduler window durations
+  its separately reviewed subject. Subtract each record's `clockSkewMs` before comparing host
+  observations across records or with a server timestamp. Scheduler window durations
   remain comparisons within one scheduler export, while their observation-record chronology uses
   normalized `recordedAt` values. Measure `latencyMs` from the server event's `occurredAt` to the wake
   host's observation of the approved target-runtime success acknowledgement. Compute the nearest-rank
@@ -563,21 +562,21 @@ have no attempt, new durable enqueue, target receipt, target activity, or exact-
   `poll_zero_execution_summary` share one scheduler system, automation, job, owner, and `PT15M`
   schedule. They carry the approved change/audit IDs and explicit zero-execution interval bounds.
 
-The validator deliberately rejects Wren, Jules, placeholder Bot labels, a target other than
+Reject any record set that contains Wren, Jules, placeholder Bot labels, a target other than
 `grok_bot`, unknown or missing fields, non-production/non-arm64 records, adapter-only receipts for
 accepted live wakes, unsafe free-form or reused evidence references, inconsistent run or identity
 fields, duplicate `caseId` values, incorrect deterministic wake IDs, failed records, stationary
-accepted/suppressed cursors, replays preceding their original activity, and non-chronological
-evidence. Each
-`evidenceReference` is a unique strict basename for a separately retained artifact in the supplied
-private artifact directory. The validator opens every referenced file without following a leaf
-symlink, requires owner-only access and current-user or root ownership, hashes the opened file while
-checking that its metadata did not change during the read, and compares `evidenceDigestSha256`.
+accepted/suppressed cursors, replays preceding their original activity, or non-chronological
+evidence. Each `evidenceReference` is a unique strict basename for a separately retained artifact
+in the private artifact directory. Each referenced file must be opened without following a leaf
+symlink and must show owner-only access and current-user or root ownership. Its digest, hashed
+while open after confirming its metadata did not change during the read, must match
+`evidenceDigestSha256`.
 Each artifact is at most 32 KiB and must itself be one canonical, body-free
 `agent.wake.authority_reference` JSON pointer that matches the run, case, target Bot, identity
 authority, case authority, and observation IDs; carries a digest of the separately retained
 authority subject; and says `independentReviewRequired: true`. This binds the record to the exact
-pointer bytes present during validation without copying logs, messages, credentials, or child
+pointer bytes present at review time without copying logs, messages, credentials, or child
 output into the NDJSON. It neither makes the pointer immutable nor proves the referenced authority
 observation true. Retain minimal authority exports separately and never retain raw conversations or
 secrets as Wake evidence.
@@ -695,127 +694,9 @@ hours after the first accepted soak message and no more than 16 minutes after th
 `poll-disabled` must follow the passing soak; `poll-interval-01-zero` and
 `poll-interval-02-zero` must each cover another full 15 minutes with no execution;
 `poll-two-intervals-zero` summarizes those scheduler audits; and the final push-only DM and mention
-must be committed afterward. The verifier computes nearest-rank p95 and the maximum from the healthy
+must be committed afterward. Compute the nearest-rank p95 and the maximum from the healthy
 latency records after normalizing host timestamps by the recorded
 `wakeHostClockMs - serverClockMs` skew.
-
-Run the fail-closed verifier against a private, owner-or-root-owned, non-symlink regular file that
-is not group- or world-writable:
-
-```sh
-npm run validate:agent-wake-evidence-manifest -- \
-  --artifacts /absolute/path/to/private-artifacts \
-  /absolute/path/to/rollout.ndjson
-```
-
-### Local evidence journal
-
-The credential-free collector in `scripts/collect-agent-wake-evidence.mjs` durably journals one
-already-observed case at a time. It does not contact Hype Comms, the Grok provider, the scheduler,
-or the packaged desktop. For every case, it opens a separately retained private authority export,
-hashes its stable bytes without following symlinks, derives the strict body-free authority pointer,
-computes `evidenceDigestSha256`, and writes the private record and artifact as atomic files. The
-authority export is not copied into the rollout directory. Retain that exact export unchanged—or
-retain a stable authority query that can reproduce it—through independent review. The reviewer must
-rehash or re-query the subject and compare it with `subjectDigestSha256`; a surviving pointer whose
-subject was discarded is not evidence.
-
-Initialize a canonical private directory once:
-
-```sh
-npm run collect:agent-wake-evidence -- \
-  init --run-directory /canonical/absolute/path/to/wake-rollout
-```
-
-Each observation is a canonical owner-only `0600` JSON file with exactly this envelope. `record` is
-the strict rollout record documented above with `evidenceDigestSha256` omitted; the collector
-derives that field. `authoritySubjectPath` identifies the separately retained minimal authority
-export whose digest the pointer records.
-
-```json
-{
-  "version": 1,
-  "type": "agent.wake.evidence_observation",
-  "authoritySubjectPath": "/canonical/absolute/path/to/private-authority-export.json",
-  "record": {
-    "version": 1,
-    "type": "agent.wake.rollout_evidence"
-  }
-}
-```
-
-The abbreviated `record` above only illustrates the envelope; a real observation must contain every
-strict field and the typed `caseEvidence` for its case. Collect it with:
-
-```sh
-npm run collect:agent-wake-evidence -- \
-  collect \
-  --run-directory /canonical/absolute/path/to/wake-rollout \
-  --observation /canonical/absolute/path/to/observation.json
-```
-
-Replaying the exact same observation is idempotent. Reusing a case ID, observation ID, or artifact
-name for different evidence fails closed. The journal also rejects run-identity changes,
-non-chronological normalized timestamps, non-private files, symlinks, changed authority exports,
-schema additions such as a message body, and tampered pointer artifacts. Each contender stages and
-syncs a private record before atomically publishing its UUID-named `.collector-lock-*.json` file.
-The unique pathname is never reused, so one stale contender can be removed without racing a later
-owner at a shared lock path. A well-formed lock is reclaimed automatically only when two liveness
-checks report that its recorded PID does not exist. Simultaneous live contenders fail closed (both
-may back off), a live or reused PID remains the owner, and permission errors, malformed records, or
-any other ambiguous liveness result fail closed. In those ambiguous cases, first prove that no
-collector process is active, retain incident context, and then remove only that exact UUID-named
-lock file. A legacy shared `.collector.lock` also fails closed and requires that manual procedure.
-This PID policy assumes the protected local filesystem required below; it is not suitable for a
-shared filesystem spanning hosts with independent PID namespaces.
-
-The run directory, observation, authority subject, and every ancestor must use canonical paths and
-must be owned by the current account or root. The collector rejects group- or world-writable
-ancestors except a root-owned sticky directory such as the standard Linux `/tmp`; the randomly
-named child and every collector-owned directory and file beneath it remain owner-only `0700` or
-`0600`. Run this on a protected local filesystem. Node exposes leaf `O_NOFOLLOW` and metadata
-checks but not the full descriptor-relative `openat`/`renameat` sequence needed to pin every parent
-across later pathname operations. A same-account or privileged actor able to rename a checked
-ancestor in the small check-to-open window remains a local TOCTOU risk; eliminating it requires a
-native descriptor-relative helper.
-
-Create an inspectable partial NDJSON snapshot during the run:
-
-```sh
-npm run collect:agent-wake-evidence -- \
-  snapshot --run-directory /canonical/absolute/path/to/wake-rollout
-```
-
-An exact idempotent collection retry leaves this snapshot intact. Before committing any new journal
-record, the collector durably removes `rollout.ndjson`, so an older snapshot cannot remain beside a
-newer journal after a crash. Run `snapshot` again whenever an updated partial view is needed.
-
-After the soak and poll-retirement cases are collected, `finalize` rebuilds `rollout.ndjson` from
-the private numbered journal and runs the complete manifest and artifact validator against a
-private fsynced candidate. It atomically publishes that candidate only after validation passes; a
-failed finalize leaves no new official manifest and preserves any previously published snapshot:
-
-```sh
-npm run collect:agent-wake-evidence -- \
-  finalize --run-directory /canonical/absolute/path/to/wake-rollout
-```
-
-The collector closes the unsafe local file-assembly gap, but it is not a live test driver and does
-not make an operator-authored record authoritative. The rollout still needs trusted producers for
-clock-skew observations, packaged broker status/evidence, provider activation and exact-fetch
-correlation, server fault injection, host/process inspection, security scans, scheduled soak
-heartbeats, and scheduler inventory/disable/zero-execution exports. It also needs an orchestrator to
-drive the matrix and keep heartbeat gaps below 16 minutes. Until those producers and the actual
-Grok Bot binding exist, the repository cannot run the 24-hour soak unattended.
-
-The manifest validator and adversarial fixtures are implemented in
-`scripts/validate-agent-wake-evidence-manifest.mjs` and its test. This command is only a preflight:
-it checks strict NDJSON shape, cross-record arithmetic, private artifact existence, and artifact
-digests. It does not certify the rollout. Artifact hashing proves existence and integrity, not the
-truth of an arbitrary file's claim. Completion review must independently inspect or query the
-referenced target, package, host/process, server, and scheduler authorities. Live authority
-producers and that independent review are still required; collected operator-authored records and
-artifacts alone are not rollout proof.
 
 ### Repository and packaged macOS lane
 
