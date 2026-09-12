@@ -359,6 +359,14 @@ interface; its Electron implementation is validated IPC to main, while a future 
 implementation could supply `fetch`/WebSocket without changing stores or views. The
 renderer does not get direct production-network access.
 
+`workspace-projection.ts` owns deterministic message retention, tombstones, entity ordering,
+task versions, conversation summaries, unread/mention accounting, and thread-summary rules.
+The persistent cache, memory cache, and runtime use those functions. They take records and
+return projections without I/O or mutations to their inputs. The caches retain encryption,
+transaction, cancellation, event deduplication, and cursor ownership. The runtime still applies
+the shared rules to its view after cache commit; returning committed changes from the cache
+is the next remediation step.
+
 Only routing and ordering metadata (entity IDs, conversation IDs, timestamps,
 sequence/cursor, record version, and outbox status) is cleartext in IndexedDB. Message
 bodies, reaction emoji, task titles/descriptions/dates, member/workspace display data, attachment
