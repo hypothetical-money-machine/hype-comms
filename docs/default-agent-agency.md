@@ -38,10 +38,9 @@ mentioned member IDs; the server verifies that each ID is an active member whose
 matches the text before storing or notifying. `messages:write` never makes raw text an authorization
 signal.
 
-`attachments-v1` is wire-format negotiation, not an authorization grant. The CLI advertises it when
-listing or downloading files so attachment projections are present. The server still requires
-`workspace:read` and checks that the caller can see the attachment's conversation. A capability
-header cannot expand conversation visibility. The default profile is read-only: it cannot create an
+Workspace protocol 2 includes canonical attachment projections. The server requires
+`workspace:read` and checks visibility of the attachment's conversation. Headers cannot expand
+conversation visibility. The default profile is read-only: it cannot create an
 upload, write or complete bytes, or attach staged bytes to a message. The explicit
 `attachments:write` scope is reserved for owner-selected credentials and migrated credentials that
 already had upload access through `messages:write`.

@@ -1,10 +1,8 @@
-import { randomUUID } from "node:crypto";
-
 import {
   agentCurrentPrincipalSchema,
+  agentSchema,
   agentScopeSchema,
   agentScopesSchema,
-  agentSchema,
   agentTokenSchema,
   authKitProviderSessionIdSchema,
   deviceSessionSchema,
@@ -32,6 +30,7 @@ import {
   type WorkspaceMembership,
   type WorkspaceRole,
 } from "@hype-comms/contracts";
+import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { z } from "zod";
 
@@ -96,8 +95,7 @@ interface AuthenticatedAgentRow extends QueryResultRow {
 }
 
 /** How stale an agent token's `last_used_at` may be before authentication refreshes it. */
-const AGENT_TOKEN_LAST_USED_REFRESH_MS = 60_000;
-
+const AGENT_TOKEN_LAST_USED_REFRESH_MS = 60000;
 interface WorkspaceRow extends QueryResultRow {
   readonly id: unknown;
   readonly name: unknown;
@@ -175,8 +173,9 @@ const magicLinkRecordSchema = z
   })
   .strict();
 const countRowSchema = z.object({ count: z.coerce.number().int().nonnegative() }).strict();
-
-export type IdentityUser = User & { readonly email: Email | null };
+export type IdentityUser = User & {
+  readonly email: Email | null;
+};
 export type MagicLinkRecord = z.infer<typeof magicLinkRecordSchema>;
 
 export interface InsertUserInput {
@@ -258,14 +257,25 @@ export interface AuthenticatedAgent {
 }
 
 export type ConsumeMagicLinkResult =
-  | { readonly status: "consumed"; readonly magicLink: MagicLinkRecord }
-  | { readonly status: "already_consumed"; readonly magicLink: MagicLinkRecord }
-  | { readonly status: "not_found" };
-
+  | {
+      readonly status: "consumed";
+      readonly magicLink: MagicLinkRecord;
+    }
+  | {
+      readonly status: "already_consumed";
+      readonly magicLink: MagicLinkRecord;
+    }
+  | {
+      readonly status: "not_found";
+    };
 export type RotateDeviceSessionResult =
-  | { readonly status: "rotated"; readonly session: DeviceSession }
-  | { readonly status: "unavailable" };
-
+  | {
+      readonly status: "rotated";
+      readonly session: DeviceSession;
+    }
+  | {
+      readonly status: "unavailable";
+    };
 export interface RefreshDeviceSessionInput {
   readonly previousTokenHash: Buffer;
   readonly nextTokenHash: Buffer;
@@ -274,10 +284,17 @@ export interface RefreshDeviceSessionInput {
 }
 
 export type RefreshDeviceSessionResult =
-  | { readonly status: "rotated"; readonly session: DeviceSession }
-  | { readonly status: "reused"; readonly deviceSessionId: EntityId }
-  | { readonly status: "unavailable" };
-
+  | {
+      readonly status: "rotated";
+      readonly session: DeviceSession;
+    }
+  | {
+      readonly status: "reused";
+      readonly deviceSessionId: EntityId;
+    }
+  | {
+      readonly status: "unavailable";
+    };
 function timestamp(value: unknown): string {
   if (!(value instanceof Date)) {
     throw new TypeError("Expected Postgres to return a timestamptz value as a Date");
@@ -390,8 +407,11 @@ export async function publishHumanActivationSyncEvents(
     throw new Error("Activated human is not an active workspace member");
   }
   const member = mapPublicUser(memberRow);
-
-  const conversationResult = await client.query<{ id: string } & QueryResultRow>(
+  const conversationResult = await client.query<
+    {
+      id: string;
+    } & QueryResultRow
+  >(
     `SELECT id
        FROM conversations
       WHERE workspace_id = $1
@@ -399,7 +419,11 @@ export async function publishHumanActivationSyncEvents(
       ORDER BY id`,
     [workspaceId],
   );
-  const audienceResult = await client.query<{ user_id: string } & QueryResultRow>(
+  const audienceResult = await client.query<
+    {
+      user_id: string;
+    } & QueryResultRow
+  >(
     `SELECT membership.user_id
        FROM workspace_memberships AS membership
        JOIN users AS user_account ON user_account.id = membership.user_id
@@ -429,8 +453,7 @@ export async function publishHumanActivationSyncEvents(
     });
   }
 }
-
-function mapAgentToken(row: AgentTokenRow, includeEffectiveScopes = false): AgentToken {
+function mapAgentToken(row: AgentTokenRow): AgentToken {
   return agentTokenSchema.parse({
     id: row.id,
     agentUserId: row.agent_user_id,
@@ -439,7 +462,7 @@ function mapAgentToken(row: AgentTokenRow, includeEffectiveScopes = false): Agen
     // additive effective list so compatibility grants are visible without changing the legacy
     // field's meaning or breaking previous strict clients.
     scopes: row.scopes,
-    ...(includeEffectiveScopes ? { effectiveScopes: effectiveAgentScopes(row) } : {}),
+    ...{ effectiveScopes: effectiveAgentScopes(row) },
     createdBy: row.created_by,
     createdAt: timestamp(row.created_at),
     lastUsedAt: nullableTimestamp(row.last_used_at),
@@ -661,12 +684,11 @@ export class IdentityRepository {
   }
 
   async findFirstWorkspace(): Promise<Workspace | null> {
-    const result = await this.#database.query<WorkspaceRow>(
-      `SELECT id, name, slug, created_by, created_at, updated_at
+    const result = await this.#database
+      .query<WorkspaceRow>(`SELECT id, name, slug, created_by, created_at, updated_at
          FROM workspaces
         ORDER BY created_at, id
-        LIMIT 1`,
-    );
+        LIMIT 1`);
     return firstOrNull(result, mapWorkspace);
   }
 
@@ -1307,11 +1329,7 @@ export class IdentityRepository {
       payload: { member: mapAgentDirectoryUser(agent.user) },
     });
   }
-
-  async insertAgentToken(
-    input: InsertAgentTokenInput,
-    includeEffectiveScopes = false,
-  ): Promise<AgentToken> {
+  async insertAgentToken(input: InsertAgentTokenInput): Promise<AgentToken> {
     const result = await this.#database.query<AgentTokenRow>(
       `INSERT INTO agent_tokens (
          id, workspace_id, agent_user_id, token_hash, label, scopes,
@@ -1331,14 +1349,9 @@ export class IdentityRepository {
         input.createdAt,
       ],
     );
-    return mapAgentToken(result.rows[0] as AgentTokenRow, includeEffectiveScopes);
+    return mapAgentToken(result.rows[0] as AgentTokenRow);
   }
-
-  async listAgentTokens(
-    workspaceId: EntityId,
-    agentUserId: EntityId,
-    includeEffectiveScopes = false,
-  ): Promise<AgentToken[]> {
+  async listAgentTokens(workspaceId: EntityId, agentUserId: EntityId): Promise<AgentToken[]> {
     const result = await this.#database.query<AgentTokenRow>(
       `SELECT id, agent_user_id, label, scopes, inherited_channels_join,
               inherited_attachments_write, created_by, created_at, last_used_at, revoked_at
@@ -1348,7 +1361,7 @@ export class IdentityRepository {
         LIMIT 1000`,
       [workspaceId, agentUserId],
     );
-    return result.rows.map((row) => mapAgentToken(row, includeEffectiveScopes));
+    return result.rows.map((row) => mapAgentToken(row));
   }
 
   async revokeAgentToken(

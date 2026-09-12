@@ -36,7 +36,7 @@ it(
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
     let authenticatedDownloadSeen = false;
     const server = createServer((request, response) => {
-      if (request.method !== "GET" || request.url !== `/v1/files/${ATTACHMENT_ID}/content`) {
+      if (request.method !== "GET" || request.url !== `/v2/files/${ATTACHMENT_ID}/content`) {
         response.writeHead(404).end();
         return;
       }
@@ -45,6 +45,7 @@ it(
         request.headers.accept === "application/octet-stream" &&
         request.headers["accept-encoding"] === "identity";
       response.writeHead(200, {
+        "x-hype-comms-protocol": "2",
         "content-length": String(bytes.byteLength),
         "content-type": "application/octet-stream",
         "x-content-sha256": contentSha256,

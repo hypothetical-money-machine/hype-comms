@@ -1,3 +1,4 @@
+import type { Pool } from "pg";
 import { WorkspaceAttachmentOperations } from "./attachment-operations.js";
 import { ConversationEventWriter } from "./conversation-events.js";
 import { WorkspaceConversationOperations } from "./conversation-operations.js";
@@ -8,16 +9,9 @@ import { WorkspaceTaskOperations } from "./task-operations.js";
 import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import { enableDefaultAgentAgency } from "./workspace-initialization.js";
 import { WorkspaceRetention } from "./workspace-retention.js";
-export type {
-  ConsumedRealtimeTicket,
-  WorkspaceClientCapabilities,
-  WorkspacePrincipal,
-} from "./sync-operations.js";
+export type { ConsumedRealtimeTicket, WorkspacePrincipal } from "./sync-operations.js";
 export type { AnnouncementAuditRecord, WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 export type { AttachmentCleanupFailure } from "./workspace-retention.js";
-
-import type { Pool } from "pg";
-
 export class WorkspaceRepository {
   private readonly retention: WorkspaceRetention;
   private readonly systemChannelSeeder: SystemChannelSeeder;
@@ -67,26 +61,6 @@ export class WorkspaceRepository {
     ...args: Parameters<WorkspaceConversationOperations["listMembers"]>
   ): ReturnType<WorkspaceConversationOperations["listMembers"]> {
     return this.conversations.listMembers(...args);
-  }
-
-  requireGroupDirectMessagesForConversations(
-    ...args: Parameters<
-      WorkspaceConversationOperations["requireGroupDirectMessagesForConversations"]
-    >
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForConversations"]> {
-    return this.conversations.requireGroupDirectMessagesForConversations(...args);
-  }
-
-  requireGroupDirectMessagesForMessages(
-    ...args: Parameters<WorkspaceConversationOperations["requireGroupDirectMessagesForMessages"]>
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForMessages"]> {
-    return this.conversations.requireGroupDirectMessagesForMessages(...args);
-  }
-
-  requireGroupDirectMessagesForAttachments(
-    ...args: Parameters<WorkspaceConversationOperations["requireGroupDirectMessagesForAttachments"]>
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForAttachments"]> {
-    return this.conversations.requireGroupDirectMessagesForAttachments(...args);
   }
 
   canViewConversation(

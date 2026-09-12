@@ -1,3 +1,7 @@
+> Workspace protocol 2 requires the matching CLI release. The CLI owns protocol validation and
+> rejects incompatible servers before Hermes can consume their output. The versioned CLI adapter
+> output contract is a separate remediation milestone.
+
 # Hype Comms platform plugin for Hermes
 
 This directory is a drop-in Hermes platform plugin. It makes a Hype Comms agent
@@ -72,7 +76,7 @@ NousResearch/hermes-agent commit
   (`[SILENT]`, `SILENT`, `NO_REPLY`, `NO REPLY`), matched against a whole
   response only
 
-The installed `hype-comms-cli` must also support capability-gated context
+The installed `hype-comms-cli` must support protocol-2 context
 history and read-cursor advancement:
 
 ```text
@@ -314,9 +318,8 @@ it, and the agent decides for itself whether to answer.
 
 The adapter does not have to subscribe to anything to see those messages. It
 already receives every `message.created` event for the conversations it belongs
-to, and it discards the unmentioned ones itself. What the
-`participated-thread-notifications-v1` capability adds is precision: the server
-marks the thread replies that land in threads this agent has written in, so the
+to, and it filters the unmentioned ones itself. In protocol 2 the server
+marks replies in threads this agent has written in, so the
 agent can wake on those alone instead of waking on all thread traffic or
 keeping its own ledger of where it has spoken. The marking is per recipient and
 never travels in the shared event payload.

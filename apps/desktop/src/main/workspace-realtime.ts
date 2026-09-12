@@ -1,20 +1,23 @@
 import { randomUUID } from "node:crypto";
+import { WorkspaceProtocolError } from "./workspace-protocol";
 
 import {
   clientPresenceActivityFrameSchema,
   clientTypingActivityFrameSchema,
   ephemeralActivityFrameSchema,
+  isWorkspaceProtocolMismatch,
   productRealtimeEventSchema,
   realtimeEventEnvelopeSchema,
+  WORKSPACE_PROTOCOL_HEADER,
   type ClientEphemeralActivityFrame,
-  type ProductRealtimeEvent,
   type PresenceState,
+  type ProductRealtimeEvent,
   type RealtimeAcknowledgement,
   type RealtimeConnectionState,
   type RealtimeSessionScope,
   type RealtimeTicketResponse,
-  type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
+  type ScopedProductRealtimeEvent,
   type ScopedTypingActivityUpdate,
 } from "@hype-comms/contracts";
 import WebSocket, { type RawData } from "ws";
@@ -57,6 +60,7 @@ export type { RealtimeConnectionState };
 export type WorkspaceRealtimeScope = Pick<RealtimeSessionScope, "userId" | "workspaceId">;
 
 export type RealtimeDropReason =
+  | "protocol-mismatch"
   | "invalid-envelope"
   | "late-ticket"
   | "renderer-delivery"
@@ -451,6 +455,11 @@ export class WorkspaceRealtime {
         return;
       }
       this.#ticketEpoch = null;
+      if (error instanceof WorkspaceProtocolError) {
+        this.#incompatible = true;
+        this.#deliverState("incompatible");
+        return;
+      }
       reportMainProcessError("Could not obtain a realtime ticket", error);
       this.#scheduleReconnect(epoch);
       return;
@@ -462,7 +471,7 @@ export class WorkspaceRealtime {
     }
     this.#ticketEpoch = null;
 
-    const url = new URL("/v1/realtime", this.#apiOrigin);
+    const url = new URL("/v2/realtime", this.#apiOrigin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("ticket", ticket.ticket);
     url.searchParams.set("after", this.#cursor);
@@ -512,6 +521,17 @@ export class WorkspaceRealtime {
     });
     socket.on("message", (data: RawData) => {
       this.#handleMessage(connection, data);
+    });
+    socket.once("unexpected-response", (_request, response) => {
+      const major = response.headers[WORKSPACE_PROTOCOL_HEADER];
+      const mismatch = isWorkspaceProtocolMismatch({
+        status: response.statusCode ?? 500,
+        headers: { get: () => (Array.isArray(major) ? major.join(",") : (major ?? null)) },
+      });
+      response.destroy();
+      if (!this.#isActiveConnection(connection)) return;
+      if (mismatch) this.#failIncompatible(connection, "protocol-mismatch");
+      else this.#retireConnection(connection, true);
     });
     socket.on("error", (error) => {
       if (!this.#isActiveConnection(connection)) return;
@@ -686,7 +706,10 @@ export class WorkspaceRealtime {
 
   #failIncompatible(
     connection: ActiveConnection,
-    reason: Extract<RealtimeDropReason, "wrong-user" | "wrong-workspace" | "invalid-envelope">,
+    reason: Extract<
+      RealtimeDropReason,
+      "wrong-user" | "wrong-workspace" | "invalid-envelope" | "protocol-mismatch"
+    >,
   ): void {
     if (!this.#isActiveConnection(connection)) {
       this.#onDrop("stale-socket");

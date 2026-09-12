@@ -37,7 +37,7 @@ export async function authCommand(
     const client = await clientFromContext(context);
     const response = await client.request({
       method: "POST",
-      path: "/v1/auth/magic-link",
+      path: "/v2/auth/magic-link",
       body: { email: email! },
       requestSchema: requestMagicLinkSchema,
       responseSchema: magicLinkRequestedSchema,
@@ -62,7 +62,7 @@ export async function authCommand(
     });
     const result = await client.requestWithResponse({
       method: "POST",
-      path: "/v1/auth/session",
+      path: "/v2/auth/session",
       body: input.data,
       requestSchema: verifyMagicLinkSchema,
       responseSchema: currentUserSchema,
@@ -105,7 +105,7 @@ export async function authCommand(
       timeoutMs: context.options.timeoutMs,
     });
     const principal = await client.request({
-      path: "/v1/auth/me",
+      path: "/v2/auth/me",
       responseSchema: currentPrincipalSchema,
     });
     if (!("type" in principal) || principal.type !== "agent") {
@@ -137,7 +137,7 @@ export async function authCommand(
     const principal = await (
       await clientFromContext(context)
     ).request({
-      path: "/v1/auth/me",
+      path: "/v2/auth/me",
       responseSchema: currentPrincipalSchema,
     });
     writeResult(context.runtime.io, principal, context.options.json);
@@ -171,7 +171,7 @@ export async function authCommand(
       });
       const response = await client.requestEmpty({
         method: "POST",
-        path: "/v1/auth/session/refresh",
+        path: "/v2/auth/session/refresh",
       });
       const rotated = sessionTokenSchema.safeParse(sessionTokenFromHeaders(response.headers));
       if (!rotated.success) throw contractError("The server did not rotate the session credential");
@@ -207,7 +207,7 @@ export async function authCommand(
           profile,
           fetch: context.runtime.fetch,
           timeoutMs: context.options.timeoutMs,
-        }).requestEmpty({ method: "DELETE", path: "/v1/auth/session" });
+        }).requestEmpty({ method: "DELETE", path: "/v2/auth/session" });
       }
       delete stored.credential;
       delete stored.enrollmentOffer;
@@ -225,7 +225,7 @@ export async function authCommand(
       const devices = await (
         await clientFromContext(context)
       ).request({
-        path: "/v1/auth/devices",
+        path: "/v2/auth/devices",
         responseSchema: deviceSessionSchema.array(),
       });
       writeResult(context.runtime.io, devices, context.options.json);
@@ -240,7 +240,7 @@ export async function authCommand(
         await clientFromContext(context)
       ).requestEmpty({
         method: "DELETE",
-        path: `/v1/auth/devices/${id.data}`,
+        path: `/v2/auth/devices/${id.data}`,
       });
       writeResult(context.runtime.io, { revoked: id.data }, context.options.json);
       return;

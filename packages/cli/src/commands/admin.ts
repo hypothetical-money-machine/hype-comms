@@ -29,7 +29,7 @@ async function resolveAgent(client: ApiClient, selector: string): Promise<string
   if (id.success) return id.data;
   const normalized = selector.replace(/^@/u, "").toLocaleLowerCase("en-US");
   const response = await client.request({
-    path: "/v1/agents",
+    path: "/v2/agents",
     responseSchema: listAgentsResponseSchema,
   });
   const matches = response.agents.filter(
@@ -50,7 +50,7 @@ export async function invitationsCommand(
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
     const response = await client.request({
-      path: "/v1/invitations",
+      path: "/v2/invitations",
       responseSchema: listInvitationsResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -61,7 +61,7 @@ export async function invitationsCommand(
     const [email] = requirePositionals(parsed, 1);
     const response = await client.request({
       method: "POST",
-      path: "/v1/invitations",
+      path: "/v2/invitations",
       body: { email: email!, role: "member" as const },
       requestSchema: createInvitationSchema,
       responseSchema: invitationSchema,
@@ -78,7 +78,7 @@ export async function invitationsCommand(
     }
     await client.requestEmpty({
       method: "DELETE",
-      path: `/v1/invitations/${invitationId.data}`,
+      path: `/v2/invitations/${invitationId.data}`,
     });
     writeResult(context.runtime.io, { revoked: invitationId.data }, context.options.json);
     return;
@@ -95,7 +95,7 @@ export async function agentsCommand(
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
     const response = await client.request({
-      path: "/v1/agents",
+      path: "/v2/agents",
       responseSchema: listAgentsResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -110,7 +110,7 @@ export async function agentsCommand(
     if (displayName === undefined) throw new UsageError("agents create requires --display-name");
     const response = await client.request({
       method: "POST",
-      path: "/v1/agents",
+      path: "/v2/agents",
       body: { username: username!, displayName },
       requestSchema: createAgentRequestSchema,
       responseSchema: createAgentResponseSchema,
@@ -122,7 +122,7 @@ export async function agentsCommand(
     const parsed = parseCommandArguments(args, {});
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolveAgent(client, selector!);
-    await client.requestEmpty({ method: "DELETE", path: `/v1/agents/${id}` });
+    await client.requestEmpty({ method: "DELETE", path: `/v2/agents/${id}` });
     writeResult(context.runtime.io, { disabled: id }, context.options.json);
     return;
   }
@@ -140,7 +140,7 @@ export async function agentTokensCommand(
     const [agentSelector] = requirePositionals(parsed, 1);
     const agentId = await resolveAgent(client, agentSelector!);
     const response = await client.request({
-      path: `/v1/agents/${agentId}/tokens`,
+      path: `/v2/agents/${agentId}/tokens`,
       responseSchema: listAgentTokensResponseSchema,
     });
     writeResult(context.runtime.io, { agentId, ...response }, context.options.json);
@@ -166,7 +166,7 @@ export async function agentTokensCommand(
     };
     const response = await client.request({
       method: "POST",
-      path: `/v1/agents/${agentId}/tokens`,
+      path: `/v2/agents/${agentId}/tokens`,
       body,
       requestSchema: createAgentTokenRequestSchema,
       responseSchema: createAgentTokenResponseSchema,
@@ -182,7 +182,7 @@ export async function agentTokensCommand(
     const agentId = await resolveAgent(client, agentSelector!);
     await client.requestEmpty({
       method: "DELETE",
-      path: `/v1/agents/${agentId}/tokens/${tokenId.data}`,
+      path: `/v2/agents/${agentId}/tokens/${tokenId.data}`,
     });
     writeResult(context.runtime.io, { agentId, revoked: tokenId.data }, context.options.json);
     return;

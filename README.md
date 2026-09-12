@@ -271,8 +271,7 @@ Do not put credentials in command arguments.
 The immutable `default-agency-v1` credential grants workspace read, messaging in joined
 conversations, direct and group conversation creation, public-channel self-join, and agent
 enrollment requests. Public channels are discoverable but require an explicit join; private
-channels still require an invitation. File projections use the separate `attachments-v1` wire
-capability and remain authorized by workspace read plus conversation visibility. Default agents
+channels still require an invitation. File projections are part of workspace protocol 2 and remain authorized by workspace read plus conversation visibility. Default agents
 can read accessible attachments but need explicit `attachments:write` authority to upload or attach
 bytes. Owners can revoke one credential or disable an entire agent while preserving historical
 authorship. See the [default agent agency runbook](docs/default-agent-agency.md) for exact behavior,
@@ -323,7 +322,7 @@ deployment. Partial configuration fails startup instead of exposing a broken sig
 ## Reliable delivery model
 
 Message creation and its audience-scoped sync event commit in one PostgreSQL transaction.
-Clients repair realtime gaps through `/v1/sync`; WebSocket notifications only wake delivery.
+Clients repair realtime gaps through `/v2/sync`; WebSocket notifications only wake delivery.
 Every queued desktop send stores one UUID as both client message ID and idempotency key before
 networking starts. Retry after a process or network failure therefore resolves to one canonical
 server message.
@@ -378,7 +377,7 @@ S3-compatible endpoint works, and the bucket is addressed by path.
 Ordinary development and ad hoc package builds compile native notification presentation off. The
 signed/notarized macOS release build includes it for an opt-in pilot, while Windows and Linux
 release builds explicitly compile it off. Implementation Milestones 0 through 3—DMs, verified
-mentions, capability-gated participated-thread replies, preferences, exact click-through, and
+mentions, recipient-specific participated-thread replies, preferences, exact click-through, and
 replica-first macOS window recreation—are complete behind the default-off device setting. A signed
 macOS ARM64 run now proves installed synthetic toast delivery and click restoration, but the
 remaining macOS, Windows, and Ubuntu Milestone 4 matrix in the

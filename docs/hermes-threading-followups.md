@@ -1,5 +1,11 @@
 # Hermes threading: what shipped, and what is still open
 
+This document records the original threading implementation. Protocol 2 removes the capability
+negotiation described below: threads use the canonical shape and notification reasons are
+reconstructed for the authenticated recipient. Current operations are documented in
+[workspace protocol 2](workspace-protocol.md) and the
+[Hermes README](../integrations/hermes-hype-comms/README.md). The test count below is historical.
+
 ## Status
 
 Threading and its follow-ups are implemented in the working tree. The adapter resolves the thread

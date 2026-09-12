@@ -12,8 +12,8 @@ describe("request-log path redaction", () => {
     expect(redactedRequestPath(`/v1/webhooks/incoming/${token}/unexpected?debug=true`)).toBe(
       "/v1/webhooks/incoming/[REDACTED]",
     );
-    expect(redactedRequestPath("/v1/channels/example/messages?limit=50")).toBe(
-      "/v1/channels/example/messages",
+    expect(redactedRequestPath("/v2/channels/example/messages?limit=50")).toBe(
+      "/v2/channels/example/messages",
     );
   });
 });

@@ -140,7 +140,7 @@ describe("magic-link throttle scoping", () => {
     const request = (email: Email) =>
       app.inject({
         method: "POST",
-        url: "/v1/auth/magic-link",
+        url: "/v2/auth/magic-link",
         remoteAddress: "198.51.100.10",
         payload: { email },
       });

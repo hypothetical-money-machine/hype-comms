@@ -4,19 +4,17 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  ATTACHMENTS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   DEFAULT_AGENCY_AGENT_SCOPES,
   agentCurrentPrincipalSchema,
-  agentEnrollmentResponseSchema,
   agentEnrollmentPolicyResponseSchema,
+  agentEnrollmentResponseSchema,
   apiErrorEnvelopeSchema,
   conversationMutationResponseSchema,
   createFileUploadResponseSchema,
-  messageHistoryResponseSchema,
   listAgentEnrollmentsResponseSchema,
   listConversationsResponseSchema,
+  messageHistoryResponseSchema,
   redeemAgentEnrollmentResponseSchema,
   sendMessageResponseSchema,
   syncResponseSchema,
@@ -24,7 +22,7 @@ import {
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
 import { type QueryResultRow } from "pg";
-import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { createPool } from "../src/db/pool.js";
@@ -291,7 +289,7 @@ describe("AgentEnrollmentModule", () => {
     const messageId = randomUUID();
     const sent = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${restrictedId}/messages`,
+      url: `/v2/conversations/${restrictedId}/messages`,
       headers: {
         authorization: `Bearer ${candidate.token}`,
         "idempotency-key": messageId,
@@ -309,7 +307,7 @@ describe("AgentEnrollmentModule", () => {
     const sentMessage = sendMessageResponseSchema.parse(sent.json()).message;
     const history = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${restrictedId}/messages?limit=50`,
+      url: `/v2/conversations/${restrictedId}/messages?limit=50`,
       headers: { authorization: `Bearer ${candidate.token}` },
     });
     expect(history.statusCode).toBe(200);
@@ -681,7 +679,7 @@ describe("AgentEnrollmentModule", () => {
     });
   });
 
-  it("projects private channel names only to capable active owners", async () => {
+  it("returns private channel names only to active owners", async () => {
     await pool.query(
       "DELETE FROM conversation_memberships WHERE conversation_id = $1 AND user_id = $2",
       [restrictedId, ownerId],
@@ -743,36 +741,36 @@ describe("AgentEnrollmentModule", () => {
     apps.push(app);
     const legacyOwnerResponse = await app.inject({
       method: "GET",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const capableOwnerResponse = await app.inject({
       method: "GET",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
-        "x-hype-comms-capabilities": AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
+        "x-hype-comms-capabilities": "agent-enrollment-review-channels-v1",
       },
     });
     const capableAgentResponse = await app.inject({
       method: "GET",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         authorization: `Bearer ${token.token}`,
-        "x-hype-comms-capabilities": AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
+        "x-hype-comms-capabilities": "agent-enrollment-review-channels-v1",
       },
     });
     const ordinaryConversationsResponse = await app.inject({
       method: "GET",
-      url: "/v1/conversations?limit=50",
+      url: "/v2/conversations?limit=50",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
 
     expect(legacyOwnerResponse.statusCode).toBe(200);
     const legacyOwner = listAgentEnrollmentsResponseSchema.parse(legacyOwnerResponse.json());
-    expect(legacyOwner.enrollments.find((item) => item.id === ownerRequest.id)).not.toHaveProperty(
-      "restrictedChannels",
-    );
+    expect(
+      legacyOwner.enrollments.find((item) => item.id === ownerRequest.id)?.restrictedChannels,
+    ).toEqual([{ conversationId: restrictedId, name: "Secret" }]);
 
     expect(capableOwnerResponse.statusCode).toBe(200);
     expect(capableOwnerResponse.headers["cache-control"]).toBe("no-store");
@@ -1392,7 +1390,7 @@ describe("AgentEnrollmentModule", () => {
     const candidate = candidateInput("bodyless-cancel-child");
     const requested = await app.inject({
       method: "POST",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": "bodyless-cancel-request",
@@ -1403,13 +1401,13 @@ describe("AgentEnrollmentModule", () => {
 
     const withBody = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${enrollmentId}/cancel`,
+      url: `/v2/agent-enrollments/${enrollmentId}/cancel`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { unexpected: true },
     });
     const withoutBody = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${enrollmentId}/cancel`,
+      url: `/v2/agent-enrollments/${enrollmentId}/cancel`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
 
@@ -1430,7 +1428,7 @@ describe("AgentEnrollmentModule", () => {
     const candidate = candidateInput("bodyless-redeem-child");
     const requested = await app.inject({
       method: "POST",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": "bodyless-redeem-request",
@@ -1440,20 +1438,20 @@ describe("AgentEnrollmentModule", () => {
     const enrollmentId = agentEnrollmentResponseSchema.parse(requested.json()).enrollment.id;
     await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${enrollmentId}/review`,
+      url: `/v2/agent-enrollments/${enrollmentId}/review`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { decision: "approve" },
     });
 
     const withBody = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${enrollmentId}/redeem`,
+      url: `/v2/agent-enrollments/${enrollmentId}/redeem`,
       headers: { authorization: `Enrollment ${candidate.token}` },
       payload: { unexpected: true },
     });
     const withoutBody = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${enrollmentId}/redeem`,
+      url: `/v2/agent-enrollments/${enrollmentId}/redeem`,
       headers: { authorization: `Enrollment ${candidate.token}` },
     });
 
@@ -1496,7 +1494,7 @@ describe("AgentEnrollmentModule", () => {
       },
     });
     apps.push(enabled, disabled);
-    const url = `/v1/agent-enrollments/${requested.id}/redeem`;
+    const url = `/v2/agent-enrollments/${requested.id}/redeem`;
     const unauthenticatedRequests = [
       {},
       { headers: { authorization: "Enrollment invalid" } },
@@ -1512,7 +1510,7 @@ describe("AgentEnrollmentModule", () => {
       expect(disabledResponse.json()).toEqual(enabledResponse.json());
     }
 
-    const missingUrl = `/v1/agent-enrollments/${randomUUID()}/redeem`;
+    const missingUrl = `/v2/agent-enrollments/${randomUUID()}/redeem`;
     const enabledMissing = await enabled.inject({
       method: "POST",
       url: missingUrl,
@@ -1556,7 +1554,7 @@ describe("AgentEnrollmentModule", () => {
     const candidate = candidateInput("route-child");
     const request = await app.inject({
       method: "POST",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": "route-request",
@@ -1568,14 +1566,14 @@ describe("AgentEnrollmentModule", () => {
     const requested = agentEnrollmentResponseSchema.parse(request.json()).enrollment;
     await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${requested.id}/review`,
+      url: `/v2/agent-enrollments/${requested.id}/review`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { decision: "approve" },
     });
     const wrongCandidate = candidateInput("wrong-route-child");
     const wrongRedemption = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${requested.id}/redeem`,
+      url: `/v2/agent-enrollments/${requested.id}/redeem`,
       headers: { authorization: `Enrollment ${wrongCandidate.token}` },
     });
     expect(wrongRedemption.statusCode).toBe(401);
@@ -1586,7 +1584,7 @@ describe("AgentEnrollmentModule", () => {
     );
     const redeemed = await app.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${requested.id}/redeem`,
+      url: `/v2/agent-enrollments/${requested.id}/redeem`,
       headers: { authorization: `Enrollment ${candidate.token}` },
     });
     expect(redeemed.statusCode).toBe(200);
@@ -1615,7 +1613,7 @@ describe("AgentEnrollmentModule", () => {
     apps.push(gated);
     const blockedRedemption = await gated.inject({
       method: "POST",
-      url: `/v1/agent-enrollments/${rollbackRequest.id}/redeem`,
+      url: `/v2/agent-enrollments/${rollbackRequest.id}/redeem`,
       headers: { authorization: `Enrollment ${rollbackCandidate.token}` },
     });
     expect(blockedRedemption.statusCode).toBe(503);
@@ -1628,7 +1626,7 @@ describe("AgentEnrollmentModule", () => {
     ).toEqual([]);
     const blocked = await gated.inject({
       method: "POST",
-      url: "/v1/agent-enrollments",
+      url: "/v2/agent-enrollments",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": "blocked-request",
@@ -1640,7 +1638,7 @@ describe("AgentEnrollmentModule", () => {
 
     const policy = await app.inject({
       method: "GET",
-      url: "/v1/agent-enrollment-policy",
+      url: "/v2/agent-enrollment-policy",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(agentEnrollmentPolicyResponseSchema.parse(policy.json()).policy.mode).toBe("required");
@@ -1672,7 +1670,7 @@ describe("AgentEnrollmentModule", () => {
       const authorization = { authorization: `Bearer ${candidate.token}` };
       const capableAuthorization = {
         ...authorization,
-        "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+        "x-hype-comms-capabilities": "attachments-v1",
       };
       const uploadReadyFile = async (
         headers: Readonly<Record<string, string>>,
@@ -1684,7 +1682,7 @@ describe("AgentEnrollmentModule", () => {
         const contentSha256 = createHash("sha256").update(bytes).digest("hex");
         const upload = await app.inject({
           method: "POST",
-          url: "/v1/files/uploads",
+          url: "/v2/files/uploads",
           headers: { ...headers, "idempotency-key": `${key}:upload` },
           payload: {
             conversationId,
@@ -1698,14 +1696,14 @@ describe("AgentEnrollmentModule", () => {
         const attachment = createFileUploadResponseSchema.parse(upload.json()).attachment;
         const put = await app.inject({
           method: "PUT",
-          url: `/v1/files/${attachment.id}/content`,
+          url: `/v2/files/${attachment.id}/content`,
           headers: { ...headers, "content-type": "text/plain" },
           payload: bytes,
         });
         expect(put.statusCode).toBe(204);
         const completed = await app.inject({
           method: "POST",
-          url: `/v1/files/${attachment.id}/complete`,
+          url: `/v2/files/${attachment.id}/complete`,
           headers: { ...headers, "idempotency-key": `${key}:complete` },
           payload: { sizeBytes: bytes.byteLength, contentSha256 },
         });
@@ -1716,7 +1714,7 @@ describe("AgentEnrollmentModule", () => {
       const grandchild = candidateInput("working-grandchild");
       const grandchildRequest = await app.inject({
         method: "POST",
-        url: "/v1/agent-enrollments",
+        url: "/v2/agent-enrollments",
         headers: { ...authorization, "idempotency-key": "working-grandchild" },
         payload: grandchild.request,
       });
@@ -1731,7 +1729,7 @@ describe("AgentEnrollmentModule", () => {
 
       const publicChannels = await app.inject({
         method: "GET",
-        url: "/v1/channels?limit=50",
+        url: "/v2/channels?limit=50",
         headers: authorization,
       });
       expect(publicChannels.statusCode).toBe(200);
@@ -1745,14 +1743,14 @@ describe("AgentEnrollmentModule", () => {
       });
       const joinedGeneral = await app.inject({
         method: "PUT",
-        url: `/v1/channels/${generalId}/membership`,
+        url: `/v2/channels/${generalId}/membership`,
         headers: authorization,
       });
       expect(joinedGeneral.statusCode).toBe(200);
 
       const bootstrap = await app.inject({
         method: "GET",
-        url: "/v1/bootstrap",
+        url: "/v2/bootstrap",
         headers: capableAuthorization,
       });
       expect(bootstrap.statusCode).toBe(200);
@@ -1774,7 +1772,7 @@ describe("AgentEnrollmentModule", () => {
       const bytes = Buffer.from("headless evidence", "utf8");
       const deniedUpload = await app.inject({
         method: "POST",
-        url: "/v1/files/uploads",
+        url: "/v2/files/uploads",
         headers: { ...authorization, "idempotency-key": randomUUID() },
         payload: {
           conversationId: generalId,
@@ -1794,10 +1792,10 @@ describe("AgentEnrollmentModule", () => {
       const ownerEvidenceMessageId = randomUUID();
       const ownerEvidenceMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
-          "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+          "x-hype-comms-capabilities": "attachments-v1",
           "idempotency-key": ownerEvidenceMessageId,
         },
         payload: {
@@ -1814,7 +1812,7 @@ describe("AgentEnrollmentModule", () => {
       const childMessageId = randomUUID();
       const childMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: {
           ...capableAuthorization,
           "idempotency-key": childMessageId,
@@ -1843,7 +1841,7 @@ describe("AgentEnrollmentModule", () => {
       const mismatchedMentionId = randomUUID();
       const mismatchedMention = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: { ...authorization, "idempotency-key": mismatchedMentionId },
         payload: {
           threadRootId: null,
@@ -1859,7 +1857,7 @@ describe("AgentEnrollmentModule", () => {
       const mentionLookingId = randomUUID();
       const mentionLooking = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: { ...authorization, "idempotency-key": mentionLookingId },
         payload: {
           threadRootId: null,
@@ -1890,10 +1888,10 @@ describe("AgentEnrollmentModule", () => {
       const peerMessageId = randomUUID();
       const peerMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
-          "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+          "x-hype-comms-capabilities": "attachments-v1",
           "idempotency-key": peerMessageId,
         },
         payload: {
@@ -1910,22 +1908,22 @@ describe("AgentEnrollmentModule", () => {
       const [history, files, downloaded, peerDownloaded] = await Promise.all([
         app.inject({
           method: "GET",
-          url: `/v1/conversations/${generalId}/messages?limit=50`,
+          url: `/v2/conversations/${generalId}/messages?limit=50`,
           headers: capableAuthorization,
         }),
         app.inject({
           method: "GET",
-          url: `/v1/conversations/${generalId}/files?limit=50`,
+          url: `/v2/conversations/${generalId}/files?limit=50`,
           headers: capableAuthorization,
         }),
         app.inject({
           method: "GET",
-          url: `/v1/files/${attachment.id}/content`,
+          url: `/v2/files/${attachment.id}/content`,
           headers: authorization,
         }),
         app.inject({
           method: "GET",
-          url: `/v1/files/${peerFile.attachment.id}/content`,
+          url: `/v2/files/${peerFile.attachment.id}/content`,
           headers: capableAuthorization,
         }),
       ]);
@@ -1953,7 +1951,7 @@ describe("AgentEnrollmentModule", () => {
 
       const direct = await app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: authorization,
         payload: { memberId: ownerId },
       });
@@ -1963,7 +1961,7 @@ describe("AgentEnrollmentModule", () => {
       const directMessageId = randomUUID();
       const directMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${directId}/messages`,
+        url: `/v2/conversations/${directId}/messages`,
         headers: { ...authorization, "idempotency-key": directMessageId },
         payload: {
           threadRootId: null,
@@ -1979,7 +1977,7 @@ describe("AgentEnrollmentModule", () => {
       const ownerDirectMessageId = randomUUID();
       const ownerDirectMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${directId}/messages`,
+        url: `/v2/conversations/${directId}/messages`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
           "idempotency-key": ownerDirectMessageId,
@@ -1999,7 +1997,7 @@ describe("AgentEnrollmentModule", () => {
       ).message;
       const directHistory = await app.inject({
         method: "GET",
-        url: `/v1/conversations/${directId}/messages?limit=50`,
+        url: `/v2/conversations/${directId}/messages?limit=50`,
         headers: authorization,
       });
       expect(directHistory.statusCode).toBe(200);
@@ -2012,7 +2010,7 @@ describe("AgentEnrollmentModule", () => {
       const ownerMentionId = randomUUID();
       const ownerMention = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
           "idempotency-key": ownerMentionId,
@@ -2030,7 +2028,7 @@ describe("AgentEnrollmentModule", () => {
       const mentionedMessage = sendMessageResponseSchema.parse(ownerMention.json()).message;
       const sync = await app.inject({
         method: "GET",
-        url: "/v1/sync?after=0&limit=100",
+        url: "/v2/sync?after=0&limit=100",
         headers: capableAuthorization,
       });
       expect(sync.statusCode).toBe(200);
@@ -2055,7 +2053,7 @@ describe("AgentEnrollmentModule", () => {
       const restrictedMessageId = randomUUID();
       const restrictedMessage = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${restrictedId}/messages`,
+        url: `/v2/conversations/${restrictedId}/messages`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
           "idempotency-key": restrictedMessageId,
@@ -2083,12 +2081,12 @@ describe("AgentEnrollmentModule", () => {
       const denied = await Promise.all([
         app.inject({
           method: "GET",
-          url: `/v1/conversations/${restrictedId}/messages?limit=50`,
+          url: `/v2/conversations/${restrictedId}/messages?limit=50`,
           headers: authorization,
         }),
         app.inject({
           method: "POST",
-          url: `/v1/conversations/${restrictedId}/messages`,
+          url: `/v2/conversations/${restrictedId}/messages`,
           headers: { ...authorization, "idempotency-key": restrictedSendId },
           payload: {
             threadRootId: null,
@@ -2101,43 +2099,43 @@ describe("AgentEnrollmentModule", () => {
         }),
         app.inject({
           method: "GET",
-          url: `/v1/conversations/${restrictedId}/files?limit=50`,
+          url: `/v2/conversations/${restrictedId}/files?limit=50`,
           headers: capableAuthorization,
         }),
         app.inject({
           method: "POST",
-          url: "/v1/attachments/query",
+          url: "/v2/attachments/query",
           headers: capableAuthorization,
           payload: { messageIds: [restrictedMessageRecord.id] },
         }),
         app.inject({
           method: "GET",
-          url: `/v1/files/${restrictedFile.attachment.id}/content`,
+          url: `/v2/files/${restrictedFile.attachment.id}/content`,
           headers: capableAuthorization,
         }),
         app.inject({
           method: "GET",
-          url: `/v1/conversations/${generalId}/files?limit=50`,
+          url: `/v2/conversations/${generalId}/files?limit=50`,
           headers: {
             authorization: `Bearer ${noReadToken.token}`,
-            "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+            "x-hype-comms-capabilities": "attachments-v1",
           },
         }),
         app.inject({
           method: "POST",
-          url: "/v1/channels",
+          url: "/v2/channels",
           headers: authorization,
           payload: { name: "No admin", slug: "no-admin", topic: null },
         }),
         app.inject({
           method: "PUT",
-          url: `/v1/channels/${restrictedId}/members/${activated.agent.user.id}`,
+          url: `/v2/channels/${restrictedId}/members/${activated.agent.user.id}`,
           headers: authorization,
           payload: { role: "member" },
         }),
         app.inject({
           method: "PUT",
-          url: `/v1/conversations/${generalId}/read-cursor`,
+          url: `/v2/conversations/${generalId}/read-cursor`,
           headers: authorization,
           payload: { lastReadMessageId: sent.message.id },
         }),
@@ -2148,7 +2146,7 @@ describe("AgentEnrollmentModule", () => {
 
       const taskBot = await app.inject({
         method: "POST",
-        url: "/v1/agent-enrollments",
+        url: "/v2/agent-enrollments",
         headers: {
           authorization: `Bearer hype_comms_bot_${"b".repeat(43)}`,
           "idempotency-key": "task-bot-denied",

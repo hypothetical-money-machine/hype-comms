@@ -113,6 +113,7 @@ export const cacheCryptoStatusSchema = z.discriminatedUnion("mode", [
 ]);
 
 export const sendAttemptResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("upgrade_required") }).strict(),
   z
     .object({
       status: z.literal("accepted"),
@@ -136,6 +137,7 @@ export const sendAttemptResultSchema = z.discriminatedUnion("status", [
 ]);
 
 export const syncAttemptResultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("upgrade_required") }).strict(),
   z.object({ status: z.literal("accepted"), response: syncResponseSchema }).strict(),
   z
     .object({

@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { DomainError, type DomainErrorKind } from "../src/domain-errors.js";
 import { ApiError, registerErrorHandling } from "../src/errors.js";
-import { GroupDirectClientUpgradeRequiredError } from "../src/modules/workspace/group-direct-capability.js";
 
 const applications: ReturnType<typeof Fastify>[] = [];
 
@@ -45,28 +44,6 @@ describe("domain errors at the HTTP boundary", () => {
       expect(failure).not.toHaveProperty("code");
     },
   );
-
-  it("keeps the legacy group-conversation upgrade message and capability detail", async () => {
-    const response = await rejectingApplication(new GroupDirectClientUpgradeRequiredError()).inject(
-      "/operation",
-    );
-
-    expect(response.statusCode).toBe(409);
-    expect(apiErrorEnvelopeSchema.parse(response.json())).toEqual({
-      error: {
-        code: "CONFLICT",
-        message:
-          "Update Hype Comms to access this workspace because your account belongs to a group conversation",
-        requestId: "boundary-request",
-        details: [
-          {
-            field: "X-Hype-Comms-Capabilities",
-            issue: "group-direct-messages-v1 is required",
-          },
-        ],
-      },
-    });
-  });
 
   it("keeps route and identity errors with their declared details", async () => {
     const details = [{ field: "email", issue: "Email is required" }];

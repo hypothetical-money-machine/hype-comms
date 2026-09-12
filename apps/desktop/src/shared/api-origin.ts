@@ -58,25 +58,25 @@ export function createServerHealthUrl(apiOrigin: string): string {
 }
 
 export function createIdentitySessionUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/session", apiOrigin).href;
+  return new URL("/v2/auth/session", apiOrigin).href;
 }
 
 export function createCurrentUserUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/me", apiOrigin).href;
+  return new URL("/v2/auth/me", apiOrigin).href;
 }
 
 export function createMagicLinkUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/magic-link", apiOrigin).href;
+  return new URL("/v2/auth/magic-link", apiOrigin).href;
 }
 
 export function createAuthCapabilitiesUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/capabilities", apiOrigin).href;
+  return new URL("/v2/auth/capabilities", apiOrigin).href;
 }
 
 export function createDesktopAuthorizationUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/desktop-authorizations", apiOrigin).href;
+  return new URL("/v2/auth/desktop-authorizations", apiOrigin).href;
 }
 
 export function createAuthHandoffExchangeUrl(apiOrigin: string): string {
-  return new URL("/v1/auth/exchange", apiOrigin).href;
+  return new URL("/v2/auth/exchange", apiOrigin).href;
 }

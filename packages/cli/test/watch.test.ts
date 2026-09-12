@@ -1,21 +1,13 @@
 import { execFile } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
-import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-} from "@hype-comms/contracts";
+import {} from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
 import { RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
@@ -61,8 +53,8 @@ describe("watch", () => {
     let ticketRequests = 0;
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
-      if (url.pathname === "/v1/realtime/tickets") {
+      if (url.pathname === "/v2/bootstrap") return jsonResponse(bootstrap());
+      if (url.pathname === "/v2/realtime/tickets") {
         ticketRequests += 1;
         return jsonResponse({ padding: "a".repeat(RESPONSE_BODY_MAX_BYTES) }, { status: 503 });
       }
@@ -172,19 +164,9 @@ describe("watch", () => {
 
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
-      if (url.pathname === "/v1/realtime/tickets") {
-        expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-          [
-            ATTACHMENTS_CAPABILITY,
-            REACTION_EVENTS_CAPABILITY,
-            READ_STATE_EVENTS_CAPABILITY,
-            PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-            MESSAGE_RETRACT_EVENTS_CAPABILITY,
-            GROUP_DIRECT_MESSAGES_CAPABILITY,
-            AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-          ].join(","),
-        );
+      if (url.pathname === "/v2/bootstrap") return jsonResponse(bootstrap());
+      if (url.pathname === "/v2/realtime/tickets") {
+        expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
         return jsonResponse({
           ticket: "ticket_value_that_is_at_least_32_chars",
           expiresAt: "2026-07-26T21:00:00.000Z",
@@ -295,8 +277,8 @@ describe("watch", () => {
     });
     const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
       const url = new URL(String(input));
-      if (url.pathname === "/v1/bootstrap") return jsonResponse(bootstrap());
-      if (url.pathname === "/v1/realtime/tickets") {
+      if (url.pathname === "/v2/bootstrap") return jsonResponse(bootstrap());
+      if (url.pathname === "/v2/realtime/tickets") {
         return jsonResponse({
           ticket: "ticket_value_that_is_at_least_32_chars",
           expiresAt: "2026-07-26T21:00:00.000Z",
@@ -373,9 +355,9 @@ describe("watch", () => {
       process.argv = [process.execPath, "hype-comms-cli", "watch", "--json", "--after", "5"];
       globalThis.fetch = async (input) => {
         const pathname = new URL(String(input)).pathname;
-        const value = pathname === "/v1/bootstrap"
+        const value = pathname === "/v2/bootstrap"
           ? ${JSON.stringify(bootstrap())}
-          : pathname === "/v1/realtime/tickets"
+          : pathname === "/v2/realtime/tickets"
             ? {
             ticket: "ticket_value_that_is_at_least_32_chars",
             expiresAt: "2026-07-26T21:00:00.000Z",
@@ -384,7 +366,7 @@ describe("watch", () => {
         if (value === null) throw new Error("Unexpected route " + pathname);
         return new Response(JSON.stringify(value), {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-hype-comms-protocol": "2" },
         });
       };
       const originalWrite = process.stdout.write.bind(process.stdout);

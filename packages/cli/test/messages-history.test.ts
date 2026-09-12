@@ -2,13 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  AGENT_CONTEXT_PACK_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  type AgentContextHistoryResponse,
-  ATTACHMENTS_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-} from "@hype-comms/contracts";
+import { type AgentContextHistoryResponse } from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli, HELP } from "../src/cli.js";
@@ -52,15 +46,13 @@ function contextHistoryResponse(): AgentContextHistoryResponse {
 }
 
 describe("messages history", () => {
-  it("preserves the legacy request and response contract without context mode", async () => {
+  it("reads canonical history without context mode", async () => {
     const response = historyResponse();
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       expect(String(input)).toBe(
-        `https://chat.example.test/v1/conversations/${CONVERSATION_ID}/messages?before=older_page&limit=100`,
+        `https://chat.example.test/v2/conversations/${CONVERSATION_ID}/messages?before=older_page&limit=100`,
       );
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        `${ATTACHMENTS_CAPABILITY},${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       return jsonResponse(response);
     });
     const runtime = testRuntime({
@@ -89,19 +81,17 @@ describe("messages history", () => {
     expect(runtime.stderrText()).toBe("");
   });
 
-  it("negotiates and anchors context-pack history", async () => {
+  it("anchors context-pack history", async () => {
     const response = contextHistoryResponse();
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
-      expect(url.pathname).toBe(`/v1/conversations/${CONVERSATION_ID}/messages`);
+      expect(url.pathname).toBe(`/v2/conversations/${CONVERSATION_ID}/messages`);
       expect(Object.fromEntries(url.searchParams)).toEqual({
         contextPack: "true",
         throughMessageId: MESSAGE_ID,
         limit: "8",
       });
-      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBe(
-        `${AGENT_CONTEXT_PACK_CAPABILITY},${GROUP_DIRECT_MESSAGES_CAPABILITY},${AGENT_EFFECTIVE_SCOPES_CAPABILITY}`,
-      );
+      expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
       return jsonResponse(response);
     });
     const runtime = testRuntime({

@@ -1,6 +1,4 @@
 import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
   apiErrorEnvelopeSchema,
   authCapabilitiesSchema,
   authKitLogoutUrlHeaderName,
@@ -13,10 +11,11 @@ import {
   magicLinkRequestedSchema,
   magicLinkTokenSchema,
   requestMagicLinkSchema,
-  type AuthenticatedSessionContext,
-  type ChatSessionState,
+  WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
   type AuthCapabilities,
+  type AuthenticatedSessionContext,
   type AuthKitLogoutUrl,
+  type ChatSessionState,
   type CreateDesktopAuthorizationRequest,
   type CreateDesktopAuthorizationResponse,
   type CurrentUser,
@@ -25,6 +24,7 @@ import {
   type MagicLinkDeliveryState,
   type MagicLinkToken,
 } from "@hype-comms/contracts";
+import { requireWorkspaceProtocol, WorkspaceProtocolError } from "./workspace-protocol";
 
 import {
   createAuthCapabilitiesUrl,
@@ -60,7 +60,7 @@ interface SessionCookie {
 }
 
 /**
- * Outcome of a single `GET /v1/auth/me` probe. Only an authentication rejection may discard the
+ * Outcome of a single `GET /v2/auth/me` probe. Only an authentication rejection may discard the
  * stored credential; every other outcome leaves the device session intact.
  */
 type IdentityProbe =
@@ -70,7 +70,8 @@ type IdentityProbe =
   /** The request never completed: offline, no server yet, or the request timeout. */
   | { readonly status: "unreachable" }
   /** The service answered, but not usefully: `403`, `5xx`, an odd status, or an invalid body. */
-  | { readonly status: "failed" };
+  | { readonly status: "failed" }
+  | { readonly status: "upgrade_required" };
 
 /** The credential-preserving state published when no verdict on the credential was reached. */
 type SessionUnavailableState = Extract<ChatSessionState, { status: "session-unavailable" }>;
@@ -90,7 +91,7 @@ function isCredentialRefusal(status: number): boolean {
 
 /** Neither outcome is a verdict on the credential, so both keep it and invite a retry. */
 function unavailableState(
-  status: "unreachable" | "failed",
+  status: "unreachable" | "failed" | "upgrade_required",
   lastAuthenticatedSession?: AuthenticatedSessionContext,
 ): SessionUnavailableState {
   if (status === "unreachable") {
@@ -103,8 +104,11 @@ function unavailableState(
   }
   return {
     status: "session-unavailable",
-    reason: "server_error",
-    message: SESSION_SERVER_ERROR_MESSAGE,
+    reason: status === "upgrade_required" ? "protocol_mismatch" : "server_error",
+    message:
+      status === "upgrade_required"
+        ? WORKSPACE_PROTOCOL_UPGRADE_MESSAGE
+        : SESSION_SERVER_ERROR_MESSAGE,
     ...(lastAuthenticatedSession === undefined ? {} : { lastAuthenticatedSession }),
   };
 }
@@ -177,6 +181,7 @@ async function readErrorMessage(response: Response, fallback: string): Promise<s
  */
 export class ChatSession {
   readonly #apiOrigin: string;
+  #protocolBlocked = false;
   readonly #authVariant: DesktopAuthVariant;
   readonly #cookies: SessionCookieStore;
   readonly #request: SessionFetch;
@@ -212,7 +217,7 @@ export class ChatSession {
     this.#authCapabilitiesUrl = createAuthCapabilitiesUrl(options.apiOrigin);
     this.#authHandoffExchangeUrl = createAuthHandoffExchangeUrl(options.apiOrigin);
     this.#desktopAuthorizationUrl = createDesktopAuthorizationUrl(options.apiOrigin);
-    this.#sessionRefreshUrl = new URL("/v1/auth/session/refresh", options.apiOrigin).href;
+    this.#sessionRefreshUrl = new URL("/v2/auth/session/refresh", options.apiOrigin).href;
     this.#currentUserUrl = createCurrentUserUrl(options.apiOrigin);
     this.#magicLinkUrl = createMagicLinkUrl(options.apiOrigin);
   }
@@ -297,7 +302,8 @@ export class ChatSession {
     let response: Response;
     try {
       response = await this.#fetch(this.#currentUserUrl, { method: "GET" });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
       // Offline, a server that is not listening yet, or the request timeout aborting.
       return { status: "unreachable" };
     }
@@ -332,6 +338,7 @@ export class ChatSession {
   }
 
   #applySignedIn(context: AuthenticatedSessionContext): void {
+    this.#protocolBlocked = false;
     this.#logoutUrl = null;
     this.#cacheAuthorizationActive = true;
     this.#setState({
@@ -350,7 +357,8 @@ export class ChatSession {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(request),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) throw new ChatSessionError(error.message);
       throw new ChatSessionError("Could not reach the chat server");
     }
 
@@ -367,16 +375,14 @@ export class ChatSession {
     throw new ChatSessionError(message);
   }
 
-  /** Older servers have no discovery endpoint, so their existing magic-link path remains usable. */
+  /** Authentication-method availability is separate from workspace protocol compatibility. */
   async getAuthCapabilities(): Promise<AuthCapabilities> {
     let response: Response;
     try {
       response = await this.#fetch(this.#authCapabilitiesUrl, { method: "GET" });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) throw new ChatSessionError(error.message);
       throw new ChatSessionError("Could not reach the chat server");
-    }
-    if (response.status === 404) {
-      return { authKit: false, magicLink: true };
     }
     if (!response.ok) {
       throw new ChatSessionError("Could not load sign-in options");
@@ -404,6 +410,7 @@ export class ChatSession {
         body: JSON.stringify(request),
       });
     } catch (error) {
+      if (error instanceof WorkspaceProtocolError) throw new ChatSessionError(error.message);
       // The net error token (e.g. net::ERR_SSL_KEY_USAGE_INCOMPATIBLE) is the one diagnostic that
       // separates a broken TLS path from an unreachable host; issue #75 died without it.
       const detail = describeNetworkError(error);
@@ -439,7 +446,8 @@ export class ChatSession {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(handoff),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return this.#failMagicLink("upgrade_required");
       return this.#failAuthKitSignIn();
     }
     if (!response.ok) {
@@ -494,7 +502,8 @@ export class ChatSession {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token: parsed.data }),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return this.#failMagicLink("upgrade_required");
       // Offline or timed out. The link may still be good, and the stored credential certainly is.
       return this.#failMagicLink("unreachable");
     }
@@ -547,7 +556,7 @@ export class ChatSession {
    * Reports an exchange that reached no verdict. The stored credential and any armed renewal are
    * left untouched, so a retry can still recover the session this device already had.
    */
-  #failMagicLink(status: "unreachable" | "failed"): never {
+  #failMagicLink(status: "unreachable" | "failed" | "upgrade_required"): never {
     // The context rides along so a cold offline start can open the credential-bound cache.
     const state = unavailableState(status, this.#authenticatedContextFromState() ?? undefined);
     // A deep-link exchange is allowed to change this session only after it returns a new signed-in
@@ -630,6 +639,7 @@ export class ChatSession {
 
   #armRenewal(delayMs: number): void {
     this.#stopRenewal();
+    if (this.#protocolBlocked) return;
     const delay = Math.min(Math.max(delayMs, RENEWAL_MIN_DELAY_MS), RENEWAL_MAX_DELAY_MS);
     const timer = setTimeout(() => {
       this.#renewalTimer = null;
@@ -771,24 +781,30 @@ export class ChatSession {
 
   /** Authenticated request against the chat API. Redirects are refused, cookies are included. */
   async fetch(url: string, init: RequestInit = {}): Promise<Response> {
+    if (this.#protocolBlocked) throw new WorkspaceProtocolError();
     if (this.#state.status === "session-unavailable") {
       throw new ChatSessionError("Workspace requests require a validated session");
     }
-    const headers = new Headers(init.headers);
-    const capabilities = new Set(
-      (headers.get("x-hype-comms-capabilities") ?? "")
-        .split(",")
-        .map((capability) => capability.trim())
-        .filter((capability) => capability.length > 0),
-    );
-    capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
-    capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
-    headers.set("x-hype-comms-capabilities", [...capabilities].join(","));
-    return this.#fetch(url, { ...init, headers });
+    const precedingState = this.#state;
+    try {
+      return await this.#fetch(url, init);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceProtocolError &&
+        !init.signal?.aborted &&
+        this.#state === precedingState
+      ) {
+        this.#setState(
+          unavailableState("upgrade_required", this.#authenticatedContextFromState() ?? undefined),
+        );
+      }
+      throw error;
+    }
   }
 
   async #fetch(url: string, init: RequestInit): Promise<Response> {
-    return this.#request(url, {
+    const precedingState = this.#state;
+    const response = await this.#request(url, {
       ...init,
       cache: "no-store",
       credentials: "include",
@@ -798,6 +814,19 @@ export class ChatSession {
           ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
           : AbortSignal.any([init.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     });
+    try {
+      return await requireWorkspaceProtocol(response);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceProtocolError &&
+        !init.signal?.aborted &&
+        this.#state === precedingState
+      ) {
+        this.#protocolBlocked = true;
+        this.#stopRenewal();
+      }
+      throw error;
+    }
   }
 
   /** Marks the session as ended after the server rejects an authenticated request. */

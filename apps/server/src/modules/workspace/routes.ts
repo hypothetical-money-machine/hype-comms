@@ -1,25 +1,10 @@
+import type { WorkspaceBootstrapResponse } from "@hype-comms/contracts";
 import {
-  AGENT_CONTEXT_PACK_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
-  ATTACHMENTS_CAPABILITY,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
   advanceReadCursorRequestSchema,
   agentContextHistoryQuerySchema,
   archiveChannelRequestSchema,
   channelSlugSchema,
-  clientCapabilitiesHeaderSchema,
   completeFileUploadRequestSchema,
   conversationFilesQuerySchema,
   createChannelRequestSchema,
@@ -43,28 +28,16 @@ import {
   taskNumberSchema,
   updateTaskRequestSchema,
   upsertChannelMemberRequestSchema,
-} from "@hype-comms/contracts";
-import type {
-  AgentScope,
-  ChannelMembersResponse,
-  ChannelMembershipMutationResponse,
-  ConversationMutationResponse,
-  ConversationSummary,
-  ListConversationsResponse,
-  User,
-  WorkspaceBootstrapResponse,
+  workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
 import { z } from "zod";
-import { routeModule, validateRequest } from "../../http/route-registrar.js";
-import { taskPolicy, workspacePolicy } from "../../http/authentication-policies.js";
-
 import { ApiError } from "../../errors.js";
+import { taskPolicy, workspacePolicy } from "../../http/authentication-policies.js";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
 import type { BotService } from "../bots/service.js";
 import { requireAgentScope, type AuthenticatedRequestIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
-import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
-import type { WorkspaceClientCapabilities, WorkspaceRepository } from "./repository.js";
-
+import type { WorkspaceRepository } from "./repository.js";
 interface WorkspaceRoutesOptions {
   readonly identityService: IdentityService;
   readonly botService?: BotService;
@@ -124,207 +97,20 @@ function canCreateDirectConversation(identity: AuthenticatedRequestIdentity): bo
     identity.currentUser.scopes.includes("conversations:write")
   );
 }
-
-function capabilities(value: string | string[] | undefined): readonly string[] {
-  if (value === undefined) return [];
-  if (typeof value !== "string") {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  }
-  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  return parsed.data;
-}
-
-function workspaceClientCapabilities(
-  value: string | string[] | undefined,
-): WorkspaceClientCapabilities {
-  const supported = capabilities(value);
-  return {
-    reactionEvents: supported.includes(REACTION_EVENTS_CAPABILITY),
-    readStateEvents: supported.includes(READ_STATE_EVENTS_CAPABILITY),
-    taskEvents: supported.includes(TASK_EVENTS_CAPABILITY),
-    announcementChannels: supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-    participatedThreadNotifications: supported.includes(
-      PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-    ),
-    messageRetractEvents: supported.includes(MESSAGE_RETRACT_EVENTS_CAPABILITY),
-    memberProfiles: supported.includes(MEMBER_PROFILES_CAPABILITY),
-    ephemeralActivity: supported.includes(EPHEMERAL_ACTIVITY_CAPABILITY),
-    groupDirectMessages: supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-    humansOnlyChannels: supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-    systemChannels: supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-  };
-}
-
 function missingDirectConversationWriteScope(): ApiError {
   return new ApiError(403, "FORBIDDEN", "Agent token requires the conversations:write scope");
 }
-
-function projectConversationSummary(
-  summary: ConversationSummary,
-  supportsAnnouncements: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  const conversation: Partial<ConversationSummary["conversation"]> = { ...summary.conversation };
-  if (!supportsAnnouncements) delete conversation.channelMode;
-  if (!supportsHumansOnlyChannels && conversation.access === "humans") {
-    conversation.access = "members";
-  }
-  return { ...summary, conversation };
-}
-
-function projectConversationSummaries(
-  summaries: readonly ConversationSummary[],
-  supportsAnnouncements: boolean,
-  supportsGroupDirectMessages: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  if (
-    !supportsGroupDirectMessages &&
-    summaries.some((summary) => summary.conversation.kind === "group_direct_message")
-  ) {
-    throw new GroupDirectClientUpgradeRequiredError();
-  }
-  return summaries.map((summary) =>
-    projectConversationSummary(summary, supportsAnnouncements, supportsHumansOnlyChannels),
-  );
-}
-
-function withoutTitle(user: User): Omit<User, "title"> {
-  const { title, ...legacy } = user;
-  void title;
-  return legacy;
-}
-
-function projectMembers<T extends { readonly members: readonly User[] }>(
-  response: T,
-  capable: boolean,
-) {
-  if (capable) return response;
-  return { ...response, members: response.members.map(withoutTitle) };
-}
-
-function projectChannelMembers(
-  response: ChannelMembersResponse,
-  supportsMemberProfiles: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  return {
-    ...response,
-    access:
-      !supportsHumansOnlyChannels && response.access === "humans" ? "members" : response.access,
-    members: supportsMemberProfiles
-      ? response.members
-      : response.members.map((member) => ({ ...member, user: withoutTitle(member.user) })),
-  };
-}
-
-function projectChannelMembershipMutation(
-  response: ChannelMembershipMutationResponse,
-  supportsMemberProfiles: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  return {
-    ...response,
-    channelMembers: projectChannelMembers(
-      response.channelMembers,
-      supportsMemberProfiles,
-      supportsHumansOnlyChannels,
-    ),
-  };
-}
-
-function withoutMemberEventTitle(event: unknown): unknown {
-  if (typeof event !== "object" || event === null || !("type" in event)) return event;
-  if (event.type !== "member.updated" || !("payload" in event)) return event;
-  const payload = event.payload;
-  if (typeof payload !== "object" || payload === null || !("member" in payload)) return event;
-  return { ...event, payload: { ...payload, member: withoutTitle(payload.member as User) } };
-}
-
-function projectSyncMemberTitles<T extends { readonly events: readonly unknown[] }>(
-  response: T,
-  capable: boolean,
-) {
-  if (capable) return response;
-  return { ...response, events: response.events.map(withoutMemberEventTitle) };
-}
-
-function projectBootstrap(
+function canonicalBootstrap(
   response: WorkspaceBootstrapResponse,
-  supportsAnnouncements: boolean,
-  supportsMemberProfiles: boolean,
-  supportsGroupDirectMessages: boolean,
-  supportsHumansOnlyChannels: boolean,
-  effectiveAgentScopes: readonly AgentScope[] | null,
-) {
-  const currentUser =
-    effectiveAgentScopes === null || !("type" in response.currentUser)
-      ? response.currentUser
-      : { ...response.currentUser, effectiveScopes: effectiveAgentScopes };
-  const members = supportsMemberProfiles ? response.members : response.members.map(withoutTitle);
-  const conversations = projectConversationSummaries(
-    response.conversations,
-    supportsAnnouncements,
-    supportsGroupDirectMessages,
-    supportsHumansOnlyChannels,
-  );
-  const featureFlags: Partial<WorkspaceBootstrapResponse["featureFlags"]> = {
-    ...response.featureFlags,
-  };
-  if (!supportsAnnouncements) delete featureFlags.announcementChannels;
-  if (!supportsHumansOnlyChannels) delete featureFlags.humansOnlyChannels;
-  return {
+  identity: AuthenticatedRequestIdentity,
+): WorkspaceBootstrapResponse {
+  return workspaceBootstrapResponseSchema.parse({
     ...response,
-    currentUser,
-    members,
-    conversations,
-    featureFlags,
-  };
-}
-
-function projectConversationList(
-  response: ListConversationsResponse,
-  supportsAnnouncements: boolean,
-  supportsGroupDirectMessages: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  return {
-    ...response,
-    conversations: projectConversationSummaries(
-      response.conversations,
-      supportsAnnouncements,
-      supportsGroupDirectMessages,
-      supportsHumansOnlyChannels,
-    ),
-  };
-}
-
-function projectConversationMutation(
-  response: ConversationMutationResponse,
-  supportsAnnouncements: boolean,
-  supportsHumansOnlyChannels: boolean,
-) {
-  if (response.conversation === undefined) return response;
-  return {
-    ...response,
-    conversation: projectConversationSummary(
-      response.conversation,
-      supportsAnnouncements,
-      supportsHumansOnlyChannels,
-    ),
-  };
-}
-
-function withoutAttachments<T extends { readonly attachments?: unknown }>(
-  value: T,
-  capable: boolean,
-): T | Omit<T, "attachments"> {
-  if (capable) return value;
-  return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "attachments")) as Omit<
-    T,
-    "attachments"
-  >;
+    currentUser:
+      identity.credentialType === "agent"
+        ? { ...response.currentUser, effectiveScopes: identity.authorizationScopes }
+        : response.currentUser,
+  });
 }
 
 export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes, options) => {
@@ -347,22 +133,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: {},
-    handler: async ({ identity, request }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectBootstrap(
-        await repository.bootstrap(
-          identity,
-          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-          supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-        ),
-        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-        identity.credentialType === "agent" && supported.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY)
-          ? identity.authorizationScopes
-          : null,
-      );
+    handler: async ({ identity }) => {
+      return canonicalBootstrap(await repository.bootstrap(identity), identity);
     },
   });
 
@@ -372,12 +144,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: {},
-    handler: async ({ identity, request }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectMembers(
-        await repository.listMembers(identity),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-      );
+    handler: async ({ identity }) => {
+      return await repository.listMembers(identity);
     },
   });
 
@@ -401,11 +169,7 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
         },
         "Workspace owner viewed member communication paths",
       );
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectMembers(
-        await repository.communicationPaths(identity),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-      );
+      return await repository.communicationPaths(identity);
     },
   });
 
@@ -415,20 +179,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: { query: validateRequest(listConversationsQuerySchema, "Invalid conversation query") },
-    handler: async ({ identity, request, input: { query: query } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectConversationList(
-        await repository.listConversations(
-          identity,
-          query.after,
-          query.limit,
-          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-          supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-        ),
-        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+    handler: async ({ identity, input: { query: query } }) => {
+      return await repository.listConversations(identity, query.after, query.limit);
     },
   });
 
@@ -450,25 +202,14 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     scopes: ["conversations:write"],
     request: { body: validateRequest(createChannelRequestSchema, "Invalid channel") },
     handler: async ({ identity, request, reply, input: { body: result } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      const supportsAnnouncements = supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY);
-      const supportsHumansOnlyChannels = supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY);
-      if (result.access === "humans" && !supportsHumansOnlyChannels) {
-        throw new ApiError(400, "BAD_REQUEST", "Client does not support humans-only channels");
-      }
       const created = await repository.createChannel(
         identity,
         result,
         optionalIdempotencyKey(request.headers["idempotency-key"]),
-        supportsAnnouncements,
         request.id,
         defaultAgentAgencyEnabled,
       );
-      return reply
-        .code(201)
-        .send(
-          projectConversationMutation(created, supportsAnnouncements, supportsHumansOnlyChannels),
-        );
+      return reply.code(201).send(created);
     },
   });
 
@@ -483,17 +224,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectConversationMutation(
-        await repository.archiveChannel(identity, id),
-        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+      return await repository.archiveChannel(identity, id);
     },
   });
 
@@ -505,17 +240,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: resourceParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectChannelMembers(
-        await repository.listChannelMembers(identity, id),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+      return await repository.listChannelMembers(identity, id);
     },
   });
 
@@ -530,18 +259,12 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id, userId },
         body,
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectChannelMembershipMutation(
-        await repository.upsertChannelMember(identity, id, userId, body),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+      return await repository.upsertChannelMember(identity, id, userId, body);
     },
   });
 
@@ -553,17 +276,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: memberParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id, userId },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectChannelMembershipMutation(
-        await repository.removeChannelMember(identity, id, userId),
-        supported.includes(MEMBER_PROFILES_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+      return await repository.removeChannelMember(identity, id, userId);
     },
   });
 
@@ -581,17 +298,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectConversationMutation(
-        await repository.joinPublicChannel(identity, id),
-        supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-        supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-      );
+      return await repository.joinPublicChannel(identity, id);
     },
   });
 
@@ -616,9 +327,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
         throw missingDirectConversationWriteScope();
       }
     },
-    handler: async ({ identity, request, reply, input: { body: result } }) => {
+    handler: async ({ identity, reply, input: { body: result } }) => {
       const canCreate = canCreateDirectConversation(identity);
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
       const opened = canCreate
         ? await repository.createDirectConversation(identity, result)
         : await repository.findDirectConversation(identity, result);
@@ -626,15 +336,7 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
         // Read-only lookup found nothing; opening it would need the write scope.
         throw missingDirectConversationWriteScope();
       }
-      return reply
-        .code(201)
-        .send(
-          projectConversationMutation(
-            opened,
-            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-            supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
-          ),
-        );
+      return reply.code(201).send(opened);
     },
   });
 
@@ -650,21 +352,13 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
       ),
     },
     handler: async ({ identity, request, reply, input: { body: result } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      if (!supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY)) {
-        throw new GroupDirectClientUpgradeRequiredError();
-      }
       return reply
         .code(201)
         .send(
-          projectConversationMutation(
-            await repository.createGroupDirectConversation(
-              identity,
-              result,
-              requiredIdempotencyKey(request.headers["idempotency-key"]),
-            ),
-            supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-            supported.includes(HUMANS_ONLY_CHANNELS_CAPABILITY),
+          await repository.createGroupDirectConversation(
+            identity,
+            result,
+            requiredIdempotencyKey(request.headers["idempotency-key"]),
           ),
         );
     },
@@ -678,7 +372,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: resourceParams, query: historyQuery },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
         query,
@@ -686,10 +379,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     }) => {
       if (query.kind === "context") {
         const contextQuery = query.value;
-        const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-        if (!supported.includes(AGENT_CONTEXT_PACK_CAPABILITY)) {
-          throw new ApiError(400, "BAD_REQUEST", "Context pack capability is required");
-        }
         return repository.contextHistory(
           identity,
           id,
@@ -698,27 +387,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
           contextQuery.limit,
         );
       }
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      const supportsThreads = supported.includes(THREADS_CAPABILITY);
-      const supportsAttachments = supported.includes(ATTACHMENTS_CAPABILITY);
-      await repository.requireGroupDirectMessagesForConversations(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
-      const history = await repository.history(
-        identity,
-        id,
-        query.value.before,
-        query.value.limit,
-        !supportsThreads,
-      );
-      if (supportsThreads) return withoutAttachments(history, supportsAttachments);
-      return {
-        messages: history.messages,
-        nextCursor: history.nextCursor,
-        ...(supportsAttachments ? { attachments: history.attachments } : {}),
-      };
+      const history = await repository.history(identity, id, query.value.before, query.value.limit);
+      return history;
     },
   });
 
@@ -733,20 +403,13 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
         query,
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
       const thread = await repository.thread(identity, id, query.before, query.limit);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
-      return withoutAttachments(thread, supported.includes(ATTACHMENTS_CAPABILITY));
+      return thread;
     },
   });
 
@@ -758,19 +421,12 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: resourceParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
       const message = await repository.messageById(identity, id);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
-      return withoutAttachments(message, supported.includes(ATTACHMENTS_CAPABILITY));
+      return message;
     },
   });
 
@@ -782,18 +438,10 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: resourceParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        "retractable",
-      );
       return repository.retractMessage(identity, id);
     },
   });
@@ -804,16 +452,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: { query: validateRequest(messageSearchQuerySchema, "Invalid search query") },
-    handler: async ({ identity, request, input: { query: query } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      return repository.searchMessages(
-        identity,
-        query.query,
-        query.after,
-        query.limit,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        supported.includes(SYSTEM_CHANNELS_CAPABILITY),
-      );
+    handler: async ({ identity, input: { query: query } }) => {
+      return repository.searchMessages(identity, query.query, query.after, query.limit);
     },
   });
 
@@ -1042,26 +682,7 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
       if (typeof idempotencyKey !== "string" || idempotencyKey !== body.clientMessageId) {
         throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key must equal the client message ID");
       }
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForConversations(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
-      return reply
-        .code(201)
-        .send(
-          withoutAttachments(
-            await repository.sendMessage(
-              identity,
-              id,
-              body,
-              request.id,
-              supported.includes(ANNOUNCEMENT_CHANNELS_CAPABILITY),
-            ),
-            supported.includes(ATTACHMENTS_CAPABILITY),
-          ),
-        );
+      return reply.code(201).send(await repository.sendMessage(identity, id, body, request.id));
     },
   });
 
@@ -1076,18 +697,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
         query,
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForConversations(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
       return repository.listConversationFiles(identity, id, query.before, query.limit);
     },
   });
@@ -1100,14 +714,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: {
       body: validateRequest(listMessageAttachmentsRequestSchema, "Invalid attachment query"),
     },
-    handler: async ({ identity, request, input: { body: body } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    handler: async ({ identity, input: { body: body } }) => {
       const attachments = await repository.listMessageAttachments(identity, body.messageIds);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        body.messageIds,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
       return attachments;
     },
   });
@@ -1119,12 +727,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     scopes: ["attachments:write"],
     request: { body: validateRequest(createFileUploadRequestSchema, "Invalid file upload") },
     handler: async ({ identity, request, reply, input: { body: body } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForConversations(
-        identity,
-        [body.conversationId],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
       return reply
         .code(201)
         .send(
@@ -1154,13 +756,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
         body,
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForAttachments(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        "complete",
-      );
       return repository.completeFileUpload(
         identity,
         id,
@@ -1178,18 +773,12 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: resourceParams },
     handler: async ({
       identity,
-      request,
       reply,
       input: {
         params: { id },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      const file = await repository.readFileContent(
-        identity,
-        id,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
+      const file = await repository.readFileContent(identity, id);
       return reply
         .header("content-type", file.attachment.contentType)
         .header("content-length", file.attachment.sizeBytes.toString())
@@ -1220,7 +809,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
       bodyLimit: 25 * 1024 * 1024,
       handler: async ({
         identity,
-        request,
         reply,
         input: {
           params: { id },
@@ -1228,13 +816,6 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
           body,
         },
       }) => {
-        const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-        await repository.requireGroupDirectMessagesForAttachments(
-          identity,
-          [id],
-          supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-          "content-write",
-        );
         await repository.putFileContent(identity, id, contentType, body);
         return reply.code(204).send();
       },
@@ -1247,14 +828,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: { body: validateRequest(listMessageReactionsRequestSchema, "Invalid reaction query") },
-    handler: async ({ identity, request, input: { body: body } }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
+    handler: async ({ identity, input: { body: body } }) => {
       const reactions = await repository.listMessageReactions(identity, body.messageIds);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        body.messageIds,
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
       return reactions;
     },
   });
@@ -1267,18 +842,10 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: reactionParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id, emoji },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        "active",
-      );
       return repository.addReaction(identity, id, emoji);
     },
   });
@@ -1291,18 +858,10 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     request: { params: reactionParams },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id, emoji },
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForMessages(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-        "active",
-      );
       return repository.removeReaction(identity, id, emoji);
     },
   });
@@ -1318,18 +877,11 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     },
     handler: async ({
       identity,
-      request,
       input: {
         params: { id },
         body,
       },
     }) => {
-      const supported = capabilities(request.headers["x-hype-comms-capabilities"]);
-      await repository.requireGroupDirectMessagesForConversations(
-        identity,
-        [id],
-        supported.includes(GROUP_DIRECT_MESSAGES_CAPABILITY),
-      );
       return repository.advanceReadCursor(identity, id, body.lastReadMessageId);
     },
   });
@@ -1340,12 +892,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: { query: validateRequest(syncQuerySchema, "Invalid sync cursor") },
-    handler: async ({ identity, request, input: { query: query } }) => {
-      const supported = workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]);
-      return projectSyncMemberTitles(
-        await repository.sync(identity, query.after, query.limit, supported),
-        supported.memberProfiles === true,
-      );
+    handler: async ({ identity, input: { query: query } }) => {
+      return await repository.sync(identity, query.after, query.limit);
     },
   });
 
@@ -1355,11 +903,8 @@ export const workspaceRoutes = routeModule<WorkspaceRoutesOptions>(async (routes
     policy: workspace,
     scopes: ["workspace:read"],
     request: {},
-    handler: async ({ identity, request }) => {
-      return repository.issueRealtimeTicket(
-        identity,
-        workspaceClientCapabilities(request.headers["x-hype-comms-capabilities"]),
-      );
+    handler: async ({ identity }) => {
+      return repository.issueRealtimeTicket(identity);
     },
   });
 });

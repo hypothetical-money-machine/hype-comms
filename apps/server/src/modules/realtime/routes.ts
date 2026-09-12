@@ -13,12 +13,12 @@ import { routeModule, validateRequest } from "../../http/route-registrar.js";
 import { DomainError } from "../../domain-errors.js";
 import { ApiError } from "../../errors.js";
 import type { MetricsRegistry } from "../../metrics.js";
+import type { EphemeralActivityHub } from "./activity-hub.js";
 import type {
   ConsumeRealtimeTicket,
   RealtimePrincipal,
   RevalidateRealtimePrincipal,
 } from "./auth.js";
-import type { EphemeralActivityHub } from "./activity-hub.js";
 
 /** Close code telling the client to re-authenticate rather than reconnect with a stale session. */
 export const REALTIME_SESSION_REVOKED_CLOSE_CODE = 4401;
@@ -151,7 +151,7 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
             },
           };
           socket.send(JSON.stringify(event));
-          if (activityHub !== undefined && principal.ephemeralActivity) {
+          if (activityHub !== undefined) {
             activityHub.register(
               {
                 id: activityConnectionId,
@@ -326,7 +326,6 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
         };
 
         socket.on("message", (data) => {
-          if (!principal.ephemeralActivity) return;
           const serialized = data.toString();
           if (Buffer.byteLength(serialized) > ACTIVITY_MAX_PAYLOAD_BYTES) {
             socket.close(1002, "Invalid activity frame");

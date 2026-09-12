@@ -262,7 +262,7 @@ async function connectedApp(
   // Only the heartbeat interval is faked so the WebSocket keeps using real I/O.
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const socket = new WebSocket(
-    `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+    `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
     { origin: "app://bundle" },
   );
   sockets.push(socket);
@@ -284,7 +284,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const response = await app.inject({
       method: "GET",
-      url: `/v1/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      url: `/v2/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
       headers: { origin: "app://bundle" },
     });
     expect(response.statusCode).toBe(400);
@@ -379,7 +379,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -438,7 +438,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -477,7 +477,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -515,7 +515,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -770,7 +770,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -820,7 +820,7 @@ describe("realtime socket teardown", () => {
     });
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -894,7 +894,7 @@ describe("realtime ephemeral activity", () => {
     });
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -951,7 +951,7 @@ describe("realtime ephemeral activity", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);

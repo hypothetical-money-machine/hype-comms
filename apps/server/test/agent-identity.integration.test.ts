@@ -1,12 +1,10 @@
-import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  AGENT_CONTEXT_PACK_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   agentContextHistoryResponseSchema,
   agentCurrentPrincipalSchema,
   agentTokenSecretSchema,
@@ -14,12 +12,11 @@ import {
   channelMembersResponseSchema,
   communicationPathsResponseSchema,
   conversationMutationResponseSchema,
-  createAgentTokenResponseSchema,
   createAgentResponseSchema,
+  createAgentTokenResponseSchema,
   createFileUploadResponseSchema,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  listAgentTokensResponseSchema,
   listAgentsResponseSchema,
+  listAgentTokensResponseSchema,
   listConversationsResponseSchema,
   listInvitationsResponseSchema,
   listMembersResponseSchema,
@@ -33,7 +30,7 @@ import {
   workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
 import { type Pool, type QueryResultRow } from "pg";
-import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { z } from "zod";
 
@@ -59,7 +56,7 @@ const now = "2026-07-26T12:00:00.000Z";
 const ownerSessionToken = "o".repeat(43);
 const memberSessionToken = "m".repeat(43);
 const groupCapabilityHeader = {
-  "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+  "x-hype-comms-capabilities": "group-direct-messages-v1",
 } as const;
 const previousDesktopUserSchema = userSchema.extend({
   kind: z.enum(["human", "bot"]).default("human"),
@@ -199,7 +196,7 @@ describe("agent identity and owner administration", () => {
   ) {
     const response = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "hermes", displayName: "Hermes" },
     });
@@ -226,7 +223,7 @@ describe("agent identity and owner administration", () => {
   ) {
     const response = await app.inject({
       method: "POST",
-      url: `/v1/agents/${agentId}/tokens`,
+      url: `/v2/agents/${agentId}/tokens`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { label, ...(scopes === undefined ? {} : { scopes }) },
     });
@@ -253,7 +250,7 @@ describe("agent identity and owner administration", () => {
         (
           await app.inject({
             method: "GET",
-            url: "/v1/members",
+            url: "/v2/members",
             headers: { authorization: prefix + agentCredential.token },
           })
         ).statusCode,
@@ -262,7 +259,7 @@ describe("agent identity and owner administration", () => {
         (
           await app.inject({
             method: "GET",
-            url: "/v1/tasks/mine",
+            url: "/v2/tasks/mine",
             headers: { authorization: prefix + bot.token },
           })
         ).statusCode,
@@ -271,7 +268,7 @@ describe("agent identity and owner administration", () => {
         (
           await app.inject({
             method: "GET",
-            url: "/v1/members",
+            url: "/v2/members",
             headers: {
               authorization: prefix + agentCredential.token,
               cookie: `hype_comms_session=${ownerSessionToken}`,
@@ -290,7 +287,7 @@ describe("agent identity and owner administration", () => {
         (
           await app.inject({
             method: "GET",
-            url: "/v1/tasks/mine",
+            url: "/v2/tasks/mine",
             headers: { authorization, cookie: `hype_comms_session=${ownerSessionToken}` },
           })
         ).statusCode,
@@ -300,7 +297,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/tasks/mine",
+          url: "/v2/tasks/mine",
           headers: { authorization: `Bearer ${agentCredential.token}` },
         })
       ).statusCode,
@@ -309,7 +306,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/members",
+          url: "/v2/members",
           headers: { authorization: `Bearer ${bot.token}` },
         })
       ).statusCode,
@@ -320,7 +317,7 @@ describe("agent identity and owner administration", () => {
     const app = await appWithWorkspace({ agentProvisioningEnabled: false });
     const response = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "hermes", displayName: "Hermes" },
     });
@@ -337,7 +334,7 @@ describe("agent identity and owner administration", () => {
     const rollbackApp = await appWithWorkspace({ agentProvisioningEnabled: false });
     const legacy = await rollbackApp.inject({
       method: "POST",
-      url: `/v1/agents/${agent.user.id}/tokens`,
+      url: `/v2/agents/${agent.user.id}/tokens`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: {
         label: "Rollback break-glass",
@@ -361,7 +358,7 @@ describe("agent identity and owner administration", () => {
     ] as const) {
       const rejected = await rollbackApp.inject({
         method: "POST",
-        url: `/v1/agents/${agent.user.id}/tokens`,
+        url: `/v2/agents/${agent.user.id}/tokens`,
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         payload: { label: `Rejected ${scope}`, scopes: ["workspace:read", scope] },
       });
@@ -387,25 +384,25 @@ describe("agent identity and owner administration", () => {
 
     const createAnother = await gatedApp.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers,
       payload: { username: "gated-agent", displayName: "Gated Agent" },
     });
     const createTokenResponse = await gatedApp.inject({
       method: "POST",
-      url: `/v1/agents/${agent.user.id}/tokens`,
+      url: `/v2/agents/${agent.user.id}/tokens`,
       headers,
       payload: { label: "Gated token", scopes: ["workspace:read"] },
     });
-    const listChannels = await gatedApp.inject({ method: "GET", url: "/v1/channels", headers });
+    const listChannels = await gatedApp.inject({ method: "GET", url: "/v2/channels", headers });
     const joinChannel = await gatedApp.inject({
       method: "PUT",
-      url: `/v1/channels/${generalId}/membership`,
+      url: `/v2/channels/${generalId}/membership`,
       headers,
     });
     const createGroup = await gatedApp.inject({
       method: "POST",
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       headers: { ...headers, "idempotency-key": "gated-group" },
       payload: { memberIds: [memberId, agent.user.id] },
     });
@@ -455,7 +452,7 @@ describe("agent identity and owner administration", () => {
     const headers = { cookie: `hype_comms_session=${ownerSessionToken}` };
     const before = await gatedApp.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers,
       payload: { name: "Before agency cutover", slug: "before-agency-cutover", topic: null },
     });
@@ -466,7 +463,7 @@ describe("agent identity and owner administration", () => {
     await appWithWorkspace({ defaultAgentAgencyEnabled: true });
     const after = await gatedApp.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers,
       payload: { name: "After agency cutover", slug: "after-agency-cutover", topic: null },
     });
@@ -509,28 +506,79 @@ describe("agent identity and owner administration", () => {
     ).resolves.toMatchObject({ rows: [{ default_agent_agency_available: true }] });
   });
 
-  it("negotiates effective scopes in token creation responses", async () => {
+  it("retries an accepted v1 operation through v2 without duplicating its mutation", async () => {
+    const app = await appWithWorkspace();
+    const identity = await identityService.authenticateContext(ownerSessionToken);
+    if (identity === null) throw new Error("Expected the existing owner session");
+    const key = randomUUID();
+    const input = {
+      name: "Preserved channel",
+      slug: "preserved-channel",
+      topic: null,
+      access: "workspace" as const,
+    };
+    const accepted = await workspaceRepository.createChannel(identity, input, key);
+    const before = await pool.query<{ route: string; response_body: unknown }>(
+      `SELECT route, response_body FROM api_idempotency_records WHERE actor_user_id = $1 AND idempotency_key = $2`,
+      [ownerId, key],
+    );
+    expect(before.rows).toEqual([{ route: "/v1/channels", response_body: accepted }]);
+    const eventCountBefore = await pool.query(
+      `SELECT id FROM sync_events WHERE conversation_id = $1`,
+      [accepted.conversation.conversation.id],
+    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const retry = await app.inject({
+        method: "POST",
+        url: "/v2/channels",
+        headers: { cookie: `hype_comms_session=${ownerSessionToken}`, "idempotency-key": key },
+        payload: input,
+      });
+      expect(retry.statusCode).toBe(201);
+      expect(conversationMutationResponseSchema.parse(retry.json())).toEqual(accepted);
+    }
+    expect(
+      (await pool.query(`SELECT id FROM conversations WHERE slug = $1`, [input.slug])).rows,
+    ).toEqual([{ id: accepted.conversation.conversation.id }]);
+    expect(
+      (
+        await pool.query(`SELECT id FROM sync_events WHERE conversation_id = $1`, [
+          accepted.conversation.conversation.id,
+        ])
+      ).rows,
+    ).toEqual(eventCountBefore.rows);
+    expect(
+      (
+        await pool.query(
+          `SELECT route FROM api_idempotency_records WHERE actor_user_id = $1 AND idempotency_key = $2`,
+          [ownerId, key],
+        )
+      ).rows,
+    ).toEqual([{ route: "/v1/channels" }]);
+  });
+
+  it("returns effective scopes in every token response", async () => {
     const app = await appWithWorkspace();
     const agent = await createAgent(app);
     const ownerHeaders = { cookie: `hype_comms_session=${ownerSessionToken}` };
 
     const legacyResponse = await app.inject({
       method: "POST",
-      url: `/v1/agents/${agent.user.id}/tokens`,
+      url: `/v2/agents/${agent.user.id}/tokens`,
       headers: ownerHeaders,
       payload: { label: "Legacy client", scopes: ["workspace:read"] },
     });
     expect(legacyResponse.statusCode).toBe(201);
-    expect(
-      createAgentTokenResponseSchema.parse(legacyResponse.json()).agentToken,
-    ).not.toHaveProperty("effectiveScopes");
+    expect(createAgentTokenResponseSchema.parse(legacyResponse.json()).agentToken).toHaveProperty(
+      "effectiveScopes",
+    );
 
     const capableResponse = await app.inject({
       method: "POST",
-      url: `/v1/agents/${agent.user.id}/tokens`,
+      url: `/v2/agents/${agent.user.id}/tokens`,
       headers: {
         ...ownerHeaders,
-        "x-hype-comms-capabilities": AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+        "x-hype-comms-capabilities": "agent-effective-scopes-v1",
       },
       payload: { label: "Capable client", scopes: ["workspace:read"] },
     });
@@ -543,10 +591,10 @@ describe("agent identity and owner administration", () => {
 
     const listResponse = await app.inject({
       method: "GET",
-      url: `/v1/agents/${agent.user.id}/tokens`,
+      url: `/v2/agents/${agent.user.id}/tokens`,
       headers: {
         ...ownerHeaders,
-        "x-hype-comms-capabilities": AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+        "x-hype-comms-capabilities": "agent-effective-scopes-v1",
       },
     });
     expect(listResponse.statusCode).toBe(200);
@@ -586,58 +634,58 @@ describe("agent identity and owner administration", () => {
     const [agents, tokens, me, members] = await Promise.all([
       app.inject({
         method: "GET",
-        url: "/v1/agents",
+        url: "/v2/agents",
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
-        url: `/v1/agents/${agent.user.id}/tokens`,
+        url: `/v2/agents/${agent.user.id}/tokens`,
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/auth/me",
+        url: "/v2/auth/me",
         headers: { authorization: `Bearer ${created.token}` },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/members",
+        url: "/v2/members",
         headers: { authorization: `Bearer ${created.token}` },
       }),
     ]);
     expect(listAgentsResponseSchema.parse(agents.json()).agents).toEqual([agent]);
     expect(listAgentTokensResponseSchema.parse(tokens.json()).tokens).toHaveLength(1);
-    expect(tokens.json().tokens[0]).not.toHaveProperty("effectiveScopes");
+    expect(tokens.json().tokens[0]).toHaveProperty("effectiveScopes");
     expect(tokens.body).not.toContain(created.token);
     expect(agentCurrentPrincipalSchema.parse(me.json())).toMatchObject({
       type: "agent",
       user: { id: agent.user.id },
       scopes: ["workspace:read", "messages:write"],
     });
-    expect(me.json()).not.toHaveProperty("effectiveScopes");
+    expect(me.json()).toHaveProperty("effectiveScopes");
     const [effectiveTokens, effectiveMe, effectiveBootstrap] = await Promise.all([
       app.inject({
         method: "GET",
-        url: `/v1/agents/${agent.user.id}/tokens`,
+        url: `/v2/agents/${agent.user.id}/tokens`,
         headers: {
           cookie: `hype_comms_session=${ownerSessionToken}`,
-          "x-hype-comms-capabilities": AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+          "x-hype-comms-capabilities": "agent-effective-scopes-v1",
         },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/auth/me",
+        url: "/v2/auth/me",
         headers: {
           authorization: `Bearer ${created.token}`,
-          "x-hype-comms-capabilities": AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+          "x-hype-comms-capabilities": "agent-effective-scopes-v1",
         },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/bootstrap",
+        url: "/v2/bootstrap",
         headers: {
           authorization: `Bearer ${created.token}`,
-          "x-hype-comms-capabilities": AGENT_EFFECTIVE_SCOPES_CAPABILITY,
+          "x-hype-comms-capabilities": "agent-effective-scopes-v1",
         },
       }),
     ]);
@@ -668,7 +716,7 @@ describe("agent identity and owner administration", () => {
 
     const ambiguous = await app.inject({
       method: "GET",
-      url: "/v1/members",
+      url: "/v2/members",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         authorization: `Bearer ${created.token}`,
@@ -679,12 +727,12 @@ describe("agent identity and owner administration", () => {
 
     const disabled = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}`,
+      url: `/v2/agents/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const rejected = await app.inject({
       method: "GET",
-      url: "/v1/auth/me",
+      url: "/v2/auth/me",
       headers: { authorization: `Bearer ${created.token}` },
     });
     expect(disabled.statusCode).toBe(204);
@@ -770,7 +818,7 @@ describe("agent identity and owner administration", () => {
 
     const disabled = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}`,
+      url: `/v2/agents/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(disabled.statusCode).toBe(204);
@@ -826,7 +874,7 @@ describe("agent identity and owner administration", () => {
 
     const first = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}`,
+      url: `/v2/agents/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(first.statusCode).toBe(204);
@@ -840,7 +888,7 @@ describe("agent identity and owner administration", () => {
 
     const second = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}`,
+      url: `/v2/agents/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     // The repeat disable still reports success -- the row mutations are idempotent -- but it must
@@ -865,7 +913,7 @@ describe("agent identity and owner administration", () => {
 
     const beforeMembers = await app.inject({
       method: "GET",
-      url: "/v1/members",
+      url: "/v2/members",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(listMembersResponseSchema.parse(beforeMembers.json()).members).toContainEqual({
@@ -875,7 +923,7 @@ describe("agent identity and owner administration", () => {
 
     const disabled = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}`,
+      url: `/v2/agents/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(disabled.statusCode).toBe(204);
@@ -883,12 +931,12 @@ describe("agent identity and owner administration", () => {
     const [members, bootstrap] = await Promise.all([
       app.inject({
         method: "GET",
-        url: "/v1/members",
+        url: "/v2/members",
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/bootstrap",
+        url: "/v2/bootstrap",
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       }),
     ]);
@@ -927,7 +975,7 @@ describe("agent identity and owner administration", () => {
     const mentionClientMessageId = randomUUID();
     const mention = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": mentionClientMessageId,
@@ -959,22 +1007,22 @@ describe("agent identity and owner administration", () => {
     const created = await createToken(app, agent.user.id, "Gateway");
 
     const requests = [
-      { method: "GET", url: "/v1/agents" },
+      { method: "GET", url: "/v2/agents" },
       {
         method: "POST",
-        url: "/v1/agents",
+        url: "/v2/agents",
         payload: { username: "other", displayName: "Other" },
       },
-      { method: "DELETE", url: `/v1/agents/${agent.user.id}` },
-      { method: "GET", url: `/v1/agents/${agent.user.id}/tokens` },
+      { method: "DELETE", url: `/v2/agents/${agent.user.id}` },
+      { method: "GET", url: `/v2/agents/${agent.user.id}/tokens` },
       {
         method: "POST",
-        url: `/v1/agents/${agent.user.id}/tokens`,
+        url: `/v2/agents/${agent.user.id}/tokens`,
         payload: { label: "Other" },
       },
       {
         method: "DELETE",
-        url: `/v1/agents/${agent.user.id}/tokens/${created.agentToken.id}`,
+        url: `/v2/agents/${agent.user.id}/tokens/${created.agentToken.id}`,
       },
     ] as const;
 
@@ -1004,13 +1052,13 @@ describe("agent identity and owner administration", () => {
     const [humanOpen, agentOpen] = await Promise.all([
       app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         payload: { memberId: agent.user.id },
       }),
       app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: { authorization: `Bearer ${conversations.token}` },
         payload: { memberId: ownerId },
       }),
@@ -1022,7 +1070,7 @@ describe("agent identity and owner administration", () => {
 
     const reopened = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { authorization: `Bearer ${read.token}` },
       payload: { memberId: ownerId },
     });
@@ -1032,13 +1080,13 @@ describe("agent identity and owner administration", () => {
     const [missing, noReadScope] = await Promise.all([
       app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: { authorization: `Bearer ${read.token}` },
         payload: { memberId },
       }),
       app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: { authorization: `Bearer ${messages.token}` },
         payload: { memberId: ownerId },
       }),
@@ -1077,7 +1125,7 @@ describe("agent identity and owner administration", () => {
 
     const opened = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { memberId: agent.user.id },
     });
@@ -1088,7 +1136,7 @@ describe("agent identity and owner administration", () => {
     const clientMessageId = randomUUID();
     const sent = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": clientMessageId,
@@ -1107,7 +1155,7 @@ describe("agent identity and owner administration", () => {
 
     const reopened = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { authorization: `Bearer ${read.token}` },
       payload: { memberId: ownerId },
     });
@@ -1117,7 +1165,7 @@ describe("agent identity and owner administration", () => {
     ).toBe(conversationId);
 
     const contextUrl =
-      `/v1/conversations/${conversationId}/messages?contextPack=true` +
+      `/v2/conversations/${conversationId}/messages?contextPack=true` +
       `&throughMessageId=${anchor.id}`;
     const [context, forbidden] = await Promise.all([
       app.inject({
@@ -1125,7 +1173,7 @@ describe("agent identity and owner administration", () => {
         url: contextUrl,
         headers: {
           authorization: `Bearer ${read.token}`,
-          "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+          "x-hype-comms-capabilities": "agent-context-pack-v1",
         },
       }),
       app.inject({
@@ -1133,7 +1181,7 @@ describe("agent identity and owner administration", () => {
         url: contextUrl,
         headers: {
           authorization: `Bearer ${noRead.token}`,
-          "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+          "x-hype-comms-capabilities": "agent-context-pack-v1",
         },
       }),
     ]);
@@ -1193,12 +1241,12 @@ describe("agent identity and owner administration", () => {
     ]);
 
     const readRequests = [
-      { method: "GET", url: "/v1/bootstrap" },
-      { method: "GET", url: "/v1/members" },
-      { method: "GET", url: "/v1/conversations" },
-      { method: "GET", url: `/v1/conversations/${generalId}/messages` },
-      { method: "GET", url: "/v1/sync?after=0" },
-      { method: "POST", url: "/v1/realtime/tickets" },
+      { method: "GET", url: "/v2/bootstrap" },
+      { method: "GET", url: "/v2/members" },
+      { method: "GET", url: "/v2/conversations" },
+      { method: "GET", url: `/v2/conversations/${generalId}/messages` },
+      { method: "GET", url: "/v2/sync?after=0" },
+      { method: "POST", url: "/v2/realtime/tickets" },
     ] as const;
     for (const request of readRequests) {
       expect(
@@ -1222,7 +1270,7 @@ describe("agent identity and owner administration", () => {
     const firstMessageId = randomUUID();
     const sent = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         authorization: `Bearer ${messages.token}`,
         "idempotency-key": firstMessageId,
@@ -1242,12 +1290,12 @@ describe("agent identity and owner administration", () => {
     const [threadWithReadScope, threadWithoutReadScope] = await Promise.all([
       app.inject({
         method: "GET",
-        url: `/v1/messages/${message.id}/thread`,
+        url: `/v2/messages/${message.id}/thread`,
         headers: { authorization: `Bearer ${read.token}` },
       }),
       app.inject({
         method: "GET",
-        url: `/v1/messages/${message.id}/thread`,
+        url: `/v2/messages/${message.id}/thread`,
         headers: { authorization: `Bearer ${messages.token}` },
       }),
     ]);
@@ -1256,25 +1304,25 @@ describe("agent identity and owner administration", () => {
 
     const channel = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { authorization: `Bearer ${conversations.token}` },
       payload: { name: "Agent Work", slug: "agent-work", topic: null },
     });
     const direct = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { authorization: `Bearer ${conversations.token}` },
       payload: { memberId: ownerId },
     });
     const narrowDirect = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { authorization: `Bearer ${defaultAgency.token}` },
       payload: { memberId: ownerId },
     });
     const cursor = await app.inject({
       method: "PUT",
-      url: `/v1/conversations/${generalId}/read-cursor`,
+      url: `/v2/conversations/${generalId}/read-cursor`,
       headers: { authorization: `Bearer ${cursors.token}` },
       payload: { lastReadMessageId: message.id },
     });
@@ -1288,7 +1336,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${createdChannelId}/messages`,
+          url: `/v2/conversations/${createdChannelId}/messages`,
           headers: { authorization: `Bearer ${read.token}` },
         })
       ).statusCode,
@@ -1298,7 +1346,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "POST",
-          url: `/v1/conversations/${createdChannelId}/messages`,
+          url: `/v2/conversations/${createdChannelId}/messages`,
           headers: {
             authorization: `Bearer ${messages.token}`,
             "idempotency-key": createdChannelMessageId,
@@ -1316,7 +1364,7 @@ describe("agent identity and owner administration", () => {
     ).toBe(201);
     const creatorSync = await app.inject({
       method: "GET",
-      url: "/v1/sync?after=0",
+      url: "/v2/sync?after=0",
       headers: { authorization: `Bearer ${read.token}` },
     });
     expect(creatorSync.statusCode).toBe(200);
@@ -1327,25 +1375,25 @@ describe("agent identity and owner administration", () => {
     const forbiddenWrites = await Promise.all([
       app.inject({
         method: "POST",
-        url: "/v1/channels",
+        url: "/v2/channels",
         headers: { authorization: `Bearer ${read.token}` },
         payload: { name: "No", slug: "no", topic: null },
       }),
       app.inject({
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         headers: { authorization: `Bearer ${read.token}` },
         payload: { memberId },
       }),
       app.inject({
         method: "PATCH",
-        url: `/v1/channels/${createdChannelId}`,
+        url: `/v2/channels/${createdChannelId}`,
         headers: { authorization: `Bearer ${read.token}` },
         payload: { isArchived: true },
       }),
       app.inject({
         method: "POST",
-        url: `/v1/conversations/${generalId}/messages`,
+        url: `/v2/conversations/${generalId}/messages`,
         headers: {
           authorization: `Bearer ${read.token}`,
           "idempotency-key": randomUUID(),
@@ -1354,7 +1402,7 @@ describe("agent identity and owner administration", () => {
       }),
       app.inject({
         method: "PUT",
-        url: `/v1/conversations/${generalId}/read-cursor`,
+        url: `/v2/conversations/${generalId}/read-cursor`,
         headers: { authorization: `Bearer ${read.token}` },
         payload: { lastReadMessageId: message.id },
       }),
@@ -1367,7 +1415,7 @@ describe("agent identity and owner administration", () => {
     const agent = await createAgent(app, { seatPublicChannels: false });
     const observerResponse = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "channel-observer", displayName: "Channel Observer" },
     });
@@ -1381,7 +1429,7 @@ describe("agent identity and owner administration", () => {
     const joinOnly = await createToken(app, agent.user.id, "Join without read", ["channels:join"]);
     const privateChannel = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: {
         name: "Private Plans",
@@ -1396,7 +1444,7 @@ describe("agent identity and owner administration", () => {
 
     const catalog = await app.inject({
       method: "GET",
-      url: "/v1/channels?limit=50",
+      url: "/v2/channels?limit=50",
       headers: { authorization: `Bearer ${agency.token}` },
     });
     expect(catalog.statusCode).toBe(200);
@@ -1413,7 +1461,7 @@ describe("agent identity and owner administration", () => {
 
     const beforeJoin = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: { authorization: `Bearer ${agency.token}` },
     });
     expect(beforeJoin.statusCode).toBe(404);
@@ -1421,7 +1469,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/admin/communication-paths",
+          url: "/v2/admin/communication-paths",
           headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         })
       ).json(),
@@ -1435,7 +1483,7 @@ describe("agent identity and owner administration", () => {
     const publicMentionBeforeJoinId = randomUUID();
     const publicMentionBeforeJoin = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": publicMentionBeforeJoinId,
@@ -1465,7 +1513,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "PUT",
-          url: `/v1/channels/${generalId}/membership`,
+          url: `/v2/channels/${generalId}/membership`,
           headers: { authorization: `Bearer ${agency.token}` },
           payload: { unexpected: true },
         })
@@ -1476,7 +1524,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "PUT",
-          url: `/v1/channels/${generalId}/membership`,
+          url: `/v2/channels/${generalId}/membership`,
           headers: { authorization: `Bearer ${joinOnly.token}` },
         })
       ).statusCode,
@@ -1494,7 +1542,7 @@ describe("agent identity and owner administration", () => {
 
     const joined = await app.inject({
       method: "PUT",
-      url: `/v1/channels/${generalId}/membership`,
+      url: `/v2/channels/${generalId}/membership`,
       headers: { authorization: `Bearer ${agency.token}` },
     });
     expect(joined.statusCode).toBe(200);
@@ -1514,7 +1562,7 @@ describe("agent identity and owner administration", () => {
     expect(joinedAt).toBeDefined();
     const repeatedJoin = await app.inject({
       method: "PUT",
-      url: `/v1/channels/${generalId}/membership`,
+      url: `/v2/channels/${generalId}/membership`,
       headers: { authorization: `Bearer ${agency.token}` },
     });
     expect(repeatedJoin.statusCode).toBe(200);
@@ -1539,7 +1587,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/channels/${generalId}/members`,
+          url: `/v2/channels/${generalId}/members`,
           headers: { authorization: `Bearer ${agency.token}` },
         })
       ).json(),
@@ -1565,7 +1613,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${generalId}/messages`,
+          url: `/v2/conversations/${generalId}/messages`,
           headers: { authorization: `Bearer ${agency.token}` },
         })
       ).statusCode,
@@ -1574,7 +1622,7 @@ describe("agent identity and owner administration", () => {
     const publicMentionAfterJoinId = randomUUID();
     const publicMentionAfterJoin = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": publicMentionAfterJoinId,
@@ -1593,7 +1641,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/admin/communication-paths",
+          url: "/v2/admin/communication-paths",
           headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         })
       ).json(),
@@ -1610,7 +1658,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "PUT",
-          url: `/v1/channels/${privateChannelId}/membership`,
+          url: `/v2/channels/${privateChannelId}/membership`,
           headers: { authorization: `Bearer ${agency.token}` },
         })
       ).statusCode,
@@ -1619,7 +1667,7 @@ describe("agent identity and owner administration", () => {
     const privateMentionBeforeInviteId = randomUUID();
     const privateMentionBeforeInvite = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${privateChannelId}/messages`,
+      url: `/v2/conversations/${privateChannelId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": privateMentionBeforeInviteId,
@@ -1646,7 +1694,7 @@ describe("agent identity and owner administration", () => {
     ).toBe(0);
     const invited = await app.inject({
       method: "PUT",
-      url: `/v1/channels/${privateChannelId}/members/${agent.user.id}`,
+      url: `/v2/channels/${privateChannelId}/members/${agent.user.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { role: "member" },
     });
@@ -1655,7 +1703,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${privateChannelId}/messages`,
+          url: `/v2/conversations/${privateChannelId}/messages`,
           headers: { authorization: `Bearer ${agency.token}` },
         })
       ).statusCode,
@@ -1664,7 +1712,7 @@ describe("agent identity and owner administration", () => {
     const privateMentionAfterInviteId = randomUUID();
     const privateMentionAfterInvite = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${privateChannelId}/messages`,
+      url: `/v2/conversations/${privateChannelId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": privateMentionAfterInviteId,
@@ -1692,13 +1740,13 @@ describe("agent identity and owner administration", () => {
     const headers = { cookie: `hype_comms_session=${ownerSessionToken}` };
     const alpha = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers,
       payload: { name: "Alpha", slug: "alpha", topic: null },
     });
     const zulu = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers,
       payload: { name: "Zulu", slug: "zulu", topic: null },
     });
@@ -1711,7 +1759,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/channels?limit=1",
+          url: "/v2/channels?limit=1",
           headers: { authorization: `Bearer ${readOnly.token}` },
         })
       ).statusCode,
@@ -1720,7 +1768,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/channels?limit=1",
+          url: "/v2/channels?limit=1",
           headers: { authorization: `Bearer ${token.token}` },
         })
       ).json(),
@@ -1731,7 +1779,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "PATCH",
-          url: `/v1/channels/${alphaId}`,
+          url: `/v2/channels/${alphaId}`,
           headers,
           payload: { isArchived: true },
         })
@@ -1741,7 +1789,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/channels?limit=50&after=${encodeURIComponent(first.nextCursor ?? "")}`,
+          url: `/v2/channels?limit=50&after=${encodeURIComponent(first.nextCursor ?? "")}`,
           headers: { authorization: `Bearer ${token.token}` },
         })
       ).json(),
@@ -1754,7 +1802,7 @@ describe("agent identity and owner administration", () => {
     const firstAgent = await createAgent(app);
     const secondAgentResponse = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "athena", displayName: "Athena" },
     });
@@ -1775,7 +1823,7 @@ describe("agent identity and owner administration", () => {
     const idempotencyKey = randomUUID();
     const request = {
       method: "POST" as const,
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       headers: {
         authorization: `Bearer ${first.token}`,
         "idempotency-key": idempotencyKey,
@@ -1817,7 +1865,7 @@ describe("agent identity and owner administration", () => {
           (event.type === "direct_conversation.created" &&
             event.payload.conversation.id === groupId),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(BigInt(legacySync.nextCursor)).toBeGreaterThanOrEqual(BigInt(groupCreationSequence));
     const groupCapableSync = await workspaceRepository.syncPrincipal(
       { workspaceId, userId: firstAgent.user.id, groupDirectMessages: true },
@@ -1830,133 +1878,45 @@ describe("agent identity and owner administration", () => {
       payload: { conversation: { id: groupId, kind: "group_direct_message" } },
     });
 
-    const legacyBootstrap = await app.inject({
+    const bootstrap = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: { authorization: `Bearer ${first.token}` },
     });
-    const legacyHistory = await app.inject({
-      method: "GET",
-      url: `/v1/conversations/${groupId}/messages`,
-      headers: { authorization: `Bearer ${first.token}` },
-    });
-    const legacyClientMessageId = randomUUID();
-    const legacySend = await app.inject({
-      method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
-      headers: {
-        authorization: `Bearer ${first.token}`,
-        "idempotency-key": legacyClientMessageId,
-      },
-      payload: {
-        threadRootId: null,
-        body: "This must not reach concealed recipients",
-        bodyFormat: "hype_comms_markdown_v1",
-        clientMessageId: legacyClientMessageId,
-        mentionedUserIds: [],
-        attachmentIds: [],
-      },
-    });
-    expect(legacyBootstrap.statusCode).toBe(200);
+    expect(bootstrap.statusCode).toBe(200);
     expect(
       workspaceBootstrapResponseSchema
-        .parse(legacyBootstrap.json())
+        .parse(bootstrap.json())
         .conversations.some((summary) => summary.conversation.id === groupId),
-    ).toBe(false);
-    const legacyConversationIds: string[] = [];
-    let legacyAfter: string | null = null;
+    ).toBe(true);
+    const conversationIds: string[] = [];
+    let after: string | null = null;
     for (;;) {
       const page = listConversationsResponseSchema.parse(
         (
           await app.inject({
             method: "GET",
             url:
-              `/v1/conversations?limit=1` +
-              (legacyAfter === null ? "" : `&after=${encodeURIComponent(legacyAfter)}`),
+              "/v2/conversations?limit=1" +
+              (after === null ? "" : `&after=${encodeURIComponent(after)}`),
             headers: { authorization: `Bearer ${first.token}` },
           })
         ).json(),
       );
       expect(page.conversations).toHaveLength(1);
-      expect(page.conversations[0]?.conversation.kind).not.toBe("group_direct_message");
-      legacyConversationIds.push(page.conversations[0]!.conversation.id);
+      conversationIds.push(page.conversations[0]!.conversation.id);
       if (!page.hasMore) break;
       expect(page.nextCursor).not.toBeNull();
-      legacyAfter = page.nextCursor;
+      expect(page.nextCursor).not.toBe(after);
+      after = page.nextCursor;
     }
-    expect(legacyConversationIds).toContain(generalId);
-    let capableAfter: string | null = null;
-    let cursorBeforeGroup: string | null = null;
-    for (;;) {
-      const page = listConversationsResponseSchema.parse(
-        (
-          await app.inject({
-            method: "GET",
-            url:
-              "/v1/conversations?limit=1" +
-              (capableAfter === null ? "" : `&after=${encodeURIComponent(capableAfter)}`),
-            headers: {
-              authorization: `Bearer ${first.token}`,
-              ...groupCapabilityHeader,
-            },
-          })
-        ).json(),
-      );
-      const summary = page.conversations[0];
-      if (summary?.conversation.kind === "group_direct_message") {
-        expect(summary.conversation.id).toBe(groupId);
-        break;
-      }
-      expect(summary).toBeDefined();
-      expect(page.hasMore).toBe(true);
-      expect(page.nextCursor).not.toBeNull();
-      if (page.nextCursor === null) throw new Error("Expected another capable conversation page");
-      cursorBeforeGroup = page.nextCursor;
-      capableAfter = page.nextCursor;
-    }
-    if (cursorBeforeGroup === null) throw new Error("Expected a regular conversation before group");
-    const legacyGroupOnlyTail = listConversationsResponseSchema.parse(
-      (
-        await app.inject({
-          method: "GET",
-          url: `/v1/conversations?limit=1&after=${encodeURIComponent(cursorBeforeGroup)}`,
-          headers: { authorization: `Bearer ${first.token}` },
-        })
-      ).json(),
-    );
-    expect(legacyGroupOnlyTail).toEqual({ conversations: [], nextCursor: null, hasMore: false });
-    for (const response of [legacyHistory, legacySend]) {
-      expect(response.statusCode).toBe(409);
-      expect(apiErrorEnvelopeSchema.parse(response.json()).error).toMatchObject({
-        code: "CONFLICT",
-        message: expect.stringContaining("Update Hype Comms"),
-      });
-    }
-    expect(
-      (
-        await app.inject({
-          method: "GET",
-          url: "/v1/members",
-          headers: { authorization: `Bearer ${first.token}` },
-        })
-      ).statusCode,
-    ).toBe(200);
-    expect(
-      (
-        await pool.query(
-          `SELECT 1
-             FROM messages
-            WHERE conversation_id = $1
-              AND client_message_id = $2`,
-          [groupId, legacyClientMessageId],
-        )
-      ).rowCount,
-    ).toBe(0);
+    expect(conversationIds).toContain(generalId);
+    expect(conversationIds).toContain(groupId);
 
     const firstClientMessageId = randomUUID();
     const firstMessage = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         authorization: `Bearer ${first.token}`,
         "idempotency-key": firstClientMessageId,
@@ -1976,7 +1936,7 @@ describe("agent identity and owner administration", () => {
     const visibleAfterGroupsClientId = randomUUID();
     const visibleAfterGroups = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": visibleAfterGroupsClientId,
@@ -1994,7 +1954,7 @@ describe("agent identity and owner administration", () => {
     const visibleAfterGroupsId = sendMessageResponseSchema.parse(visibleAfterGroups.json()).message
       .id;
     let legacySyncCursor = beforeGroupCreation;
-    let sawHiddenOnlySyncPage = false;
+    let sawGroupSyncPage = false;
     let sawVisibleAfterGroups = false;
     for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
       const page = await workspaceRepository.syncPrincipal(
@@ -2002,7 +1962,7 @@ describe("agent identity and owner administration", () => {
         legacySyncCursor,
         1,
       );
-      if (page.events.length === 0) sawHiddenOnlySyncPage = true;
+      if (page.events.some((event) => event.conversationId === groupId)) sawGroupSyncPage = true;
       if (
         page.events.some(
           (event) =>
@@ -2015,7 +1975,7 @@ describe("agent identity and owner administration", () => {
       expect(BigInt(page.nextCursor)).toBeGreaterThan(BigInt(legacySyncCursor));
       legacySyncCursor = page.nextCursor;
     }
-    expect(sawHiddenOnlySyncPage).toBe(true);
+    expect(sawGroupSyncPage).toBe(true);
     expect(sawVisibleAfterGroups).toBe(true);
     const legacyRead = await app.inject({
       method: "PUT",
@@ -2088,7 +2048,7 @@ describe("agent identity and owner administration", () => {
         legacyRetract,
         legacyUpload,
       ].map((response) => response.statusCode),
-    ).toEqual([409, 409, 409, 409, 409, 409, 409, 409, 409]);
+    ).toEqual([426, 426, 426, 426, 426, 426, 426, 426, 426]);
     await expect(
       pool.query(`SELECT deleted_at FROM messages WHERE id = $1`, [firstCreatedMessage.id]),
     ).resolves.toMatchObject({ rows: [{ deleted_at: null }] });
@@ -2097,12 +2057,12 @@ describe("agent identity and owner administration", () => {
     ).resolves.toMatchObject({ rowCount: 0 });
     const secondHistory = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: { authorization: `Bearer ${second.token}`, ...groupCapabilityHeader },
     });
     const ownerHistory = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         ...groupCapabilityHeader,
@@ -2110,7 +2070,7 @@ describe("agent identity and owner administration", () => {
     });
     const observerHistory = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: { cookie: `hype_comms_session=${memberSessionToken}` },
     });
     expect(secondHistory.statusCode).toBe(200);
@@ -2128,7 +2088,7 @@ describe("agent identity and owner administration", () => {
     const rejectedObserverMentionId = randomUUID();
     const rejectedObserverMention = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         authorization: `Bearer ${first.token}`,
         "idempotency-key": rejectedObserverMentionId,
@@ -2169,7 +2129,7 @@ describe("agent identity and owner administration", () => {
     const replyClientMessageId = randomUUID();
     const reply = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         authorization: `Bearer ${second.token}`,
         "idempotency-key": replyClientMessageId,
@@ -2187,7 +2147,7 @@ describe("agent identity and owner administration", () => {
     expect(reply.statusCode).toBe(201);
     const firstHistory = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
     });
     expect(firstHistory.statusCode).toBe(200);
@@ -2199,7 +2159,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/admin/communication-paths",
+          url: "/v2/admin/communication-paths",
           headers: {
             cookie: `hype_comms_session=${ownerSessionToken}`,
             ...groupCapabilityHeader,
@@ -2251,7 +2211,7 @@ describe("agent identity and owner administration", () => {
       const clientMessageId = randomUUID();
       const response = await app.inject({
         method: "POST",
-        url: `/v1/conversations/${conversationId}/messages`,
+        url: `/v2/conversations/${conversationId}/messages`,
         headers: {
           ...(groupMessage
             ? { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader }
@@ -2289,7 +2249,7 @@ describe("agent identity and owner administration", () => {
       const response = await app.inject({
         method: "GET",
         url:
-          "/v1/search?query=agencyneedle&limit=1" +
+          "/v2/search?query=agencyneedle&limit=1" +
           (legacySearchAfter === null ? "" : `&after=${encodeURIComponent(legacySearchAfter)}`),
         headers: { authorization: `Bearer ${first.token}` },
       });
@@ -2300,14 +2260,16 @@ describe("agent identity and owner administration", () => {
       if (page.nextCursor === null) break;
       legacySearchAfter = page.nextCursor;
     }
-    expect(new Set(legacySearchIds)).toEqual(new Set(searchableRegularIds));
-    expect(legacySearchIds).toHaveLength(searchableRegularIds.length);
-    expect(legacySearchIds.some((id) => searchableGroupIds.includes(id))).toBe(false);
+    expect(new Set(legacySearchIds)).toEqual(
+      new Set([...searchableRegularIds, ...searchableGroupIds]),
+    );
+    expect(legacySearchIds).toHaveLength(searchableRegularIds.length + searchableGroupIds.length);
+    expect(legacySearchIds.some((id) => searchableGroupIds.includes(id))).toBe(true);
     const capableSearch = messageSearchResponseSchema.parse(
       (
         await app.inject({
           method: "GET",
-          url: "/v1/search?query=agencyneedle&limit=10",
+          url: "/v2/search?query=agencyneedle&limit=10",
           headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
         })
       ).json(),
@@ -2322,7 +2284,7 @@ describe("agent identity and owner administration", () => {
       url: `/v1/messages/${retractedMessageId}`,
       headers: { authorization: `Bearer ${first.token}` },
     });
-    expect(legacyRetractBeforeCommit.statusCode).toBe(409);
+    expect(legacyRetractBeforeCommit.statusCode).toBe(426);
     expect(
       (
         await pool.query<{ deleted_at: Date | null } & QueryResultRow>(
@@ -2335,7 +2297,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "DELETE",
-          url: `/v1/messages/${retractedMessageId}`,
+          url: `/v2/messages/${retractedMessageId}`,
           headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
         })
       ).statusCode,
@@ -2351,27 +2313,27 @@ describe("agent identity and owner administration", () => {
         reactionResponse,
         addReactionResponse,
       ] = await Promise.all([
-        app.inject({ method: "GET", url: `/v1/messages/${retractedMessageId}`, headers }),
+        app.inject({ method: "GET", url: `/v2/messages/${retractedMessageId}`, headers }),
         app.inject({
           method: "GET",
-          url: `/v1/messages/${retractedMessageId}/thread`,
+          url: `/v2/messages/${retractedMessageId}/thread`,
           headers,
         }),
         app.inject({
           method: "POST",
-          url: "/v1/attachments/query",
+          url: "/v2/attachments/query",
           headers,
           payload: { messageIds: [retractedMessageId] },
         }),
         app.inject({
           method: "POST",
-          url: "/v1/reactions/query",
+          url: "/v2/reactions/query",
           headers,
           payload: { messageIds: [retractedMessageId] },
         }),
         app.inject({
           method: "PUT",
-          url: `/v1/messages/${retractedMessageId}/reactions/%F0%9F%91%8D`,
+          url: `/v2/messages/${retractedMessageId}/reactions/%F0%9F%91%8D`,
           headers,
         }),
       ]);
@@ -2391,7 +2353,7 @@ describe("agent identity and owner administration", () => {
     const liveReplyIdempotencyKey = randomUUID();
     const liveReply = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         authorization: `Bearer ${second.token}`,
         "idempotency-key": liveReplyIdempotencyKey,
@@ -2412,7 +2374,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "DELETE",
-          url: `/v1/messages/${retractedThreadRootId}`,
+          url: `/v2/messages/${retractedThreadRootId}`,
           headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
         })
       ).statusCode,
@@ -2421,7 +2383,7 @@ describe("agent identity and owner administration", () => {
     const [capableThread, legacyThreadAfterRetract, outsiderThread] = await Promise.all([
       app.inject({
         method: "GET",
-        url: `/v1/messages/${retractedThreadRootId}/thread`,
+        url: `/v2/messages/${retractedThreadRootId}/thread`,
         headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
       }),
       app.inject({
@@ -2431,7 +2393,7 @@ describe("agent identity and owner administration", () => {
       }),
       app.inject({
         method: "GET",
-        url: `/v1/messages/${retractedThreadRootId}/thread`,
+        url: `/v2/messages/${retractedThreadRootId}/thread`,
         headers: {
           cookie: `hype_comms_session=${memberSessionToken}`,
           ...groupCapabilityHeader,
@@ -2448,7 +2410,7 @@ describe("agent identity and owner administration", () => {
       replies: [liveReplyMessage],
     });
     expect(capableThread.body).not.toContain(retractedThreadSecret);
-    expect(legacyThreadAfterRetract.statusCode).toBe(409);
+    expect(legacyThreadAfterRetract.statusCode).toBe(426);
     expect(apiErrorEnvelopeSchema.parse(legacyThreadAfterRetract.json()).error.code).toBe(
       "CONFLICT",
     );
@@ -2461,7 +2423,7 @@ describe("agent identity and owner administration", () => {
     const stageIdempotencyKey = randomUUID();
     const stagedResponse = await app.inject({
       method: "POST",
-      url: "/v1/files/uploads",
+      url: "/v2/files/uploads",
       headers: {
         authorization: `Bearer ${second.token}`,
         "idempotency-key": stageIdempotencyKey,
@@ -2479,7 +2441,7 @@ describe("agent identity and owner administration", () => {
     const stagedAttachment = createFileUploadResponseSchema.parse(stagedResponse.json()).attachment;
     const legacyOwnerPendingRead = await app.inject({
       method: "GET",
-      url: `/v1/files/${stagedAttachment.id}/content`,
+      url: `/v2/files/${stagedAttachment.id}/content`,
       headers: { authorization: `Bearer ${second.token}` },
     });
     expect(legacyOwnerPendingRead.statusCode).toBe(404);
@@ -2491,16 +2453,16 @@ describe("agent identity and owner administration", () => {
       { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
     ]) {
       const [readResponse, putResponse, completeResponse] = await Promise.all([
-        app.inject({ method: "GET", url: `/v1/files/${stagedAttachment.id}/content`, headers }),
+        app.inject({ method: "GET", url: `/v2/files/${stagedAttachment.id}/content`, headers }),
         app.inject({
           method: "PUT",
-          url: `/v1/files/${stagedAttachment.id}/content`,
+          url: `/v2/files/${stagedAttachment.id}/content`,
           headers: { ...headers, "content-type": "text/plain" },
           payload: stagedBytes,
         }),
         app.inject({
           method: "POST",
-          url: `/v1/files/${stagedAttachment.id}/complete`,
+          url: `/v2/files/${stagedAttachment.id}/complete`,
           headers: { ...headers, "idempotency-key": randomUUID() },
           payload: { sizeBytes: stagedBytes.byteLength, contentSha256: stagedHash },
         }),
@@ -2524,7 +2486,7 @@ describe("agent identity and owner administration", () => {
       },
       payload: { sizeBytes: stagedBytes.byteLength, contentSha256: stagedHash },
     });
-    expect([legacyOwnerPut.statusCode, legacyOwnerComplete.statusCode]).toEqual([409, 409]);
+    expect([legacyOwnerPut.statusCode, legacyOwnerComplete.statusCode]).toEqual([426, 426]);
     expect(
       (
         await pool.query<{ status: string; content_received_at: Date | null } & QueryResultRow>(
@@ -2537,7 +2499,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "PUT",
-          url: `/v1/files/${stagedAttachment.id}/content`,
+          url: `/v2/files/${stagedAttachment.id}/content`,
           headers: {
             authorization: `Bearer ${second.token}`,
             "content-type": "text/plain",
@@ -2551,7 +2513,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "POST",
-          url: `/v1/files/${stagedAttachment.id}/complete`,
+          url: `/v2/files/${stagedAttachment.id}/complete`,
           headers: {
             authorization: `Bearer ${second.token}`,
             "idempotency-key": randomUUID(),
@@ -2565,16 +2527,16 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/files/${stagedAttachment.id}/content`,
+          url: `/v2/files/${stagedAttachment.id}/content`,
           headers: { authorization: `Bearer ${second.token}` },
         })
       ).statusCode,
-    ).toBe(409);
+    ).toBe(200);
     expect(
       (
         await app.inject({
           method: "GET",
-          url: `/v1/files/${stagedAttachment.id}/content`,
+          url: `/v2/files/${stagedAttachment.id}/content`,
           headers: { authorization: `Bearer ${second.token}`, ...groupCapabilityHeader },
         })
       ).statusCode,
@@ -2584,14 +2546,14 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "DELETE",
-          url: `/v1/agents/${secondAgent.user.id}`,
+          url: `/v2/agents/${secondAgent.user.id}`,
           headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         })
       ).statusCode,
     ).toBe(204);
     const bootstrapAfterDisable = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
     });
     expect(bootstrapAfterDisable.statusCode).toBe(200);
@@ -2603,7 +2565,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: "/v1/conversations?limit=50",
+          url: "/v2/conversations?limit=50",
           headers: { authorization: `Bearer ${first.token}`, ...groupCapabilityHeader },
         })
       ).statusCode,
@@ -2611,7 +2573,7 @@ describe("agent identity and owner administration", () => {
     const afterDisableClientMessageId = randomUUID();
     const messageAfterDisable = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${groupId}/messages`,
+      url: `/v2/conversations/${groupId}/messages`,
       headers: {
         authorization: `Bearer ${first.token}`,
         "idempotency-key": afterDisableClientMessageId,
@@ -2647,7 +2609,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${groupId}/messages`,
+          url: `/v2/conversations/${groupId}/messages`,
           headers: { authorization: `Bearer ${second.token}` },
         })
       ).statusCode,
@@ -2673,7 +2635,7 @@ describe("agent identity and owner administration", () => {
     const firstAgent = await createAgent(app);
     const secondAgentResponse = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "athena", displayName: "Athena" },
     });
@@ -2691,7 +2653,7 @@ describe("agent identity and owner administration", () => {
 
     const created = await app.inject({
       method: "POST",
-      url: "/v1/direct-conversations",
+      url: "/v2/direct-conversations",
       headers: { authorization: `Bearer ${first.token}` },
       payload: { memberId: secondAgent.user.id },
     });
@@ -2707,7 +2669,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "POST",
-          url: `/v1/conversations/${direct.conversation.conversation.id}/messages`,
+          url: `/v2/conversations/${direct.conversation.conversation.id}/messages`,
           headers: {
             authorization: `Bearer ${first.token}`,
             "idempotency-key": clientMessageId,
@@ -2727,7 +2689,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${direct.conversation.conversation.id}/messages`,
+          url: `/v2/conversations/${direct.conversation.conversation.id}/messages`,
           headers: { authorization: `Bearer ${second.token}` },
         })
       ).statusCode,
@@ -2736,7 +2698,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "GET",
-          url: `/v1/conversations/${direct.conversation.conversation.id}/messages`,
+          url: `/v2/conversations/${direct.conversation.conversation.id}/messages`,
           headers: { cookie: `hype_comms_session=${memberSessionToken}` },
         })
       ).statusCode,
@@ -2748,7 +2710,7 @@ describe("agent identity and owner administration", () => {
     const firstAgent = await createAgent(app);
     const secondAgentResponse = await app.inject({
       method: "POST",
-      url: "/v1/agents",
+      url: "/v2/agents",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { username: "athena", displayName: "Athena" },
     });
@@ -2792,7 +2754,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "POST",
-          url: "/v1/group-direct-conversations",
+          url: "/v2/group-direct-conversations",
           headers: {
             authorization: `Bearer ${readOnly.token}`,
             "idempotency-key": randomUUID(),
@@ -2806,7 +2768,7 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "POST",
-          url: "/v1/group-direct-conversations",
+          url: "/v2/group-direct-conversations",
           headers: { authorization: `Bearer ${creator.token}`, ...groupCapabilityHeader },
           payload: validPayload,
         })
@@ -2822,7 +2784,7 @@ describe("agent identity and owner administration", () => {
     for (const payload of invalidPayloads) {
       const response = await app.inject({
         method: "POST",
-        url: "/v1/group-direct-conversations",
+        url: "/v2/group-direct-conversations",
         headers: {
           authorization: `Bearer ${creator.token}`,
           "idempotency-key": randomUUID(),
@@ -2835,7 +2797,7 @@ describe("agent identity and owner administration", () => {
 
     const selfAddressed = await app.inject({
       method: "POST",
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       headers: {
         authorization: `Bearer ${creator.token}`,
         "idempotency-key": randomUUID(),
@@ -2847,7 +2809,7 @@ describe("agent identity and owner administration", () => {
 
     const unavailable = await app.inject({
       method: "POST",
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       headers: {
         authorization: `Bearer ${creator.token}`,
         "idempotency-key": randomUUID(),
@@ -2859,7 +2821,7 @@ describe("agent identity and owner administration", () => {
     for (const unavailableMemberId of [taskBotId, otherWorkspaceOwnerId]) {
       const unavailableMember = await app.inject({
         method: "POST",
-        url: "/v1/group-direct-conversations",
+        url: "/v2/group-direct-conversations",
         headers: {
           authorization: `Bearer ${creator.token}`,
           "idempotency-key": randomUUID(),
@@ -2874,14 +2836,14 @@ describe("agent identity and owner administration", () => {
       (
         await app.inject({
           method: "DELETE",
-          url: `/v1/agents/${secondAgent.user.id}`,
+          url: `/v2/agents/${secondAgent.user.id}`,
           headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
         })
       ).statusCode,
     ).toBe(204);
     const disabledTarget = await app.inject({
       method: "POST",
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       headers: {
         authorization: `Bearer ${creator.token}`,
         "idempotency-key": randomUUID(),
@@ -2904,7 +2866,7 @@ describe("agent identity and owner administration", () => {
     const messages = await createToken(app, agent.user.id, "Messages", ["messages:write"]);
     const created = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
@@ -2929,7 +2891,7 @@ describe("agent identity and owner administration", () => {
     const bulletinClientMessageId = randomUUID();
     const bulletin = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": bulletinClientMessageId,
@@ -2950,7 +2912,7 @@ describe("agent identity and owner administration", () => {
     const forbiddenClientMessageId = randomUUID();
     const forbidden = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers: {
         authorization: `Bearer ${messages.token}`,
         "idempotency-key": forbiddenClientMessageId,
@@ -2969,7 +2931,7 @@ describe("agent identity and owner administration", () => {
     const replyClientMessageId = randomUUID();
     const reply = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers: {
         authorization: `Bearer ${messages.token}`,
         "idempotency-key": replyClientMessageId,
@@ -2994,7 +2956,7 @@ describe("agent identity and owner administration", () => {
     const clientMessageId = randomUUID();
     const sent = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         authorization: `Bearer ${created.token}`,
         "idempotency-key": clientMessageId,
@@ -3012,7 +2974,7 @@ describe("agent identity and owner administration", () => {
     const mentionClientMessageId = randomUUID();
     const mentioned = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": mentionClientMessageId,
@@ -3107,18 +3069,18 @@ describe("agent identity and owner administration", () => {
     ).rejects.toMatchObject({ code: "23514" });
     const revoked = await app.inject({
       method: "DELETE",
-      url: `/v1/agents/${agent.user.id}/tokens/${first.agentToken.id}`,
+      url: `/v2/agents/${agent.user.id}/tokens/${first.agentToken.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const [firstMe, secondMe] = await Promise.all([
       app.inject({
         method: "GET",
-        url: "/v1/auth/me",
+        url: "/v2/auth/me",
         headers: { authorization: `Bearer ${first.token}` },
       }),
       app.inject({
         method: "GET",
-        url: "/v1/auth/me",
+        url: "/v2/auth/me",
         headers: { authorization: `Bearer ${second.token}` },
       }),
     ]);
@@ -3131,19 +3093,19 @@ describe("agent identity and owner administration", () => {
     const app = await appWithWorkspace();
     const created = await app.inject({
       method: "POST",
-      url: "/v1/invitations",
+      url: "/v2/invitations",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { email: "invitee@example.test", role: "member" },
     });
     const alias = await app.inject({
       method: "POST",
-      url: "/v1/auth/invitations",
+      url: "/v2/auth/invitations",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: { email: "alias@example.test", role: "member" },
     });
     const listed = await app.inject({
       method: "GET",
-      url: "/v1/invitations",
+      url: "/v2/invitations",
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const invitation = listInvitationsResponseSchema
@@ -3152,12 +3114,12 @@ describe("agent identity and owner administration", () => {
     if (invitation === undefined) throw new Error("Invitation was not listed");
     const revoked = await app.inject({
       method: "DELETE",
-      url: `/v1/invitations/${invitation.id}`,
+      url: `/v2/invitations/${invitation.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     const memberList = await app.inject({
       method: "GET",
-      url: "/v1/invitations",
+      url: "/v2/invitations",
       headers: { cookie: `hype_comms_session=${memberSessionToken}` },
     });
 
@@ -3178,7 +3140,7 @@ describe("agent identity and owner administration", () => {
     const created = await createToken(app, agent.user.id, "Realtime", ["workspace:read"]);
     const ticketResponse = await app.inject({
       method: "POST",
-      url: "/v1/realtime/tickets",
+      url: "/v2/realtime/tickets",
       headers: { authorization: `Bearer ${created.token}` },
     });
     const ticket = ticketResponse.json<{ ticket: string }>().ticket;
@@ -3194,7 +3156,7 @@ describe("agent identity and owner administration", () => {
       )
     ).rows[0]?.last_event_sequence;
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v1/realtime?ticket=${ticket}&after=${currentSequence}`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${currentSequence}`,
     );
     openSockets.push(socket);
     const [data] = await once(socket, "message");
