@@ -1,6 +1,9 @@
 import type { NotificationPreference, NotificationState } from "@hype-comms/contracts";
 import { describe, expect, it, vi } from "vitest";
 
+import { NotificationPreferenceStore } from "./notification-preference-store";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
+
 import {
   NotificationSettingsController,
   type NotificationCapabilitySource,
@@ -52,6 +55,69 @@ function createController(
 }
 
 describe("NotificationSettingsController", () => {
+  it("isolates listener and reporter failures after saving a preference", async () => {
+    const persistence = new FakePersistence();
+    const reportListenerError = vi.fn(() => {
+      throw new Error("log closed");
+    });
+    const controller = new NotificationSettingsController({
+      persistence,
+      capability: new FakeCapability(),
+      reportListenerError,
+    });
+    await controller.initialize();
+    const failure = new Error("renderer closed");
+    controller.subscribe(() => {
+      throw failure;
+    });
+    const later = vi.fn();
+    controller.subscribe(later);
+    await expect(controller.setPreference(ENABLED)).resolves.toMatchObject(ENABLED);
+    expect(persistence.saves).toEqual([ENABLED]);
+    expect(later).toHaveBeenCalledWith(expect.objectContaining(ENABLED));
+    expect(reportListenerError).toHaveBeenCalledWith(failure);
+  });
+
+  it("still persists an opt-out when a restrictive-intent listener throws", async () => {
+    const persistence = new FakePersistence(ENABLED);
+    const controller = new NotificationSettingsController({
+      persistence,
+      capability: new FakeCapability(),
+      reportListenerError: vi.fn(),
+    });
+    await controller.initialize();
+    controller.subscribe(() => {
+      throw new Error("renderer closed");
+    });
+    const later = vi.fn();
+    controller.subscribe(later);
+    const request = controller.setPreference(DISABLED);
+    expect(controller.state.devicePreference).toBe("disabled");
+    expect(later).toHaveBeenCalledWith(expect.objectContaining(DISABLED));
+    await expect(request).resolves.toMatchObject(DISABLED);
+    expect(persistence.saves).toEqual([DISABLED]);
+  });
+
+  it("loads the durable opt-out after restarting despite a failed listener", async () => {
+    const userDataPath = await createTemporaryDirectory("hype-comms-notification-restart-");
+    const persistence = new NotificationPreferenceStore({ userDataPath });
+    await persistence.save(ENABLED);
+    const controller = new NotificationSettingsController({
+      persistence,
+      capability: new FakeCapability(),
+      reportListenerError: vi.fn(),
+    });
+    await controller.initialize();
+    controller.subscribe(() => {
+      throw new Error("renderer closed");
+    });
+    await controller.setPreference(DISABLED);
+    controller.dispose();
+    const restarted = createController(new NotificationPreferenceStore({ userDataPath }));
+    await expect(restarted.initialize()).resolves.toMatchObject(DISABLED);
+    restarted.dispose();
+  });
+
   it("initializes device intent separately from support and permission", async () => {
     const controller = createController();
 

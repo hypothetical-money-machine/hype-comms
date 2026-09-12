@@ -1,11 +1,62 @@
-import { constants, open, rename, symlink, writeFile } from "node:fs/promises";
+import { constants, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
 
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { readPrivateBoundedUtf8File, type PrivateReadableFileHandle } from "./preference-file";
+import {
+  JsonPreferenceFile,
+  readPrivateBoundedUtf8File,
+  type PrivateReadableFileHandle,
+} from "./preference-file";
 import { createTemporaryDirectory } from "./test-support/temporary-directory";
+
+describe("JSON preference persistence", () => {
+  it("rejects an oversized Unicode write without replacing the last durable value", async () => {
+    const filePath = path.join(
+      await createTemporaryDirectory("hype-comms-preference-limit-"),
+      "value.json",
+    );
+    const file = new JsonPreferenceFile({
+      filePath,
+      maxBytes: 32,
+      defaultValue: "",
+      codec: {
+        decode: (value) => (typeof value === "string" ? value : null),
+        encode: (value: string) => value,
+      },
+    });
+    await file.save("saved");
+    await expect(file.save("😀".repeat(10))).rejects.toThrow("file size limit");
+    expect(await readFile(filePath, "utf8")).toBe('"saved"\n');
+    await file.save("next");
+    await expect(file.load()).resolves.toBe("next");
+  });
+
+  it("captures an accepted write before the caller mutates its value", async () => {
+    const filePath = path.join(
+      await createTemporaryDirectory("hype-comms-preference-snapshot-"),
+      "value.json",
+    );
+    const file = new JsonPreferenceFile<string[]>({
+      filePath,
+      maxBytes: 128,
+      defaultValue: [],
+      codec: {
+        decode: (value) =>
+          Array.isArray(value) && value.every((item): item is string => typeof item === "string")
+            ? value
+            : null,
+        encode: (value) => value,
+      },
+    });
+    const value = ["accepted"];
+    const saved = file.save(value);
+    value.push("later edit");
+    await saved;
+    await expect(file.load()).resolves.toEqual(["accepted"]);
+  });
+});
 
 describe("private preference file reads", () => {
   it("keeps reading the opened inode when the pathname is replaced after fstat", async () => {
