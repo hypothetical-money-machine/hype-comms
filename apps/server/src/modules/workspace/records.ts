@@ -117,3 +117,24 @@ export function participants(row: ConversationRow): string[] {
     ? [row.dm_user_low_id]
     : [row.dm_user_low_id, row.dm_user_high_id];
 }
+
+/** Keep historical conversation events readable during the protocol transition. */
+export function mapStoredConversation(row: ConversationRow): Conversation {
+  return conversationSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    kind: row.kind,
+    name: row.name,
+    slug: row.slug,
+    topic: row.topic,
+    access: row.channel_access,
+    channelMode: row.kind === "channel" ? (row.channel_mode ?? "chat") : null,
+    // Emitted only for built-in channels: the key is absent, never false, so payloads for ordinary
+    // channels stay byte-identical for clients whose schema predates built-in channels.
+    ...(row.is_system ? { isBuiltIn: true as const } : {}),
+    isArchived: row.is_archived,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  });
+}
