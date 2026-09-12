@@ -1,3 +1,4 @@
+import { encodeSyncPosition, type SyncPosition } from "@hype-comms/contracts";
 import {
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
@@ -570,9 +571,9 @@ export class WorkspaceTransport {
     return advanceReadCursorResponseSchema.parse(await this.#payload(response));
   }
 
-  async sync(after: string, limit = 100): Promise<SyncAttemptResult> {
+  async sync(after: SyncPosition, limit = 100): Promise<SyncAttemptResult> {
     const url = this.#url("/v2/sync");
-    url.searchParams.set("after", after);
+    url.searchParams.set("after", encodeSyncPosition(after));
     url.searchParams.set("limit", String(limit));
 
     let response: Response;
@@ -605,7 +606,16 @@ export class WorkspaceTransport {
       return { status: "authentication_required" };
     }
     if (response.status === 410) {
-      return { status: "reset_required", reason: "cursor_expired" };
+      const envelope = apiErrorEnvelopeSchema.safeParse(await response.json().catch(() => null));
+      const epochMismatch =
+        envelope.success &&
+        envelope.data.error.details?.some(
+          (detail) => detail.field === "after.epoch" && detail.issue === "epoch_mismatch",
+        );
+      return {
+        status: "reset_required",
+        reason: epochMismatch ? "epoch_mismatch" : "cursor_expired",
+      };
     }
     if (response.status === 429) {
       return { status: "retryable", reason: "rate_limited", retryAfterMs: retryAfter(response) };

@@ -58,7 +58,7 @@ SILENCE_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
 # instead of, running the CLI. They say nothing about the argv they were
 # carrying.
 PRE_SPAWN_FAILURE_CODES = frozenset({"CLI_NOT_FOUND", "CLI_START_FAILED", "CONFIG_INVALID"})
-CURSOR_FILE_VERSION = 2
+CURSOR_FILE_VERSION = 3
 LEGACY_CURSOR_FILE_VERSION = 1
 DEFAULT_CONTEXT_LIMIT = 8
 MIN_CONTEXT_LIMIT = 1
@@ -1208,7 +1208,17 @@ class HypeCommsAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _checked_cursor(value: object) -> str:
-        if not _is_sequence(value):
+        if isinstance(value, str) and len(value) <= 128:
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = None
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"epoch", "sequence"}
+            or not _is_entity_id(value.get("epoch"))
+            or not _is_sequence(value.get("sequence"))
+        ):
             raise CliFailure(
                 6,
                 "INVALID_CURSOR",
@@ -1216,7 +1226,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 False,
                 error_kind="bad_format",
             )
-        return value
+        return json.dumps(value, separators=(",", ":"))
 
     async def _load_directory(self) -> str:
         # workspaceBootstrapResponseSchema already includes a `members` array
@@ -1366,8 +1376,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
             if set(payload) != {"version", "cursor"}:
                 raise unsupported
             self._state_needs_migration = True
-            return checked_state_cursor(payload.get("cursor"))
-        if version != CURSOR_FILE_VERSION or set(payload) != {
+            if not _is_sequence(payload.get("cursor")):
+                raise unsupported
+            return None
+        if version not in {2, CURSOR_FILE_VERSION} or set(payload) != {
             "version",
             "cursor",
             "pendingReadCursors",
@@ -1391,6 +1403,11 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 conversation_sequence=str(target["conversationSequence"]),
             )
         self._pending_read_cursors = next_pending
+        if version == 2:
+            if not _is_sequence(payload.get("cursor")):
+                raise unsupported
+            self._state_needs_migration = True
+            return None
         return checked_state_cursor(payload.get("cursor"))
 
     def _persist_cursor(self, cursor: str) -> None:
@@ -1407,7 +1424,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             json.dumps(
                 {
                     "version": CURSOR_FILE_VERSION,
-                    "cursor": cursor,
+                    "cursor": json.loads(cursor),
                     "pendingReadCursors": {
                         conversation_id: {
                             "messageId": target.message_id,
@@ -1778,9 +1795,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 # must never wake Hermes for pre-installation history.
                 self._persist_cursor(bootstrap_cursor)
             elif self._state_needs_migration:
-                # V1 held only the workspace checkpoint. Rewrite it before
-                # watch starts so every later post-handoff state transition
-                # has one stable V2 shape.
+                # Rewrite a recognized checkpoint before watch starts. Protocol 2
+                # positions retain pending read targets while replacing the replay epoch.
                 self._persist_cursor(self._cursor)
 
             read_cursor_outcome = await self._flush_pending_read_cursors()
@@ -2588,7 +2604,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             source=source,
             raw_message={
                 "platform": PLATFORM_NAME,
-                "workspaceSequence": event.get("workspaceSequence"),
+                "position": event.get("position"),
                 "mentionedUserIds": list(mentioned_user_ids),
             },
             message_id=str(message["id"]),
@@ -2596,7 +2612,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 message.get("createdAt") or event.get("occurredAt")
             ),
             metadata={
-                "hype_comms_workspace_sequence": event.get("workspaceSequence"),
+                "hype_comms_workspace_position": event.get("position"),
                 "hype_comms_conversation_sequence": message.get("conversationSequence"),
             },
         )
@@ -2803,7 +2819,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         read_through_message_id = str(pack["readThroughMessageId"])
         anchor = pack["messages"][-1]
         self._queue_read_cursor(
-            workspace_cursor=self._checked_cursor(event.get("workspaceSequence")),
+            workspace_cursor=self._checked_cursor(event.get("position")),
             conversation_id=conversation_id,
             message_id=read_through_message_id,
             conversation_sequence=str(anchor["conversationSequence"]),
@@ -2844,7 +2860,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 False,
                 error_kind="bad_format",
             )
-        cursor = self._checked_cursor(event.get("workspaceSequence"))
+        cursor = self._checked_cursor(event.get("position"))
         if event_type == "system.resync_required":
             # The supervisor rebuilds the member and conversation caches from
             # _load_directory before resuming. Drop the thread-root map with
@@ -2864,8 +2880,14 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # the behavior.
             self._thread_roots.clear()
             return "resync"
-        if self._cursor is not None and _compare_decimal_strings(cursor, self._cursor) <= 0:
-            return "duplicate"
+        if self._cursor is not None:
+            incoming_position = json.loads(cursor)
+            current_position = json.loads(self._cursor)
+            if incoming_position["epoch"] != current_position["epoch"]:
+                self._thread_roots.clear()
+                return "resync"
+            if _compare_decimal_strings(incoming_position["sequence"], current_position["sequence"]) <= 0:
+                return "duplicate"
         if event_type == "member.updated":
             payload = event.get("payload")
             member = payload.get("member") if isinstance(payload, dict) else None
@@ -2887,7 +2909,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # `members` is already active-only, and _load_directory() re-pins
             # the agent's own record, so the agent can never delete itself.
             # Discard the returned bootstrap cursor: the watch cursor is
-            # advanced below from this event's own workspaceSequence, and
+            # advanced below from this event's own position, and
             # assigning the bootstrap cursor here would rewind or jump it.
             await self._refresh_directory_for_event("member.updated")
         elif event_type in {

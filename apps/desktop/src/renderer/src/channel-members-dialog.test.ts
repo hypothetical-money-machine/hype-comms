@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -57,7 +58,7 @@ describe("ChannelMembersDialog", () => {
         ...initial,
         members: [...initial.members, { user: member, role: "member", joinedAt: NOW }],
       },
-      syncCursor: "4",
+      syncCursor: testPosition("4"),
     });
     render(
       createElement(ChannelMembersDialog, {

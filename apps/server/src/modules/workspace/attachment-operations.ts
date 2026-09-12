@@ -97,6 +97,7 @@ export class WorkspaceAttachmentOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: "/v1/files/uploads",
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),
@@ -207,6 +208,7 @@ export class WorkspaceAttachmentOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: `/v1/files/${attachmentId}/complete`,
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),

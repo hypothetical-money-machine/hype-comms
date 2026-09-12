@@ -1,3 +1,10 @@
+import type { SyncPosition } from "@hype-comms/contracts";
+
+let protocolEpoch: string;
+function testPosition(sequence: string): SyncPosition {
+  return { epoch: protocolEpoch, sequence };
+}
+
 import { randomUUID } from "node:crypto";
 
 import type { Pool } from "pg";
@@ -97,6 +104,12 @@ describe("seedSystemChannels", () => {
        VALUES ($1, 'Hype Comms', 'hype-comms', $2), ($3, 'Second', 'second', $2)`,
       [workspaceId, ownerId, otherWorkspaceId],
     );
+    protocolEpoch = (
+      await pool.query<{ protocol_epoch: string }>(
+        "SELECT protocol_epoch FROM workspaces WHERE id = $1",
+        [workspaceId],
+      )
+    ).rows[0]!.protocol_epoch;
     await pool.query(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
        VALUES ($1, $2, 'owner', 'active'), ($1, $3, 'member', 'active'),
@@ -350,10 +363,10 @@ describe("seedSystemChannels", () => {
     const conversationIdOf = (event: WorkspaceEvent): string | null => event.conversationId;
     const channel = await channelRow();
 
-    const legacy = await repository.sync(member, "0", 100);
+    const legacy = await repository.sync(member, testPosition("0"), 100);
     expect(legacy.events.map(conversationIdOf)).toContain(channel?.id);
 
-    const capable = await repository.sync(member, "0", 100);
+    const capable = await repository.sync(member, testPosition("0"), 100);
     const delivered = capable.events.filter((event) => conversationIdOf(event) === channel?.id);
     expect(delivered.map((event) => event.type)).toEqual([
       "channel.created",

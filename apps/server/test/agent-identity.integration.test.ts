@@ -1,3 +1,10 @@
+import type { SyncPosition } from "@hype-comms/contracts";
+
+let protocolEpoch: string;
+function testPosition(sequence: string): SyncPosition {
+  return { epoch: protocolEpoch, sequence };
+}
+
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -112,6 +119,12 @@ describe("agent identity and owner administration", () => {
        VALUES ($1, 'Hype Comms', 'hype-comms', $2)`,
       [workspaceId, ownerId],
     );
+    protocolEpoch = (
+      await pool.query<{ protocol_epoch: string }>(
+        "SELECT protocol_epoch FROM workspaces WHERE id = $1",
+        [workspaceId],
+      )
+    ).rows[0]!.protocol_epoch;
     await pool.query(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
        VALUES ($1, $2, 'owner', 'active'), ($1, $3, 'member', 'active')`,
@@ -1245,7 +1258,10 @@ describe("agent identity and owner administration", () => {
       { method: "GET", url: "/v2/members" },
       { method: "GET", url: "/v2/conversations" },
       { method: "GET", url: `/v2/conversations/${generalId}/messages` },
-      { method: "GET", url: "/v2/sync?after=0" },
+      {
+        method: "GET",
+        url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}`,
+      },
       { method: "POST", url: "/v2/realtime/tickets" },
     ] as const;
     for (const request of readRequests) {
@@ -1364,7 +1380,7 @@ describe("agent identity and owner administration", () => {
     ).toBe(201);
     const creatorSync = await app.inject({
       method: "GET",
-      url: "/v2/sync?after=0",
+      url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}`,
       headers: { authorization: `Bearer ${read.token}` },
     });
     expect(creatorSync.statusCode).toBe(200);
@@ -1855,7 +1871,7 @@ describe("agent identity and owner administration", () => {
     const beforeGroupCreation = (BigInt(groupCreationSequence) - 1n).toString();
     const legacySync = await workspaceRepository.syncPrincipal(
       { workspaceId, userId: firstAgent.user.id },
-      beforeGroupCreation,
+      testPosition(beforeGroupCreation),
       100,
     );
     expect(
@@ -1866,10 +1882,12 @@ describe("agent identity and owner administration", () => {
             event.payload.conversation.id === groupId),
       ),
     ).toBe(true);
-    expect(BigInt(legacySync.nextCursor)).toBeGreaterThanOrEqual(BigInt(groupCreationSequence));
+    expect(BigInt(legacySync.nextCursor.sequence)).toBeGreaterThanOrEqual(
+      BigInt(groupCreationSequence),
+    );
     const groupCapableSync = await workspaceRepository.syncPrincipal(
       { workspaceId, userId: firstAgent.user.id, groupDirectMessages: true },
-      beforeGroupCreation,
+      testPosition(beforeGroupCreation),
       100,
     );
     expect(
@@ -1953,7 +1971,7 @@ describe("agent identity and owner administration", () => {
     expect(visibleAfterGroups.statusCode).toBe(201);
     const visibleAfterGroupsId = sendMessageResponseSchema.parse(visibleAfterGroups.json()).message
       .id;
-    let legacySyncCursor = beforeGroupCreation;
+    let legacySyncCursor = testPosition(beforeGroupCreation);
     let sawGroupSyncPage = false;
     let sawVisibleAfterGroups = false;
     for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
@@ -1972,7 +1990,7 @@ describe("agent identity and owner administration", () => {
         sawVisibleAfterGroups = true;
         break;
       }
-      expect(BigInt(page.nextCursor)).toBeGreaterThan(BigInt(legacySyncCursor));
+      expect(BigInt(page.nextCursor.sequence)).toBeGreaterThan(BigInt(legacySyncCursor.sequence));
       legacySyncCursor = page.nextCursor;
     }
     expect(sawGroupSyncPage).toBe(true);
@@ -3156,7 +3174,7 @@ describe("agent identity and owner administration", () => {
       )
     ).rows[0]?.last_event_sequence;
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${currentSequence}`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition(currentSequence!)))}`,
     );
     openSockets.push(socket);
     const [data] = await once(socket, "message");

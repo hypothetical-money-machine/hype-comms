@@ -1,3 +1,5 @@
+import type { SyncPosition } from "@hype-comms/contracts";
+import { testPosition } from "./support/sync-position.js";
 import { once } from "node:events";
 
 import {
@@ -44,7 +46,7 @@ const replayEvent: SyncResponse["events"][number] = {
   occurredAt: now,
   workspaceId,
   conversationId: null,
-  workspaceSequence: "10",
+  position: testPosition("10"),
   conversationSequence: null,
   entityVersion: 1,
   delivery: "at_least_once",
@@ -64,7 +66,7 @@ const replayEvent: SyncResponse["events"][number] = {
 const secondReplayEvent: SyncResponse["events"][number] = {
   ...replayEvent,
   id: "10000000-0000-4000-8000-000000000006",
-  workspaceSequence: "11",
+  position: testPosition("11"),
 };
 
 const replayMessageEvent: SyncResponse["events"][number] = {
@@ -74,7 +76,7 @@ const replayMessageEvent: SyncResponse["events"][number] = {
   occurredAt: now,
   workspaceId,
   conversationId,
-  workspaceSequence: "10",
+  position: testPosition("10"),
   conversationSequence: "1",
   entityVersion: 1,
   delivery: "at_least_once",
@@ -186,8 +188,8 @@ class FakeWorkspaceRepository {
     return this.consumedPrincipal;
   }
 
-  async syncPrincipal(principal: RealtimePrincipal, after: string): Promise<SyncResponse> {
-    this.syncedCursors.push(after);
+  async syncPrincipal(principal: RealtimePrincipal, after: SyncPosition): Promise<SyncResponse> {
+    this.syncedCursors.push(after.sequence);
     if (this.syncError !== null) throw this.syncError;
     const response =
       this.syncResponses.shift() ??
@@ -262,7 +264,7 @@ async function connectedApp(
   // Only the heartbeat interval is faked so the WebSocket keeps using real I/O.
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const socket = new WebSocket(
-    `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+    `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
     { origin: "app://bundle" },
   );
   sockets.push(socket);
@@ -284,7 +286,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const response = await app.inject({
       method: "GET",
-      url: `/v2/realtime?ticket=${ticket}&after=9&preamble=agent-wake-v1`,
+      url: `/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}&preamble=agent-wake-v1`,
       headers: { origin: "app://bundle" },
     });
     expect(response.statusCode).toBe(400);
@@ -295,8 +297,8 @@ describe("realtime session revalidation", () => {
     const repository = new FakeWorkspaceRepository();
     repository.syncResponse = {
       events: [replayMessageEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
+      nextCursor: testPosition("10"),
+      highWaterCursor: testPosition("10"),
       hasMore: false,
     };
     const app = await buildApp({
@@ -320,7 +322,7 @@ describe("realtime session revalidation", () => {
       sessionGeneration: 1,
       userId,
       workspaceId,
-      bootstrapCursor: "9",
+      bootstrapCursor: testPosition("9"),
     });
     controller.replaceMembers([currentUser, replayAuthor]);
     controller.replaceConversations([directConversation]);
@@ -337,7 +339,11 @@ describe("realtime session revalidation", () => {
       apiOrigin: address,
       rendererOrigin: "app://bundle",
       transport: {
-        ticket: async () => ({ ticket, expiresAt: "2026-08-23T12:01:00.000Z" }),
+        ticket: async () => ({
+          ticket,
+          position: testPosition("9"),
+          expiresAt: "2026-08-23T12:01:00.000Z",
+        }),
       },
       onEvent: (frame) => {
         observeForNotifications(frame.event);
@@ -346,11 +352,11 @@ describe("realtime session revalidation", () => {
       onState: (state) => controller.setRealtimeState(state),
     });
     realtimeClients.push(realtime);
-    realtime.start("9", { userId, workspaceId });
+    realtime.start(testPosition("9"), { userId, workspaceId });
 
     await vi.waitFor(() => {
       expect(controller.diagnostics.connectionArmed).toBe(true);
-      expect(controller.diagnostics.watermark).toBe("10");
+      expect(controller.diagnostics.watermark).toEqual(testPosition("10"));
     });
     expect(presenter.present).not.toHaveBeenCalled();
   });
@@ -365,8 +371,8 @@ describe("realtime session revalidation", () => {
     };
     repository.syncResponse = {
       events: [replayEvent],
-      nextCursor: "11",
-      highWaterCursor: "11",
+      nextCursor: testPosition("11"),
+      highWaterCursor: testPosition("11"),
       hasMore: false,
     };
     const app = await buildApp({
@@ -379,7 +385,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -393,8 +399,8 @@ describe("realtime session revalidation", () => {
     });
 
     expect(frames).toMatchObject([
-      { type: "member.updated", workspaceSequence: "10" },
-      { type: "system.connected", workspaceSequence: "11" },
+      { type: "member.updated", position: testPosition("10") },
+      { type: "system.connected", position: testPosition("11") },
     ]);
     expect(repository.revalidations).toHaveLength(1);
   });
@@ -410,14 +416,14 @@ describe("realtime session revalidation", () => {
     repository.syncResponses.push(
       {
         events: [replayEvent],
-        nextCursor: "10",
-        highWaterCursor: "11",
+        nextCursor: testPosition("10"),
+        highWaterCursor: testPosition("11"),
         hasMore: true,
       },
       {
         events: [secondReplayEvent],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     );
@@ -438,7 +444,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -449,13 +455,13 @@ describe("realtime session revalidation", () => {
     try {
       await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9", "10"]));
       await vi.waitFor(() => expect(frames).toHaveLength(1));
-      expect(frames).toMatchObject([{ type: "member.updated", workspaceSequence: "10" }]);
+      expect(frames).toMatchObject([{ type: "member.updated", position: testPosition("10") }]);
     } finally {
       releaseAuthorization.resolve();
     }
     await vi.waitFor(() => expect(frames).toHaveLength(3));
-    expect(frames[1]).toMatchObject({ type: "member.updated", workspaceSequence: "11" });
-    expect(frames[2]).toMatchObject({ type: "system.connected", workspaceSequence: "11" });
+    expect(frames[1]).toMatchObject({ type: "member.updated", position: testPosition("11") });
+    expect(frames[2]).toMatchObject({ type: "system.connected", position: testPosition("11") });
   });
 
   it("sends only the body-free recovery control when the replay cursor has expired", async () => {
@@ -477,7 +483,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -490,7 +496,7 @@ describe("realtime session revalidation", () => {
     expect(frames).toMatchObject([
       {
         type: "system.resync_required",
-        workspaceSequence: "9",
+        position: testPosition("9"),
         payload: { reason: "cursor_expired" },
       },
     ]);
@@ -515,7 +521,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -617,8 +623,8 @@ describe("realtime session revalidation", () => {
     const { socket } = await connectedApp(repository, hub);
     repository.syncResponse = {
       events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
+      nextCursor: testPosition("10"),
+      highWaterCursor: testPosition("10"),
       hasMore: false,
     };
     repository.revalidation = { status: "invalid", reason: "agent_token_revoked" };
@@ -655,11 +661,16 @@ describe("realtime session revalidation", () => {
     const { socket } = await connectedApp(repository, hub);
     await vi.waitFor(() => expect(repository.syncedCursors).toEqual(["9"]));
     repository.syncResponses.push(
-      { events: [], nextCursor: "9", highWaterCursor: "9", hasMore: false },
+      {
+        events: [],
+        nextCursor: testPosition("9"),
+        highWaterCursor: testPosition("9"),
+        hasMore: false,
+      },
       {
         events: [replayEvent],
-        nextCursor: "10",
-        highWaterCursor: "10",
+        nextCursor: testPosition("10"),
+        highWaterCursor: testPosition("10"),
         hasMore: false,
       },
     );
@@ -707,8 +718,8 @@ describe("realtime session revalidation", () => {
     const { socket } = await connectedApp(repository, hub);
     repository.syncResponse = {
       events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
+      nextCursor: testPosition("10"),
+      highWaterCursor: testPosition("10"),
       hasMore: false,
     };
     repository.revalidationError = new Error("database unavailable");
@@ -744,14 +755,14 @@ describe("realtime session revalidation", () => {
     repository.syncResponses.push(
       {
         events: [replayEvent],
-        nextCursor: "10",
-        highWaterCursor: "11",
+        nextCursor: testPosition("10"),
+        highWaterCursor: testPosition("11"),
         hasMore: true,
       },
       {
         events: [secondReplayEvent],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     );
@@ -770,7 +781,7 @@ describe("realtime session revalidation", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -780,7 +791,7 @@ describe("realtime session revalidation", () => {
     const [code] = await once(socket, "close");
 
     expect(code).toBe(REALTIME_SESSION_REVOKED_CLOSE_CODE);
-    expect(frames).toMatchObject([{ type: "member.updated", workspaceSequence: "10" }]);
+    expect(frames).toMatchObject([{ type: "member.updated", position: testPosition("10") }]);
   });
 
   it("keeps a socket whose session is still valid open on the heartbeat", async () => {
@@ -820,7 +831,7 @@ describe("realtime socket teardown", () => {
     });
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -848,8 +859,8 @@ describe("realtime ephemeral activity", () => {
     };
     repository.syncResponse = {
       events: [replayEvent],
-      nextCursor: "10",
-      highWaterCursor: "10",
+      nextCursor: testPosition("10"),
+      highWaterCursor: testPosition("10"),
       hasMore: false,
     };
     const setTypingConversations: string[] = [];
@@ -894,7 +905,7 @@ describe("realtime ephemeral activity", () => {
     });
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);
@@ -951,7 +962,7 @@ describe("realtime ephemeral activity", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${ticket}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
       { origin: "app://bundle" },
     );
     sockets.push(socket);

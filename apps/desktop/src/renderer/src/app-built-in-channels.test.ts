@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -209,7 +210,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,

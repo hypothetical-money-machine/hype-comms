@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { Buffer } from "node:buffer";
 
 import { describe, expect, it } from "vitest";
@@ -135,7 +136,7 @@ const BOOTSTRAP = {
   conversations: [CONVERSATION_SUMMARY],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "12",
+  syncCursor: testPosition("12"),
   featureFlags: { channels: true, directMessages: true, mentions: true },
 };
 
@@ -386,12 +387,15 @@ describe("entity contracts", () => {
       deletedAt: NOW,
     });
     expect(
-      retractMessageResponseSchema.parse({ message: retracted, syncCursor: "44" }),
-    ).toMatchObject({ message: { deletedAt: NOW, body: "still stored" }, syncCursor: "44" });
+      retractMessageResponseSchema.parse({ message: retracted, syncCursor: testPosition("44") }),
+    ).toMatchObject({
+      message: { deletedAt: NOW, body: "still stored" },
+      syncCursor: testPosition("44"),
+    });
     expect(() =>
       retractMessageResponseSchema.parse({
         message: { ...retracted, deletedAt: null },
-        syncCursor: "44",
+        syncCursor: testPosition("44"),
       }),
     ).toThrow();
   });
@@ -1027,8 +1031,10 @@ describe("transport contracts", () => {
     expect(() =>
       messageSearchQuerySchema.parse({ query: "quarterly", workspaceId: WORKSPACE_ID }),
     ).toThrow();
-    expect(syncQuerySchema.parse({ after: "4", limit: "100" })).toEqual({
-      after: "4",
+    expect(
+      syncQuerySchema.parse({ after: JSON.stringify(testPosition("4")), limit: "100" }),
+    ).toEqual({
+      after: testPosition("4"),
       limit: 100,
     });
     expect(taskListQuerySchema.parse({ limit: "200" })).toEqual({ limit: 200 });
@@ -1442,7 +1448,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: null,
-      workspaceSequence: "42",
+      position: testPosition("42"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1466,7 +1472,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "42",
+      position: testPosition("42"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1589,7 +1595,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "43",
+      position: testPosition("43"),
       conversationSequence: "42",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1641,7 +1647,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "43",
+      position: testPosition("43"),
       conversationSequence: "42",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1671,7 +1677,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "44",
+      position: testPosition("44"),
       conversationSequence: "42",
       entityVersion: 2,
       delivery: "at_least_once",
@@ -1716,7 +1722,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: null,
-      workspaceSequence: "43",
+      position: testPosition("43"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1765,7 +1771,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "44",
+      position: testPosition("44"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1813,7 +1819,7 @@ describe("transport contracts", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "45",
+      position: testPosition("45"),
       conversationSequence: null,
       entityVersion: TASK.version,
       delivery: "at_least_once",

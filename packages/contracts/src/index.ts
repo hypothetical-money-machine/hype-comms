@@ -16,6 +16,7 @@ export * from "./identity.js";
 export * from "./notifications.js";
 export * from "./protocol.js";
 export * from "./realtime.js";
+export * from "./sync-position.js";
 export * from "./tasks.js";
 export * from "./theme.js";
 export * from "./update.js";

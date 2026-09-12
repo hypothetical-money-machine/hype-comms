@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { execFile } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -40,8 +41,12 @@ afterEach(async () => {
 
 describe("watch", () => {
   it("selects the later decimal cursor without losing integer precision", () => {
-    expect(laterCursor("9007199254740993", "9007199254740994")).toBe("9007199254740994");
-    expect(laterCursor("9007199254740994", "9007199254740993")).toBe("9007199254740994");
+    expect(laterCursor(testPosition("9007199254740993"), testPosition("9007199254740994"))).toEqual(
+      testPosition("9007199254740994"),
+    );
+    expect(laterCursor(testPosition("9007199254740994"), testPosition("9007199254740993"))).toEqual(
+      testPosition("9007199254740994"),
+    );
   });
 
   it("caps a server Retry-After at the configured maximum without dropping backoff jitter", () => {
@@ -89,7 +94,7 @@ describe("watch", () => {
       connection += 1;
       const url = new URL(request.url ?? "/", `ws://127.0.0.1:${address.port}`);
       const after = url.searchParams.get("after") ?? "0";
-      observedCursors.push(after);
+      observedCursors.push((JSON.parse(after) as { sequence: string }).sequence);
       observedPreambles.push(url.searchParams.get("preamble"));
       if (connection === 1) {
         socket.send(
@@ -100,7 +105,7 @@ describe("watch", () => {
             occurredAt: TIMESTAMP,
             workspaceId: WORKSPACE_ID,
             conversationId: CONVERSATION_ID,
-            workspaceSequence: "6",
+            position: testPosition("6"),
             conversationSequence: "1",
             entityVersion: 1,
             delivery: "at_least_once",
@@ -132,7 +137,7 @@ describe("watch", () => {
             occurredAt: TIMESTAMP,
             workspaceId: WORKSPACE_ID,
             conversationId: null,
-            workspaceSequence: "6",
+            position: testPosition("6"),
             conversationSequence: null,
             entityVersion: 1,
             delivery: "at_least_once",
@@ -152,7 +157,7 @@ describe("watch", () => {
             occurredAt: TIMESTAMP,
             workspaceId: WORKSPACE_ID,
             conversationId: null,
-            workspaceSequence: "6",
+            position: testPosition("6"),
             conversationSequence: null,
             entityVersion: 1,
             delivery: "at_least_once",
@@ -168,6 +173,7 @@ describe("watch", () => {
       if (url.pathname === "/v2/realtime/tickets") {
         expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
         return jsonResponse({
+          position: testPosition("5"),
           ticket: "ticket_value_that_is_at_least_32_chars",
           expiresAt: "2026-07-26T21:00:00.000Z",
         });
@@ -183,16 +189,18 @@ describe("watch", () => {
       fetch,
     });
 
-    expect(await executeCli(["watch", "--json", "--after", "5"], runtime)).toBe(4);
+    expect(
+      await executeCli(["watch", "--json", "--after", JSON.stringify(testPosition("5"))], runtime),
+    ).toBe(4);
     const records = runtime
       .stdoutText()
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; workspaceSequence: string });
     expect(records).toEqual([
-      expect.objectContaining({ type: "message.created", workspaceSequence: "6" }),
-      expect.objectContaining({ type: "system.connected", workspaceSequence: "6" }),
-      expect.objectContaining({ type: "system.resync_required", workspaceSequence: "6" }),
+      expect.objectContaining({ type: "message.created", position: testPosition("6") }),
+      expect.objectContaining({ type: "system.connected", position: testPosition("6") }),
+      expect.objectContaining({ type: "system.resync_required", position: testPosition("6") }),
     ]);
     expect(observedCursors).toEqual(["5", "6"]);
     expect(observedPreambles).toEqual([null, null]);
@@ -215,7 +223,7 @@ describe("watch", () => {
         occurredAt: TIMESTAMP,
         workspaceId: WORKSPACE_ID,
         conversationId: CONVERSATION_ID,
-        workspaceSequence: "6",
+        position: testPosition("6"),
         conversationSequence: "1",
         entityVersion: 1,
         delivery: "at_least_once",
@@ -249,7 +257,7 @@ describe("watch", () => {
           occurredAt: TIMESTAMP,
           workspaceId: WORKSPACE_ID,
           conversationId: null,
-          workspaceSequence: "6",
+          position: testPosition("6"),
           conversationSequence: null,
           entityVersion: 1,
           delivery: "at_least_once",
@@ -267,7 +275,7 @@ describe("watch", () => {
           occurredAt: TIMESTAMP,
           workspaceId: WORKSPACE_ID,
           conversationId: null,
-          workspaceSequence: "6",
+          position: testPosition("6"),
           conversationSequence: null,
           entityVersion: 1,
           delivery: "at_least_once",
@@ -280,6 +288,7 @@ describe("watch", () => {
       if (url.pathname === "/v2/bootstrap") return jsonResponse(bootstrap());
       if (url.pathname === "/v2/realtime/tickets") {
         return jsonResponse({
+          position: testPosition("5"),
           ticket: "ticket_value_that_is_at_least_32_chars",
           expiresAt: "2026-07-26T21:00:00.000Z",
         });
@@ -295,7 +304,9 @@ describe("watch", () => {
       fetch,
     });
 
-    expect(await executeCli(["watch", "--json", "--after", "5"], runtime)).toBe(4);
+    expect(
+      await executeCli(["watch", "--json", "--after", JSON.stringify(testPosition("5"))], runtime),
+    ).toBe(4);
     const records = runtime
       .stdoutText()
       .trim()
@@ -334,7 +345,7 @@ describe("watch", () => {
           occurredAt: TIMESTAMP,
           workspaceId: WORKSPACE_ID,
           conversationId: null,
-          workspaceSequence: "5",
+          position: testPosition("5"),
           conversationSequence: null,
           entityVersion: 1,
           delivery: "at_least_once",
@@ -350,16 +361,18 @@ describe("watch", () => {
     const origin = `http://127.0.0.1:${address.port}`;
     const cliBundleUrl = new URL("../dist/bin.js", import.meta.url).href;
     const script = `
+      const testPosition = sequence => ({ epoch: ${JSON.stringify(testPosition("0").epoch)}, sequence });
       process.env.HYPE_COMMS_API_ORIGIN = ${JSON.stringify(origin)};
       process.env.HYPE_COMMS_TOKEN = ${JSON.stringify(`hype_comms_agent_${"a".repeat(43)}`)};
-      process.argv = [process.execPath, "hype-comms-cli", "watch", "--json", "--after", "5"];
+      process.argv = [process.execPath, "hype-comms-cli", "watch", "--json", "--after", JSON.stringify(testPosition("5"))];
       globalThis.fetch = async (input) => {
         const pathname = new URL(String(input)).pathname;
         const value = pathname === "/v2/bootstrap"
           ? ${JSON.stringify(bootstrap())}
           : pathname === "/v2/realtime/tickets"
             ? {
-            ticket: "ticket_value_that_is_at_least_32_chars",
+            position: testPosition("5"),
+          ticket: "ticket_value_that_is_at_least_32_chars",
             expiresAt: "2026-07-26T21:00:00.000Z",
             }
             : null;
