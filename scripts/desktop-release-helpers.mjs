@@ -5,13 +5,6 @@ import path from "node:path";
 import semver from "semver";
 
 const defaultReleaseDirectory = path.join("apps", "desktop", "release");
-const githubReleaseManifests = [
-  "latest-mac.yml",
-  "latest.yml",
-  "latest-linux.yml",
-  "latest-linux-arm64.yml",
-];
-const githubReleaseArtifactPlatforms = ["mac", "win", "linux"];
 
 export function requireEnvironment(name, environment = process.env) {
   const value = environment[name];
@@ -27,18 +20,6 @@ export function parseManifestVersion(manifest) {
     throw new Error("Manifest has no valid version");
   }
   return match[1];
-}
-
-export function missingGithubReleaseAssets(assetNames, desktopVersion) {
-  const names = new Set(assetNames);
-  const missing = githubReleaseManifests.filter((manifest) => !names.has(manifest));
-  for (const platform of githubReleaseArtifactPlatforms) {
-    const prefix = `hype-comms-${desktopVersion}-${platform}-`;
-    if (!assetNames.some((name) => name.startsWith(prefix))) {
-      missing.push(`${prefix}*`);
-    }
-  }
-  return missing;
 }
 
 export function addArtifactCacheKeys(manifest) {

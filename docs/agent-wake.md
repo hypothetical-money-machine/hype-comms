@@ -1,9 +1,9 @@
 # Agent wake pilot
 
 Status: the default-off transport, broker, private startup-repair core, fresh-authorization gate,
-post-provider durable-write recovery, executable identity pinning, subprocess close barrier,
-strict rollout-evidence manifest validator, and credential-free local evidence journal are
-implemented and verified. The implementation is ready for review. Live Grok Bot activation, an
+post-provider durable-write recovery, executable identity pinning, and subprocess close barrier are
+implemented and verified. Rollout evidence is recorded manually by the rollout owner rather than by
+tooling in this repository. The implementation is ready for review. Live Grok Bot activation, an
 installed signed/notarized pilot, the 24-hour soak, and retirement of the external 15-minute poll
 are owner-run post-merge rollout work, not this PR's definition of done. Wren is the current name of
 the agent formerly called Jules and owns the desktop Wake slice; Wren is not a rollout identity.
@@ -19,8 +19,8 @@ Use this statement for the implementation task:
 > runtime. The runtime can fetch exactly the referenced message through the existing Comms CLI but
 > never receives injected history. Delivery survives reconnects, duplicates, and crashes; keeps
 > credentials out of renderer IPC and logs; and fails visibly on cursor loss or ambiguous
-> activation. Include the signed pilot build lane and strict rollout-evidence tooling. Keep the
-> feature default-off outside explicitly selected builds. Do not change presence, typing, read
+> activation. Include the signed pilot build lane and a documented rollout-evidence record. Keep
+> the feature default-off outside explicitly selected builds. Do not change presence, typing, read
 > receipts, or held work #201, #203, #212, or #223.
 
 Wren owns the desktop implementation slice. The owner-run rollout will select one actual named Grok
@@ -40,8 +40,8 @@ identities are outside this path.
 - The signed macOS arm64 pilot workflow and package verifier assert Wake enablement, updater
   isolation, signing/notarization gates, package contents, and Electron fuses. Normal package and
   release jobs explicitly compile Wake out.
-- The strict evidence validator and credential-free collector are present for the rollout owner;
-  invalid, stale, body-bearing, or unauthoritative evidence fails closed.
+- Rollout evidence is recorded manually by the rollout owner against the documented record format;
+  invalid, stale, body-bearing, or unauthoritative evidence must be treated as failing closed.
 - `npm run check`, `npm run test:db`, the arm64 package verifier, and independent Standards/Spec
   review pass with no P1/P2 findings. No files under the renderer change.
 
@@ -78,7 +78,8 @@ identities are outside this path.
 4. **Expose the target boundary — complete.** The desktop invokes one pinned native adapter through
    a body-free, receipt-aware protocol. Selecting and configuring an actual Grok Bot adapter is
    owner-run rollout work.
-5. **Ship rollout tooling — complete.** The repository includes the signed pilot workflow, private operator surface; rollout evidence is collected and validated manually.
+5. **Ship rollout tooling — complete.** The repository includes the signed pilot workflow and
+   private operator surface; rollout evidence is collected and validated manually.
 6. **Run the rollout — post-merge owner checklist.** Bind the selected Grok Bot, run the packaged
    matrix and soak, then identify and retire exactly its separately managed 15-minute polling job.
 
@@ -439,8 +440,8 @@ default-off build does not count as live target evidence.
   `wakeHostClockMs - serverClockMs`. `messageCommittedAt` and `soakStartedAt` are server-clock
   timestamps. `recordedAt`, broker/provider/fetch/activity observations, and manifest copies of
   external-authority times are wake-host-clock timestamps; retain the authority's original clock in
-  its separately reviewed subject. The verifier subtracts each record's `clockSkewMs` whenever it
-  compares host observations across records or with a server timestamp. Scheduler window durations
+  its separately reviewed subject. Subtract each record's `clockSkewMs` before comparing host
+  observations across records or with a server timestamp. Scheduler window durations
   remain comparisons within one scheduler export, while their observation-record chronology uses
   normalized `recordedAt` values. Measure `latencyMs` from the server event's `occurredAt` to the wake
   host's observation of the approved target-runtime success acknowledgement. Compute the nearest-rank
@@ -561,21 +562,21 @@ have no attempt, new durable enqueue, target receipt, target activity, or exact-
   `poll_zero_execution_summary` share one scheduler system, automation, job, owner, and `PT15M`
   schedule. They carry the approved change/audit IDs and explicit zero-execution interval bounds.
 
-The validator deliberately rejects Wren, Jules, placeholder Bot labels, a target other than
+Reject any record set that contains Wren, Jules, placeholder Bot labels, a target other than
 `grok_bot`, unknown or missing fields, non-production/non-arm64 records, adapter-only receipts for
 accepted live wakes, unsafe free-form or reused evidence references, inconsistent run or identity
 fields, duplicate `caseId` values, incorrect deterministic wake IDs, failed records, stationary
-accepted/suppressed cursors, replays preceding their original activity, and non-chronological
-evidence. Each
-`evidenceReference` is a unique strict basename for a separately retained artifact in the supplied
-private artifact directory. The validator opens every referenced file without following a leaf
-symlink, requires owner-only access and current-user or root ownership, hashes the opened file while
-checking that its metadata did not change during the read, and compares `evidenceDigestSha256`.
+accepted/suppressed cursors, replays preceding their original activity, or non-chronological
+evidence. Each `evidenceReference` is a unique strict basename for a separately retained artifact
+in the private artifact directory. Each referenced file must be opened without following a leaf
+symlink and must show owner-only access and current-user or root ownership. Its digest, hashed
+while open after confirming its metadata did not change during the read, must match
+`evidenceDigestSha256`.
 Each artifact is at most 32 KiB and must itself be one canonical, body-free
 `agent.wake.authority_reference` JSON pointer that matches the run, case, target Bot, identity
 authority, case authority, and observation IDs; carries a digest of the separately retained
 authority subject; and says `independentReviewRequired: true`. This binds the record to the exact
-pointer bytes present during validation without copying logs, messages, credentials, or child
+pointer bytes present at review time without copying logs, messages, credentials, or child
 output into the NDJSON. It neither makes the pointer immutable nor proves the referenced authority
 observation true. Retain minimal authority exports separately and never retain raw conversations or
 secrets as Wake evidence.
@@ -693,7 +694,7 @@ hours after the first accepted soak message and no more than 16 minutes after th
 `poll-disabled` must follow the passing soak; `poll-interval-01-zero` and
 `poll-interval-02-zero` must each cover another full 15 minutes with no execution;
 `poll-two-intervals-zero` summarizes those scheduler audits; and the final push-only DM and mention
-must be committed afterward. The verifier computes nearest-rank p95 and the maximum from the healthy
+must be committed afterward. Compute the nearest-rank p95 and the maximum from the healthy
 latency records after normalizing host timestamps by the recorded
 `wakeHostClockMs - serverClockMs` skew.
 
