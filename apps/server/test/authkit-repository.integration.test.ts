@@ -38,8 +38,8 @@ describe("AuthKitRepository", () => {
   });
 
   beforeEach(async () => {
-    now = new Date();
     await database.reset();
+    now = new Date();
   });
 
   afterAll(async () => {
@@ -138,14 +138,18 @@ describe("AuthKitRepository", () => {
     const stored = await pool.query<{
       provider_state_hash: Buffer;
       verifier_ciphertext: Buffer;
-    }>("SELECT provider_state_hash, verifier_ciphertext FROM authkit_transactions");
+      created_at: Date;
+    }>("SELECT provider_state_hash, verifier_ciphertext, created_at FROM authkit_transactions");
     expect(stored.rows[0]?.provider_state_hash.byteLength).toBe(32);
     expect(stored.rows[0]?.provider_state_hash.toString("utf8")).not.toContain(providerState);
     expect(stored.rows[0]?.verifier_ciphertext.toString("utf8")).not.toContain(
       providerCodeVerifier,
     );
 
-    const consumedAt = new Date(now.getTime() + 1_000);
+    const transaction = stored.rows[0];
+    if (transaction === undefined) throw new Error("AuthKit transaction was not stored");
+    // Consumption follows the database creation time even when fixture setup is slow.
+    const consumedAt = new Date(transaction.created_at.getTime() + 1_000);
     const outcomes = await Promise.all([
       repository.consumeTransaction(providerState, consumedAt),
       repository.consumeTransaction(providerState, consumedAt),
