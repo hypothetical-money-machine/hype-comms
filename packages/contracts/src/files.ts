@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { entityIdSchema, isoDateTimeSchema } from "./common.js";
 import { attachmentSchema } from "./entities.js";
+import { syncPositionSchema } from "./sync-position.js";
 
 const filesPaginationCursorSchema = z
   .string()
@@ -81,6 +82,7 @@ export const conversationFilesQuerySchema = z
 
 export const conversationFilesResponseSchema = z
   .object({
+    snapshotPosition: syncPositionSchema,
     files: z.array(attachmentSchema).max(CONVERSATION_FILES_MAX_LIMIT),
     nextCursor: filesPaginationCursorSchema.nullable(),
     hasMore: z.boolean(),

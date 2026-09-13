@@ -16,7 +16,7 @@ import type {
   ChannelMembersResponse,
   ChatSessionState,
   CommunicationPathsResponse,
-  ConversationFilesResponse,
+  ConversationFilesResponse as WireConversationFilesResponse,
   ConversationMutationResponse,
   ConversationSummary,
   CreateChannelOperation,
@@ -34,10 +34,10 @@ import type {
   MagicLinkDeliveryState,
   Message,
   MessageByIdResponse,
-  MessageHistoryResponse,
+  MessageHistoryResponse as WireMessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
-  MessageThreadResponse,
+  MessageThreadResponse as WireMessageThreadResponse,
   MoveTaskOperation,
   NotificationContext,
   OpenAttachmentResponse,
@@ -55,7 +55,7 @@ import type {
   SyncAttemptResult,
   Task,
   TaskListQuery,
-  TaskListResponse,
+  TaskListResponse as WireTaskListResponse,
   TaskMutationResponse,
   ThemeState,
   UpdateState,
@@ -76,6 +76,20 @@ import type { CachedWorkspaceState, WorkspaceCache } from "./workspace-cache";
 import { MemoryWorkspaceCache } from "./workspace-cache";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
+type MessageHistoryResponse = Omit<WireMessageHistoryResponse, "snapshotPosition" | "reactions"> & {
+  readonly snapshotPosition?: SyncPosition;
+  readonly reactions?: WireMessageHistoryResponse["reactions"];
+};
+type MessageThreadResponse = Omit<WireMessageThreadResponse, "snapshotPosition" | "reactions"> & {
+  readonly snapshotPosition?: SyncPosition;
+  readonly reactions?: WireMessageThreadResponse["reactions"];
+};
+type TaskListResponse = Omit<WireTaskListResponse, "snapshotPosition"> & {
+  readonly snapshotPosition?: SyncPosition;
+};
+type ConversationFilesResponse = Omit<WireConversationFilesResponse, "snapshotPosition"> & {
+  readonly snapshotPosition?: SyncPosition;
+};
 const USER_ID = "20000000-0000-4000-8000-000000000001";
 const PEER_ID = "20000000-0000-4000-8000-000000000002";
 const WORKSPACE_ID = "20000000-0000-4000-8000-000000000003";
@@ -538,6 +552,14 @@ type ReplaceSnapshotArgs = Parameters<WorkspaceCache["replaceSnapshot"]>;
 
 /** Real projection and storage behavior with explicit delay and failure controls. */
 class FakeWorkspaceCache extends MemoryWorkspaceCache {
+  readonly collectionReadBarriers: Promise<void>[] = [];
+  collectionReadCount = 0;
+  override async readCollections(): ReturnType<WorkspaceCache["readCollections"]> {
+    const states = await super.readCollections();
+    this.collectionReadCount += 1;
+    await this.collectionReadBarriers.shift();
+    return states;
+  }
   loadCount = 0;
   reactionUpsertFailures = 0;
   readonly operations: string[] = [];
@@ -572,6 +594,14 @@ class FakeWorkspaceCache extends MemoryWorkspaceCache {
     const replaced = await super.replaceSnapshot(...args);
     if (replaced) this.#position = args[0].syncCursor;
     return replaced;
+  }
+
+  override async replaceMetadata(
+    ...args: Parameters<WorkspaceCache["replaceMetadata"]>
+  ): Promise<boolean> {
+    this.operations.push("replaceMetadata");
+    await this.snapshotReplaceBarriers.shift();
+    return super.replaceMetadata(...args);
   }
 
   override async replaceMembers(
@@ -674,6 +704,14 @@ class FakeWorkspaceCache extends MemoryWorkspaceCache {
 }
 
 class FakeDesktopApi implements DesktopApi {
+  readPosition = testPosition("0");
+  observePosition(position: SyncPosition): void {
+    if (
+      position.epoch !== this.readPosition.epoch ||
+      BigInt(position.sequence) > BigInt(this.readPosition.sequence)
+    )
+      this.readPosition = position;
+  }
   readonly platform: DesktopPlatform = "darwin";
   readonly initialThemeState: ThemeState = {
     preference: "system",
@@ -821,6 +859,7 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   emitWorkspaceEvent(event: ProductRealtimeEvent): void {
+    this.observePosition(event.position);
     const scope = this.#activeRealtimeScope ?? this.#preparedRealtimeScope;
     if (scope === null) return;
     for (const listener of this.#eventListeners) listener({ scope, event });
@@ -992,8 +1031,9 @@ class FakeDesktopApi implements DesktopApi {
       throw new Error("The workspace is temporarily unavailable");
     }
     const queued = this.bootstrapResults.shift();
-    if (queued !== undefined) return await queued;
-    return this.bootstrap;
+    const response = queued === undefined ? this.bootstrap : await queued;
+    this.observePosition(response.syncCursor);
+    return response;
   }
 
   readonly updateProfileRequests: (string | null)[] = [];
@@ -1044,29 +1084,47 @@ class FakeDesktopApi implements DesktopApi {
 
   async getConversationMessages(input: {
     readonly conversationId: string;
-  }): Promise<MessageHistoryResponse> {
+  }): Promise<WireMessageHistoryResponse> {
     this.historyRequests.push(input.conversationId);
     const queued = this.historyResults.get(input.conversationId)?.shift();
-    if (queued !== undefined) return await queued;
-    return {
-      threadSummaries: [],
-      threadsSupported: true,
-      attachments: [],
-      messages: [],
-      nextCursor: null,
-      ...this.histories.get(input.conversationId),
-    };
+    const snapshotPosition = this.readPosition;
+    const response =
+      queued === undefined
+        ? {
+            threadSummaries: [],
+            threadsSupported: true,
+            attachments: [],
+            messages: [],
+            nextCursor: null,
+            ...this.histories.get(input.conversationId),
+          }
+        : await queued;
+    const reactions =
+      response.reactions ??
+      (response.messages.length === 0
+        ? []
+        : (await this.listMessageReactions(response.messages.map((message) => message.id)))
+            .reactions);
+    return { snapshotPosition, ...response, reactions };
   }
 
   async getMessageThread(input: {
     readonly messageId: string;
     readonly before?: string;
     readonly limit?: number;
-  }): Promise<MessageThreadResponse> {
+  }): Promise<WireMessageThreadResponse> {
     this.threadRequests.push(input);
     const response = this.threadResults.shift();
     if (response === undefined) throw new Error("The test queued no thread result");
-    return { attachments: [], ...response };
+    const reactions =
+      response.reactions ??
+      (
+        await this.listMessageReactions([
+          response.root.id,
+          ...response.replies.map((message) => message.id),
+        ])
+      ).reactions;
+    return { snapshotPosition: this.readPosition, attachments: [], ...response, reactions };
   }
 
   async retractMessage(messageId: string): Promise<RetractMessageResponse> {
@@ -1122,15 +1180,17 @@ class FakeDesktopApi implements DesktopApi {
     return await response;
   }
 
-  async listConversationFiles(conversationId: string): Promise<ConversationFilesResponse> {
+  async listConversationFiles(conversationId: string): Promise<WireConversationFilesResponse> {
     this.conversationFileRequests.push(conversationId);
-    return (
-      (await this.conversationFileResults.shift()) ?? {
+    const snapshotPosition = this.readPosition;
+    return {
+      snapshotPosition,
+      ...((await this.conversationFileResults.shift()) ?? {
         files: [],
         nextCursor: null,
         hasMore: false,
-      }
-    );
+      }),
+    };
   }
 
   async listMessageAttachments(
@@ -1163,20 +1223,26 @@ class FakeDesktopApi implements DesktopApi {
   async listConversationTasks(
     conversationId: string,
     input: Partial<TaskListQuery> = {},
-  ): Promise<TaskListResponse> {
+  ): Promise<WireTaskListResponse> {
     this.conversationTaskRequests.push(conversationId);
     this.conversationTaskPageRequests.push({ conversationId, ...input });
-    return (
-      (await this.conversationTaskResults.shift()) ?? {
+    const snapshotPosition = this.readPosition;
+    return {
+      snapshotPosition,
+      ...((await this.conversationTaskResults.shift()) ?? {
         tasks: [],
         nextCursor: null,
         hasMore: false,
-      }
-    );
+      }),
+    };
   }
 
-  async listMyTasks(): Promise<TaskListResponse> {
-    return (await this.myTaskResults.shift()) ?? { tasks: [], nextCursor: null, hasMore: false };
+  async listMyTasks(): Promise<WireTaskListResponse> {
+    const snapshotPosition = this.readPosition;
+    return {
+      snapshotPosition,
+      ...((await this.myTaskResults.shift()) ?? { tasks: [], nextCursor: null, hasMore: false }),
+    };
   }
 
   async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
@@ -1283,7 +1349,7 @@ class FakeDesktopApi implements DesktopApi {
 
   async syncWorkspace(after: SyncPosition): Promise<SyncAttemptResult> {
     this.syncedFrom.push(after.sequence);
-    return await (this.syncResults.shift() ?? {
+    const result: SyncAttemptResult = await (this.syncResults.shift() ?? {
       status: "accepted",
       response: {
         events: [],
@@ -1292,6 +1358,8 @@ class FakeDesktopApi implements DesktopApi {
         hasMore: false,
       },
     });
+    if (result.status === "accepted") this.observePosition(result.response.highWaterCursor);
+    return result;
   }
 
   async startWorkspaceRealtime(after: SyncPosition): Promise<RealtimeSessionScope> {
@@ -1541,6 +1609,196 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it.each([
+    ["local send", "fetch"],
+    ["realtime hydration", "fetch"],
+    ["local send", "metadata read"],
+    ["realtime hydration", "metadata read"],
+  ] as const)("retains a new file after %s during a stale page's %s", async (delivery, phase) => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const attachment: Attachment = {
+      id: "90000000-0000-4000-8000-000000000001",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "new.txt",
+      contentType: "text/plain",
+      sizeBytes: 3,
+      status: "ready",
+      downloadUrl: "/download/new",
+      createdAt: NOW,
+    };
+    const page = deferred<ConversationFilesResponse>();
+    const attachmentRead = deferred<ListMessageAttachmentsResponse>();
+    const metadataRead = deferred<void>();
+    if (phase === "metadata read") cache.collectionReadBarriers.push(metadataRead.promise);
+    const previousReads = cache.collectionReadCount;
+    api.conversationFileResults.push(page.promise, {
+      snapshotPosition: testPosition("11"),
+      files: [attachment],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const loading = runtime.loadConversationFiles(CONVERSATION_ID);
+    await settle(() => api.conversationFileRequests.length === 1, "file page requested");
+    if (phase === "metadata read" && delivery === "realtime hydration") {
+      api.attachmentResults.push(attachmentRead.promise);
+      api.emitWorkspaceEvent({
+        ...peerEvent,
+        position: testPosition("11"),
+        conversationSequence: ownMessage.conversationSequence,
+        payload: { message: ownMessage, mentionedUserIds: [] },
+      });
+      await settle(() => cache.cursor === "11", "created message committed before metadata read");
+    }
+    if (phase === "metadata read") {
+      page.resolve({
+        snapshotPosition: testPosition("10"),
+        files: [],
+        nextCursor: null,
+        hasMore: false,
+      });
+      await settle(() => cache.collectionReadCount > previousReads, "collection metadata read");
+    }
+    if (delivery === "local send") {
+      api.sendResults.push({
+        status: "accepted",
+        response: {
+          message: ownMessage,
+          attachments: [attachment],
+          syncCursor: testPosition("11"),
+        },
+      });
+      await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
+    } else if (phase === "metadata read") {
+      attachmentRead.resolve({ attachments: [attachment] });
+    } else {
+      api.attachmentResults.push({ attachments: [attachment] });
+      api.emitWorkspaceEvent({
+        ...peerEvent,
+        position: testPosition("11"),
+        conversationSequence: ownMessage.conversationSequence,
+        payload: { message: ownMessage, mentionedUserIds: [] },
+      });
+    }
+    await settle(
+      () => runtime.state.conversationFiles.some((file) => file.id === attachment.id),
+      "new attachment published",
+    );
+    metadataRead.resolve();
+    page.resolve({
+      snapshotPosition: testPosition("10"),
+      files: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await loading;
+    expect(api.conversationFileRequests).toHaveLength(2);
+    expect(runtime.state.conversationFiles).toEqual([attachment]);
+    runtime.stop();
+  });
+
+  it("replays a reaction removal that commits while an older collection page is in flight", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "page-two",
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(api.bootstrap, [ownMessage], [ownReaction]);
+    const runtime = new WorkspaceRuntime(api, { createCache: () => cache });
+    await runtime.start(session);
+    await drain();
+    const requestCount = api.historyRequests.length;
+    const page = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.length === requestCount + 1,
+      "collection page requested",
+    );
+    api.emitWorkspaceEvent({ ...reactionAddedEvent, type: "reaction.removed" });
+    await settle(() => cache.cursor === "11", "reaction removal committed");
+    const acknowledgements = [...api.acknowledged];
+    page.resolve({
+      snapshotPosition: testPosition("10"),
+      messages: [ownMessage],
+      reactions: [ownReaction],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: null,
+    });
+    await loading;
+    expect(runtime.state.reactions).toEqual([]);
+    expect((await cache.load()).reactions).toEqual([]);
+    expect(api.acknowledged).toEqual(acknowledgements);
+    expect(
+      runtime.collectionState({ kind: "timeline", conversationId: CONVERSATION_ID }),
+    ).toMatchObject({ loaded: true, snapshotPosition: testPosition("10"), nextCursor: null });
+    runtime.stop();
+  });
+
+  it("discards an overflowing collection fetch and retries without pausing realtime acknowledgement", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "page-two",
+    });
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(api.bootstrap, [ownMessage]);
+    const runtime = new WorkspaceRuntime(api, { createCache: () => cache });
+    await runtime.start(session);
+    await drain();
+    const requestCount = api.historyRequests.length;
+    const page = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page.promise]);
+    const loading = runtime.loadOlder(CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.length === requestCount + 1,
+      "collection page requested",
+    );
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    for (let i = 0; i < 1025; i += 1) {
+      api.emitWorkspaceEvent(
+        taskUpdated(`60000000-0000-4000-8000-${String(i).padStart(12, "0")}`, String(i + 11), {
+          ...task,
+          version: i + 1,
+        }),
+      );
+      if (i % 8 === 0) await drain();
+    }
+    await settle(() => cache.cursor === "1035", "buffer-overflow events committed");
+    page.resolve({
+      snapshotPosition: testPosition("10"),
+      messages: [peerMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: "obsolete-page",
+    });
+    await loading;
+    expect(api.historyRequests).toHaveLength(requestCount + 2);
+    expect(runtime.state.messages.some((message) => message.id === PEER_MESSAGE_ID)).toBe(false);
+    expect(
+      runtime.collectionState({ kind: "timeline", conversationId: CONVERSATION_ID }).nextCursor,
+    ).toBeNull();
+    expect(cache.cursor).toBe("1035");
+    expect(api.acknowledged.at(-1)).toBe("1035");
+    runtime.stop();
+  });
+
   it("publishes the cache's committed summaries without repeating event accounting", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -2234,7 +2492,7 @@ describe("WorkspaceRuntime", () => {
     expect(api.startedCursors).toEqual(["12"]);
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
     expect(cache.operations.indexOf("applyEvent:message.created")).toBeLessThan(
-      cache.operations.indexOf("replaceSnapshot", 1),
+      cache.operations.indexOf("replaceMetadata"),
     );
     expect(runtime.state.messages).toEqual(expect.arrayContaining([ownMessage, peerMessage]));
     expect((await cache.load()).messages).toEqual(
@@ -4001,7 +4259,7 @@ describe("WorkspaceRuntime", () => {
         payload: { messageId: hiddenMessage.id, deletedAt: NOW },
       });
       await settle(
-        () => cache.operations.filter((operation) => operation === "replaceSnapshot").length === 2,
+        () => cache.operations.includes("replaceMetadata"),
         "source-less metadata replacement begins",
       );
 

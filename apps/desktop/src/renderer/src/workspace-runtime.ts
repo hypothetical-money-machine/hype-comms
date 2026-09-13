@@ -57,6 +57,18 @@ import {
 } from "./workspace-projection";
 import type { CacheEventResult } from "./workspace-cache-changes";
 
+import {
+  CollectionJournal,
+  CollectionRetry,
+  collectionKey,
+  invalidateCollections,
+  replayCollectionPage,
+  unloadedCollection,
+  type CollectionIdentity,
+  type CollectionRecords,
+  type CollectionState,
+} from "./workspace-collections";
+
 import { mentionedMemberIds } from "./mentions";
 import {
   clearPersistentWorkspaceCache,
@@ -75,6 +87,7 @@ import {
 export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_only" }>["reason"];
 
 export interface WorkspaceRuntimeState {
+  readonly collections: readonly CollectionState[];
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
   readonly threadSummaries: readonly MessageThreadSummary[];
@@ -163,6 +176,7 @@ const MAX_LOCAL_RETRACT_EFFECTS = 20_000;
 export const WORKSPACE_SNAPSHOT_TASK_LIMIT = 20_000;
 
 const INITIAL_STATE: WorkspaceRuntimeState = {
+  collections: [],
   bootstrap: null,
   messages: [],
   threadSummaries: [],
@@ -452,6 +466,9 @@ export class WorkspaceRuntime {
   #realtimeEpoch = 0;
   /** The immutable main-process scope currently authorized to mutate this renderer cache. */
   #realtimeScope: RealtimeSessionScope | null = null;
+  readonly #collectionJournals = new Set<CollectionJournal>();
+  readonly #collectionLoads = new Map<string, Promise<void>>();
+  readonly #threadSummaryPositions = new Map<string, SyncPosition>();
   readonly #historyCursors = new Map<string, string | null>();
   /** In-flight first-page hydrations so opening the same conversation does not stack fetches. */
   readonly #historyHydrations = new Map<string, Promise<void>>();
@@ -571,6 +588,8 @@ export class WorkspaceRuntime {
       this.#cache = null;
       this.#syncCursor = null;
       this.#historyCursors.clear();
+      this.#threadSummaryPositions.clear();
+      this.#collectionLoads.clear();
       this.#historyHydrations.clear();
       this.#threadCursors.clear();
       this.#invalidatedThreadSummaryConversationIds.clear();
@@ -616,6 +635,7 @@ export class WorkspaceRuntime {
       }
       const resyncRequest = event.type === "system.resync_required" ? ++this.#resyncRequest : null;
       if (resyncRequest !== null) {
+        this.#cancelCollectionLoads("The workspace requires a new snapshot");
         // Publish the demand as soon as it arrives. A timer-based attempt can currently be awaiting
         // network I/O on the recovery queue and must observe that a newer recovery owns staleness.
         this.#resyncRecoveryPending = true;
@@ -699,6 +719,7 @@ export class WorkspaceRuntime {
         this.#state.threadSummaries,
       );
       this.#setState({
+        collections: cached.collections.filter((state) => state.identity.kind !== "files"),
         bootstrap: cached.bootstrap,
         messages: cached.messages,
         reactions: cached.reactions,
@@ -805,6 +826,8 @@ export class WorkspaceRuntime {
     this.#invalidatedThreadSummaryConversationIds.clear();
     this.#membersDirty = false;
     this.#historyCursors.clear();
+    this.#threadSummaryPositions.clear();
+    this.#collectionLoads.clear();
     this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
@@ -1297,12 +1320,32 @@ export class WorkspaceRuntime {
     return this.#outboxFlushOwner === owner && this.#isProjectionCurrent(owner, conversationId);
   }
 
+  #cancelCollectionLoads(message: string, conversationId?: string): void {
+    for (const journal of this.#collectionJournals) {
+      if (
+        conversationId === undefined ||
+        (journal.identity.kind !== "my_tasks" && journal.identity.conversationId === conversationId)
+      )
+        journal.cancel(message);
+    }
+  }
+
+  collectionState(identity: CollectionIdentity): CollectionState {
+    return (
+      this.#state.collections.find(
+        (state) => collectionKey(state.identity) === collectionKey(identity),
+      ) ?? unloadedCollection(identity)
+    );
+  }
+
   #rotateProjectionBarrier(): void {
+    this.#cancelCollectionLoads("The workspace projection was replaced");
     this.#projectionAbortController.abort();
     this.#projectionAbortController = new AbortController();
   }
 
   async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
+    this.#cancelCollectionLoads("A task mutation superseded the collection read");
     if (!this.#isProjectionCurrent(projection)) return;
     const accepted = await projection.cache.upsertTasks(tasks, projection.signal);
     if (!this.#isProjectionCurrent(projection)) return;
@@ -1338,6 +1381,98 @@ export class WorkspaceRuntime {
     return applied;
   }
 
+  async #loadCollection(
+    identity: CollectionIdentity,
+    requestCursor: string | null,
+    fetchPage: () => Promise<{
+      readonly snapshotPosition: SyncPosition;
+      readonly nextCursor: string | null;
+      readonly records: CollectionRecords;
+    }>,
+    publish: (records: CollectionRecords) => void,
+  ): Promise<void> {
+    const key = collectionKey(identity);
+    const inFlight = this.#collectionLoads.get(key);
+    if (inFlight !== undefined) return inFlight;
+    const generation = this.#generation;
+    const load = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const cache = this.#cache;
+        if (cache === null || generation !== this.#generation) return;
+        const projection = this.#captureProjection(cache);
+        const conversationId = identity.kind === "my_tasks" ? undefined : identity.conversationId;
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        const journal = new CollectionJournal(this.#syncCursor, identity);
+        this.#collectionJournals.add(journal);
+        const signal = AbortSignal.any([projection.signal, journal.signal]);
+        try {
+          const page = await fetchPage();
+          if (!this.#isProjectionCurrent(projection, conversationId)) return;
+          await this.#serialize(async () => {
+            if (!this.#isProjectionCurrent(projection, conversationId)) return;
+            const records = replayCollectionPage(
+              page.records,
+              journal.newerThan(page.snapshotPosition),
+            );
+            const state: CollectionState = {
+              identity,
+              loaded: true,
+              snapshotPosition: page.snapshotPosition,
+              nextCursor: page.nextCursor,
+              invalidatedAt: null,
+            };
+            const commit = { state, expectedPosition: this.#syncCursor, requestCursor };
+            if (identity.kind === "timeline" || identity.kind === "thread") {
+              if (
+                !(await cache.upsertHistory(
+                  identity.conversationId,
+                  records.messages,
+                  records.reactions,
+                  signal,
+                  commit,
+                ))
+              ) {
+                journal.assertValid();
+                return;
+              }
+            } else if (identity.kind === "tasks" || identity.kind === "my_tasks") {
+              await cache.upsertTasks(records.tasks, signal, commit);
+            } else {
+              await cache.commitCollectionMetadata(commit, signal);
+            }
+            if (!this.#isProjectionCurrent(projection, conversationId)) return;
+            // The queue excludes runtime event commits during encryption. Recheck the journal for
+            // a synchronous reset/retirement before publishing any request-local view state.
+            journal.newerThan(page.snapshotPosition);
+            const collections = await cache.readCollections();
+            if (!this.#isProjectionCurrent(projection, conversationId)) return;
+            journal.assertValid();
+            this.#setState({ collections });
+            if (identity.kind === "timeline") {
+              this.#historyCursors.set(identity.conversationId, page.nextCursor);
+              for (const message of records.messages)
+                this.#threadSummaryPositions.set(message.id, page.snapshotPosition);
+            } else if (identity.kind === "thread")
+              this.#threadCursors.set(identity.rootId, page.nextCursor);
+            publish(records);
+          });
+          return;
+        } catch (error) {
+          if (!this.#isProjectionCurrent(projection, conversationId)) return;
+          if (this.#resyncRecoveryPending) return;
+          if (!(error instanceof CollectionRetry) || attempt === 2) throw error;
+        } finally {
+          this.#collectionJournals.delete(journal);
+        }
+      }
+    };
+    const pending = load().finally(() => {
+      if (this.#collectionLoads.get(key) === pending) this.#collectionLoads.delete(key);
+    });
+    this.#collectionLoads.set(key, pending);
+    return pending;
+  }
+
   async loadConversationFiles(conversationId: string): Promise<void> {
     const cache = this.#cache;
     if (cache === null) throw new Error("Workspace cache is unavailable");
@@ -1345,28 +1480,57 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
     this.#setState({ conversationFilesBusy: true, conversationFilesError: null });
     try {
-      const files: Attachment[] = [];
-      let before: string | undefined;
-      for (;;) {
-        const page = await this.#client.listConversationFiles(conversationId, {
-          ...(before === undefined ? {} : { before }),
-          limit: 50,
-        });
-        if (!this.#isProjectionCurrent(projection, conversationId)) return;
-        files.push(...page.files);
-        if (!page.hasMore || page.nextCursor === null || page.nextCursor === before) break;
-        before = page.nextCursor;
+      const identity: CollectionIdentity = { kind: "files", conversationId };
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      for (let pages = 0; pages < 400; pages += 1) {
+        await this.#loadCollection(
+          identity,
+          cursor,
+          async () => {
+            const page = await this.#client.listConversationFiles(conversationId, {
+              ...(cursor === null ? {} : { before: cursor }),
+              limit: 50,
+            });
+            if (page.hasMore !== (page.nextCursor !== null))
+              throw new Error("The collection has inconsistent pagination");
+            return {
+              ...page,
+              records: {
+                messages: [],
+                reactions: [],
+                tasks: [],
+                attachments: page.files,
+                threadSummaries: [],
+              },
+            };
+          },
+          (records) => {
+            const retractedIds = retractedMessageIds(
+              this.#state.messages,
+              retractReservationMap(this.#retractReservations),
+            );
+            const files =
+              cursor === null
+                ? records.attachments
+                : mergeAttachments(this.#state.conversationFiles, records.attachments);
+            this.#setState({
+              conversationFiles: files.filter(
+                (attachment) =>
+                  attachment.messageId === null || !retractedIds.has(attachment.messageId),
+              ),
+            });
+          },
+        );
+        if (!this.#isProjectionCurrent(projection)) return;
+        const next = this.collectionState(identity).nextCursor;
+        if (next === null) return;
+        if (seen.has(next) || next === cursor)
+          throw new Error("The collection cursor did not advance");
+        seen.add(next);
+        cursor = next;
       }
-      if (!this.#isProjectionCurrent(projection, conversationId)) return;
-      const retractedIds = retractedMessageIds(
-        this.#state.messages,
-        retractReservationMap(this.#retractReservations),
-      );
-      this.#setState({
-        conversationFiles: files.filter(
-          (attachment) => attachment.messageId === null || !retractedIds.has(attachment.messageId),
-        ),
-      });
+      throw new Error("The collection exceeded local capacity");
     } catch (error) {
       if (projection.generation === this.#generation) {
         this.#setState({
@@ -1411,21 +1575,44 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
     this.#setState({ tasksBusy: true, taskError: null });
     try {
-      const tasks: Task[] = [];
-      let after: string | undefined;
-      for (;;) {
-        const page = await this.#client.listConversationTasks(conversationId, {
-          ...(after === undefined ? {} : { after }),
-          limit: 200,
-        });
-        if (!this.#isProjectionCurrent(projection, conversationId)) return;
-        tasks.push(...page.tasks);
-        if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
-        after = page.nextCursor;
+      const identity: CollectionIdentity = { kind: "tasks", conversationId };
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      for (let pages = 0; pages < 400; pages += 1) {
+        await this.#loadCollection(
+          identity,
+          cursor,
+          async () => {
+            const page = await this.#client.listConversationTasks(conversationId, {
+              ...(cursor === null ? {} : { after: cursor }),
+              limit: 200,
+            });
+            if (page.hasMore !== (page.nextCursor !== null))
+              throw new Error("The collection has inconsistent pagination");
+            return {
+              ...page,
+              records: {
+                messages: [],
+                reactions: [],
+                tasks: page.tasks,
+                attachments: [],
+                threadSummaries: [],
+              },
+            };
+          },
+          (records) => {
+            this.#setState({ tasks: mergeTasks(this.#state.tasks, records.tasks) });
+          },
+        );
+        if (!this.#isProjectionCurrent(projection)) return;
+        const next = this.collectionState(identity).nextCursor;
+        if (next === null) return;
+        if (seen.has(next) || next === cursor)
+          throw new Error("The collection cursor did not advance");
+        seen.add(next);
+        cursor = next;
       }
-      await this.#serialize(async () => {
-        await this.#projectTasks(projection, tasks);
-      });
+      throw new Error("The collection exceeded local capacity");
     } catch (error) {
       if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not load this task board") });
@@ -1443,21 +1630,44 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection)) return;
     this.#setState({ tasksBusy: true, taskError: null });
     try {
-      const tasks: Task[] = [];
-      let after: string | undefined;
-      for (;;) {
-        const page = await this.#client.listMyTasks({
-          ...(after === undefined ? {} : { after }),
-          limit: 200,
-        });
+      const identity: CollectionIdentity = { kind: "my_tasks" };
+      let cursor: string | null = null;
+      const seen = new Set<string>();
+      for (let pages = 0; pages < 400; pages += 1) {
+        await this.#loadCollection(
+          identity,
+          cursor,
+          async () => {
+            const page = await this.#client.listMyTasks({
+              ...(cursor === null ? {} : { after: cursor }),
+              limit: 200,
+            });
+            if (page.hasMore !== (page.nextCursor !== null))
+              throw new Error("The collection has inconsistent pagination");
+            return {
+              ...page,
+              records: {
+                messages: [],
+                reactions: [],
+                tasks: page.tasks,
+                attachments: [],
+                threadSummaries: [],
+              },
+            };
+          },
+          (records) => {
+            this.#setState({ tasks: mergeTasks(this.#state.tasks, records.tasks) });
+          },
+        );
         if (!this.#isProjectionCurrent(projection)) return;
-        tasks.push(...page.tasks);
-        if (!page.hasMore || page.nextCursor === null || page.nextCursor === after) break;
-        after = page.nextCursor;
+        const next = this.collectionState(identity).nextCursor;
+        if (next === null) return;
+        if (seen.has(next) || next === cursor)
+          throw new Error("The collection cursor did not advance");
+        seen.add(next);
+        cursor = next;
       }
-      await this.#serialize(async () => {
-        await this.#projectTasks(projection, tasks);
-      });
+      throw new Error("The collection exceeded local capacity");
     } catch (error) {
       if (projection.generation === this.#generation) {
         this.#setState({ taskError: errorMessage(error, "Could not load My Tasks") });
@@ -1690,45 +1900,56 @@ export class WorkspaceRuntime {
     }
     const projection = this.#captureProjection(cache);
     try {
-      await this.#serialize(async () => {
-        if (!this.#isProjectionCurrent(projection)) return;
-        const thread = await this.#client.getMessageThread({
-          messageId: threadRootId,
-          ...(before === undefined ? {} : { before }),
-          limit: 50,
-        });
-        const conversationId = thread.root.conversationId;
-        if (!this.#isProjectionCurrent(projection, conversationId)) return;
-        const messages = [thread.root, ...thread.replies];
-        const messageIds = messages.map((message) => message.id);
-        const hydrated = await this.#client.listMessageReactions(messageIds);
-        if (!this.#isProjectionCurrent(projection, conversationId)) return;
-        const persisted = await cache.upsertHistory(
-          conversationId,
-          messages,
-          hydrated.reactions,
-          projection.signal,
-        );
-        if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
-        const retainedMessages = this.#retainMessages(messages);
-        this.#threadCursors.set(threadRootId, thread.nextCursor);
-        this.#setState({
-          messages: mergeMessages(this.#state.messages, retainedMessages),
-          reactions: replaceMessageReactions(
-            this.#state.reactions,
-            messageIds,
-            retainReactionsForLiveMessages(hydrated.reactions, retainedMessages),
-          ),
-          attachments: replaceMessageAttachments(
-            this.#state.attachments,
-            messageIds,
-            retainAttachmentsForLiveMessages(thread.attachments ?? [], retainedMessages),
-          ),
-          ...(this.#state.selectedThreadRootId === threadRootId
-            ? { threadLoading: false, threadError: null }
-            : {}),
-        });
-      });
+      const conversationId =
+        this.#state.messages.find((message) => message.id === threadRootId)?.conversationId ??
+        this.#state.selectedConversationId ??
+        (await this.#client.getMessageById(threadRootId)).message.conversationId;
+      await this.#loadCollection(
+        { kind: "thread", conversationId, rootId: threadRootId },
+        before ?? null,
+        async () => {
+          const thread = await this.#client.getMessageThread({
+            messageId: threadRootId,
+            ...(before === undefined ? {} : { before }),
+            limit: 50,
+          });
+          if (thread.root.id !== threadRootId || thread.root.conversationId !== conversationId)
+            throw new Error(
+              "The thread response did not match the requested conversation and root",
+            );
+          const messages = [thread.root, ...thread.replies];
+          return {
+            ...thread,
+            records: {
+              messages,
+              reactions: thread.reactions,
+              tasks: [],
+              attachments: thread.attachments,
+              threadSummaries: [],
+            },
+          };
+        },
+        (records) => {
+          const messageIds = records.messages.map((message) => message.id);
+          const retainedMessages = this.#retainMessages(records.messages);
+          this.#setState({
+            messages: mergeMessages(this.#state.messages, retainedMessages),
+            reactions: replaceMessageReactions(
+              this.#state.reactions,
+              messageIds,
+              retainReactionsForLiveMessages(records.reactions, retainedMessages),
+            ),
+            attachments: replaceMessageAttachments(
+              this.#state.attachments,
+              messageIds,
+              retainAttachmentsForLiveMessages(records.attachments, retainedMessages),
+            ),
+            ...(this.#state.selectedThreadRootId === threadRootId
+              ? { threadLoading: false, threadError: null }
+              : {}),
+          });
+        },
+      );
     } catch (error) {
       try {
         if (await this.#downgradeAfterThreadFailure(threadRootId, projection.generation, cache)) {
@@ -1772,10 +1993,7 @@ export class WorkspaceRuntime {
     });
     if (history.threadsSupported) return false;
     const messageIds = history.messages.map((message) => message.id);
-    const hydrated =
-      messageIds.length === 0
-        ? { reactions: [] }
-        : await this.#client.listMessageReactions(messageIds);
+    const hydrated = { reactions: history.reactions };
     await this.#serialize(async () => {
       if (!this.#isProjectionCurrent(projection, root.conversationId)) return;
       const persisted = await cache.upsertHistory(
@@ -1891,6 +2109,7 @@ export class WorkspaceRuntime {
       ) {
         return;
       }
+      this.#cancelCollectionLoads("A reaction mutation superseded the collection read");
       const persisted = await cache.upsertReaction(
         result.reaction,
         conversationId,
@@ -1925,6 +2144,7 @@ export class WorkspaceRuntime {
       ) {
         return;
       }
+      this.#cancelCollectionLoads("A reaction mutation superseded the collection read");
       if (existing !== undefined) await cache.removeReaction(existing.id);
       if (generation !== this.#generation || cache !== this.#cache) return;
       this.#setState({
@@ -2139,58 +2359,61 @@ export class WorkspaceRuntime {
     if (cache === null || before === null) return;
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
-    const history = await this.#client.getConversationMessages({
-      conversationId,
-      ...(before === undefined ? {} : { before }),
-      limit: 50,
-    });
-    await this.#serialize(async () => {
-      if (!this.#isProjectionCurrent(projection, conversationId)) return;
-      const messageIds = history.messages.map((message) => message.id);
-      const hydrated =
-        messageIds.length === 0
-          ? { reactions: [] }
-          : await this.#client.listMessageReactions(messageIds);
-      if (!this.#isProjectionCurrent(projection, conversationId)) return;
-      const persisted = await cache.upsertHistory(
-        conversationId,
-        history.messages,
-        hydrated.reactions,
-        projection.signal,
-      );
-      if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
-      const retainedMessages = this.#retainMessages(history.messages);
-      this.#historyCursors.set(conversationId, history.nextCursor);
-      this.#setState({
-        messages: mergeMessages(this.#state.messages, retainedMessages),
-        threadSummaries:
-          history.threadsSupported &&
-          !this.#invalidatedThreadSummaryConversationIds.has(conversationId)
-            ? mergeThreadSummaries(this.#state.threadSummaries, history.threadSummaries)
-            : history.threadsSupported
-              ? this.#withoutConversationThreadSummaries(conversationId)
-              : [],
-        threadsSupported: history.threadsSupported,
-        ...(history.threadsSupported
-          ? {}
-          : {
-              selectedThreadRootId: null,
-              focusedThreadMessageId: null,
-              threadLoading: false,
-              threadError: null,
-            }),
-        reactions: replaceMessageReactions(
-          this.#state.reactions,
-          messageIds,
-          retainReactionsForLiveMessages(hydrated.reactions, retainedMessages),
-        ),
-        attachments: replaceMessageAttachments(
-          this.#state.attachments,
-          messageIds,
-          retainAttachmentsForLiveMessages(history.attachments ?? [], retainedMessages),
-        ),
-      });
-    });
+    let threadsSupported = this.#state.threadsSupported;
+    await this.#loadCollection(
+      { kind: "timeline", conversationId },
+      before ?? null,
+      async () => {
+        const history = await this.#client.getConversationMessages({
+          conversationId,
+          ...(before === undefined ? {} : { before }),
+          limit: 50,
+        });
+        threadsSupported = history.threadsSupported;
+        return {
+          ...history,
+          records: {
+            messages: history.messages,
+            reactions: history.reactions,
+            tasks: [],
+            attachments: history.attachments,
+            threadSummaries: history.threadSummaries,
+          },
+        };
+      },
+      (records) => {
+        const messageIds = records.messages.map((message) => message.id);
+        const retainedMessages = this.#retainMessages(records.messages);
+        this.#setState({
+          messages: mergeMessages(this.#state.messages, retainedMessages),
+          threadSummaries:
+            threadsSupported && !this.#invalidatedThreadSummaryConversationIds.has(conversationId)
+              ? mergeThreadSummaries(this.#state.threadSummaries, records.threadSummaries)
+              : threadsSupported
+                ? this.#withoutConversationThreadSummaries(conversationId)
+                : [],
+          threadsSupported,
+          ...(threadsSupported
+            ? {}
+            : {
+                selectedThreadRootId: null,
+                focusedThreadMessageId: null,
+                threadLoading: false,
+                threadError: null,
+              }),
+          reactions: replaceMessageReactions(
+            this.#state.reactions,
+            messageIds,
+            retainReactionsForLiveMessages(records.reactions, retainedMessages),
+          ),
+          attachments: replaceMessageAttachments(
+            this.#state.attachments,
+            messageIds,
+            retainAttachmentsForLiveMessages(records.attachments, retainedMessages),
+          ),
+        });
+      },
+    );
   }
 
   hasOlder(conversationId: string): boolean {
@@ -2220,9 +2443,16 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    const hydration = this.loadOlder(conversationId).finally(() => {
-      this.#historyHydrations.delete(conversationId);
-    });
+    const generation = this.#generation;
+    const hydration = this.loadOlder(conversationId)
+      .catch((error: unknown) => {
+        if (generation === this.#generation)
+          this.#setState({ error: errorMessage(error, "Could not load this conversation") });
+      })
+      .finally(() => {
+        if (this.#historyHydrations.get(conversationId) === hydration)
+          this.#historyHydrations.delete(conversationId);
+      });
     this.#historyHydrations.set(conversationId, hydration);
   }
 
@@ -2260,6 +2490,8 @@ export class WorkspaceRuntime {
     this.#createdMessageMentions.clear();
     this.#locallyProjectedRetracts.clear();
     this.#historyCursors.clear();
+    this.#threadSummaryPositions.clear();
+    this.#collectionLoads.clear();
     this.#historyHydrations.clear();
     this.#threadCursors.clear();
     this.#invalidatedThreadSummaryConversationIds.clear();
@@ -2390,6 +2622,8 @@ export class WorkspaceRuntime {
     this.#retractedMessageIds.clear();
     this.#createdMessageMentions.clear();
     this.#historyCursors.clear();
+    this.#threadSummaryPositions.clear();
+    this.#collectionLoads.clear();
     this.#historyHydrations.clear();
     this.#threadCursors.clear();
     this.#clearRetryTimer();
@@ -2416,6 +2650,7 @@ export class WorkspaceRuntime {
     const cache = this.#cache;
     const scope = this.#scope;
     const membershipEpoch = this.#membershipEpoch;
+    this.#cancelCollectionLoads("An authoritative snapshot is replacing the replica");
     const sourceLessRetractMetadataVersion = this.#sourceLessRetractMetadataVersion;
     if (cache === null || scope === null || generation !== this.#generation) return false;
     const signal = this.#projectionAbortController.signal;
@@ -2457,6 +2692,8 @@ export class WorkspaceRuntime {
     // Build paging state off to the side. An old session can finish a request after a new one has
     // started; it must not clear or populate the new scope's live cursor maps before the final
     // generation check.
+    const collectionStates = new Map<string, CollectionState>();
+    const reactionPositions = new Map<string, SyncPosition>();
     const historyCursors = new Map<string, string | null>();
     const threadCursors = new Map<string, string | null>();
     for (const summary of snapshot.conversations) {
@@ -2465,18 +2702,21 @@ export class WorkspaceRuntime {
         limit: 50,
       });
       if (!isCurrent()) return false;
+      collectionStates.set(`timeline:${summary.conversation.id}`, {
+        identity: { kind: "timeline", conversationId: summary.conversation.id },
+        loaded: true,
+        snapshotPosition: history.snapshotPosition,
+        nextCursor: history.nextCursor,
+        invalidatedAt: null,
+      });
+      for (const message of history.messages)
+        reactionPositions.set(message.id, history.snapshotPosition);
       historyCursors.set(summary.conversation.id, history.nextCursor);
       messages.push(...history.messages);
       threadSummaries.push(...history.threadSummaries);
       attachments.push(...(history.attachments ?? []));
       threadsSupported &&= history.threadsSupported;
-      if (history.messages.length > 0) {
-        const hydrated = await this.#client.listMessageReactions(
-          history.messages.map((message) => message.id),
-        );
-        if (!isCurrent()) return false;
-        reactions.push(...hydrated.reactions);
-      }
+      reactions.push(...history.reactions);
       if (isTaskConversation(summary, snapshot.currentUser.user.id)) {
         let after: string | undefined;
         const seenCursors = new Set<string>();
@@ -2507,6 +2747,13 @@ export class WorkspaceRuntime {
             }
             seenTaskIds.add(task.id);
           }
+          collectionStates.set(`tasks:${summary.conversation.id}`, {
+            identity: { kind: "tasks", conversationId: summary.conversation.id },
+            loaded: true,
+            snapshotPosition: page.snapshotPosition,
+            nextCursor: page.nextCursor,
+            invalidatedAt: null,
+          });
           tasks.push(...page.tasks);
           const nextCursor = page.nextCursor;
           if (nextCursor === null) break;
@@ -2576,10 +2823,20 @@ export class WorkspaceRuntime {
       });
       if (!isCurrent()) return false;
       const threadMessages = [thread.root, ...thread.replies];
-      const hydrated = await this.#client.listMessageReactions(
-        threadMessages.map((message) => message.id),
-      );
-      if (!isCurrent()) return false;
+      const hydrated = { reactions: thread.reactions };
+      collectionStates.set(`thread:${thread.root.conversationId}:${openThreadRootId}`, {
+        identity: {
+          kind: "thread",
+          conversationId: thread.root.conversationId,
+          rootId: openThreadRootId,
+        },
+        loaded: true,
+        snapshotPosition: thread.snapshotPosition,
+        nextCursor: thread.nextCursor,
+        invalidatedAt: null,
+      });
+      for (const message of threadMessages)
+        reactionPositions.set(message.id, thread.snapshotPosition);
       threadCursors.set(openThreadRootId, thread.nextCursor);
       const retainedThreadMessages = this.#retainMessages(threadMessages);
       refreshedMessages = mergeMessages(refreshedMessages, retainedThreadMessages);
@@ -2604,6 +2861,7 @@ export class WorkspaceRuntime {
         tasks,
         signal,
         threadSummaries.map((summary) => summary.latestReply.id),
+        { states: [...collectionStates.values()], reactionPositions },
       );
     } catch (error) {
       if (!isCurrent()) return false;
@@ -2633,6 +2891,10 @@ export class WorkspaceRuntime {
     ) {
       if (!(await this.#reloadCache(generation, cache))) return false;
       this.#historyCursors.clear();
+      this.#threadSummaryPositions.clear();
+      for (const [messageId, position] of reactionPositions)
+        this.#threadSummaryPositions.set(messageId, position);
+      this.#collectionLoads.clear();
       for (const [conversationId, cursor] of historyCursors) {
         this.#historyCursors.set(conversationId, cursor);
       }
@@ -2674,6 +2936,10 @@ export class WorkspaceRuntime {
       loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
     this.#syncCursor = loaded.syncCursor;
     this.#historyCursors.clear();
+    this.#threadSummaryPositions.clear();
+    for (const [messageId, position] of reactionPositions)
+      this.#threadSummaryPositions.set(messageId, position);
+    this.#collectionLoads.clear();
     for (const [conversationId, cursor] of historyCursors) {
       this.#historyCursors.set(conversationId, cursor);
     }
@@ -2705,6 +2971,14 @@ export class WorkspaceRuntime {
       selectedThreadRootId === null ? null : this.#state.focusedThreadMessageId;
     this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
+      collections: loaded.collections.filter(
+        (state) =>
+          state.identity.kind !== "files" ||
+          this.#state.collections.some(
+            (current) =>
+              collectionKey(current.identity) === collectionKey(state.identity) && current.loaded,
+          ),
+      ),
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       threadSummaries,
@@ -2833,6 +3107,9 @@ export class WorkspaceRuntime {
     this.#membersReplacementAbortController.abort();
     this.#membersReplacementAbortController = new AbortController();
     this.#rotateProjectionBarrier();
+    this.#collectionLoads.clear();
+    this.#collectionJournals.clear();
+    this.#historyHydrations.clear();
     this.#membersReplacementQueue = Promise.resolve();
   }
 
@@ -2937,6 +3214,8 @@ export class WorkspaceRuntime {
           throw error;
         }
         if (!this.#isProjectionCurrent(projection)) return;
+        if (applied.status === "applied")
+          for (const journal of this.#collectionJournals) journal.record(event);
         if (
           event.type === "message.retracted" &&
           retractSource === undefined &&
@@ -3262,19 +3541,8 @@ export class WorkspaceRuntime {
       : loaded.bootstrap.conversations;
     const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
     const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
-    const messages = loaded.messages.filter((message) =>
-      visibleConversationIds.has(message.conversationId),
-    );
-    const visibleMessageIds = new Set(messages.map((message) => message.id));
-    const reactions = loaded.reactions.filter((reaction) =>
-      visibleMessageIds.has(reaction.messageId),
-    );
-    const tasks = loaded.tasks.filter((task) => visibleConversationIds.has(task.conversationId));
-    const retractSourceMessageIds = this.#state.threadSummaries
-      .filter((summary) => visibleConversationIds.has(summary.latestReply.conversationId))
-      .map((summary) => summary.latestReply.id);
     const signal = this.#projectionAbortController.signal;
-    const replaced = await cache.replaceSnapshot(
+    const replaced = await cache.replaceMetadata(
       {
         currentUser: snapshot.currentUser,
         workspace: snapshot.workspace,
@@ -3283,11 +3551,7 @@ export class WorkspaceRuntime {
         syncCursor: durableCursor,
         featureFlags: snapshot.featureFlags,
       },
-      messages,
-      reactions,
-      tasks,
       signal,
-      retractSourceMessageIds,
     );
     if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
     if (!replaced) {
@@ -3403,10 +3667,7 @@ export class WorkspaceRuntime {
       const history = await this.#client.getConversationMessages({ conversationId, limit: 50 });
       if (!this.#isProjectionCurrent(projection, conversationId)) return false;
       const messageIds = history.messages.map((message) => message.id);
-      const hydrated =
-        messageIds.length === 0
-          ? { reactions: [] }
-          : await this.#client.listMessageReactions(messageIds);
+      const hydrated = { reactions: history.reactions };
       if (!this.#isProjectionCurrent(projection, conversationId)) return false;
       const persisted = await cache.upsertHistory(
         conversationId,
@@ -3926,6 +4187,10 @@ export class WorkspaceRuntime {
     applyRetractEffects: boolean,
     cachedMentionedUserIds?: readonly string[],
   ): void {
+    this.#cancelCollectionLoads(
+      "A message retraction superseded the collection read",
+      tombstone.conversationId,
+    );
     if (tombstone.deletedAt !== null) {
       this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
         messageId: tombstone.id,
@@ -3992,6 +4257,8 @@ export class WorkspaceRuntime {
     event: WorkspaceEvent,
     result: Extract<CacheEventResult, { status: "applied" }>,
   ): void {
+    for (const journal of this.#collectionJournals) journal.record(event);
+    this.#setState({ collections: invalidateCollections(this.#state.collections, event) });
     const changes = result.changes;
     const revoked = new Set(changes.removedConversationIds);
     const removedReactions = new Set(changes.removedReactionIds);
@@ -4045,7 +4312,15 @@ export class WorkspaceRuntime {
           event.payload.mentionedUserIds,
         );
         const newlyObserved = !this.#state.messages.some((message) => message.id === created?.id);
-        if (!this.#invalidatedThreadSummaryConversationIds.has(created.conversationId)) {
+        const summaryPosition =
+          created.threadRootId === null
+            ? undefined
+            : this.#threadSummaryPositions.get(created.threadRootId);
+        if (
+          !this.#invalidatedThreadSummaryConversationIds.has(created.conversationId) &&
+          (summaryPosition === undefined ||
+            compareSyncPositions(event.position, summaryPosition) > 0)
+        ) {
           threadSummaries = projectReplySummary(threadSummaries, created, newlyObserved);
         }
       } else if (created !== undefined) {
@@ -4320,6 +4595,10 @@ export class WorkspaceRuntime {
     clientMessageId: string,
     attachments: readonly Attachment[] = [],
   ): void {
+    this.#cancelCollectionLoads(
+      "A committed send superseded the collection read",
+      message.conversationId,
+    );
     const retained = this.#retainMessages([message])[0] ?? message;
     if (retained.deletedAt !== null) {
       this.#retractReservations = upsertRetractReservation(this.#retractReservations, {
@@ -4372,6 +4651,11 @@ export class WorkspaceRuntime {
       if (!this.#isProjectionCurrent(projection, message.conversationId)) return;
       const current = this.#state.messages.find((candidate) => candidate.id === message.id);
       if (current === undefined || current.deletedAt !== null) return;
+      if (result.attachments.length > 0)
+        this.#cancelCollectionLoads(
+          "New attachments superseded the collection read",
+          message.conversationId,
+        );
       this.#setState({
         attachments: mergeAttachments(this.#state.attachments, result.attachments),
         conversationFiles:
@@ -4454,6 +4738,14 @@ export class WorkspaceRuntime {
     this.#syncCursor = loaded.syncCursor;
     this.#pruneCreatedMessageMentions(loaded.messages, loaded.bootstrap, threadSummaries);
     this.#setState({
+      collections: loaded.collections.filter(
+        (state) =>
+          state.identity.kind !== "files" ||
+          this.#state.collections.some(
+            (current) =>
+              collectionKey(current.identity) === collectionKey(state.identity) && current.loaded,
+          ),
+      ),
       bootstrap: loaded.bootstrap,
       messages: loaded.messages,
       threadSummaries,

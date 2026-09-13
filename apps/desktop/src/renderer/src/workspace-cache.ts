@@ -66,6 +66,15 @@ import {
   type CommittedCacheChanges,
 } from "./workspace-cache-changes";
 
+import {
+  assertReactionSnapshotCurrent,
+  commitCollectionState,
+  invalidateCollections,
+  parseCollectionStates,
+  type CollectionCommit,
+  type CollectionState,
+} from "./workspace-collections";
+
 import { mentionedMemberIds } from "./mentions";
 
 const CACHE_SCHEMA_VERSION = 1 as const;
@@ -108,6 +117,7 @@ export interface MembershipRepairMarker {
 }
 
 export interface CachedWorkspaceState {
+  readonly collections: readonly CollectionState[];
   /**
    * The aggregate client snapshot, not a bootstrap response: the cache holds every conversation
    * page the client has fetched, so page cursors have no meaning once state is cached.
@@ -136,9 +146,16 @@ class SupersededCacheEvent extends Error {
   }
 }
 
+export interface SnapshotCollections {
+  readonly states: readonly CollectionState[];
+  readonly reactionPositions: ReadonlyMap<string, SyncPosition>;
+}
+
 export interface WorkspaceCache {
   readonly mode: CacheCryptoStatus["mode"];
   load(): Promise<CachedWorkspaceState>;
+  readCollections(): Promise<readonly CollectionState[]>;
+  commitCollectionMetadata(commit: CollectionCommit, signal?: AbortSignal): Promise<void>;
   /**
    * Accepts either a bootstrap response or the aggregate client snapshot; only the fields both
    * shapes share are persisted, so a caller that has paged past the first conversation page can
@@ -151,7 +168,10 @@ export interface WorkspaceCache {
     tasks?: readonly Task[],
     signal?: AbortSignal,
     retractSourceMessageIds?: readonly string[],
+    collections?: SnapshotCollections,
   ): Promise<boolean>;
+  /** Replaces a complete catalog at the applied position without replacing retained collection rows. */
+  replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v2/members`.
    *
@@ -190,6 +210,7 @@ export interface WorkspaceCache {
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     signal?: AbortSignal,
+    collection?: CollectionCommit,
   ): Promise<boolean>;
   /** Projects a mutation response only while its conversation remains authorized. */
   upsertReaction(
@@ -203,7 +224,11 @@ export interface WorkspaceCache {
    * Persists only task projections whose conversations remain authorized, without advancing the
    * workspace event cursor. Returns the subset accepted atomically.
    */
-  upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]>;
+  upsertTasks(
+    tasks: readonly Task[],
+    signal?: AbortSignal,
+    collection?: CollectionCommit,
+  ): Promise<readonly Task[]>;
   /**
    * Reconciles a committed send only while its queued operation and authorized conversation still
    * exist atomically. Returns false when a concurrent repair or projection already retired it.
@@ -252,6 +277,7 @@ interface CacheCryptoClient {
 
 interface MetadataRow {
   readonly id: "state";
+  readonly collections?: readonly CollectionState[];
   readonly userId: string;
   readonly workspaceId: string;
   readonly syncCursor: SyncPosition | null;
@@ -287,6 +313,7 @@ interface ConversationRow {
 }
 
 interface MessageRow {
+  readonly reactionSnapshotPosition?: SyncPosition;
   readonly id: string;
   readonly clientMessageId: string;
   readonly conversationId: string;
@@ -740,6 +767,7 @@ function mergeMetadataRow(
 ): MetadataRow {
   return {
     id: "state",
+    collections: patch.collections ?? current?.collections,
     userId: patch.userId ?? current?.userId ?? scope.userId,
     workspaceId: patch.workspaceId ?? current?.workspaceId ?? scope.workspaceId,
     syncCursor: patch.syncCursor !== undefined ? patch.syncCursor : (current?.syncCursor ?? null),
@@ -823,6 +851,35 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     this.#crypto = options.crypto;
     this.#scope = options.scope;
     this.#database = new WorkspaceCacheDatabase(databaseName(options.scope));
+  }
+
+  async readCollections(): Promise<readonly CollectionState[]> {
+    return parseCollectionStates((await this.#database.metadata.get("state"))?.collections);
+  }
+
+  async commitCollectionMetadata(commit: CollectionCommit, signal?: AbortSignal): Promise<void> {
+    await this.#database.transaction(
+      "rw",
+      this.#database.metadata,
+      this.#database.conversations,
+      async () => {
+        signal?.throwIfAborted();
+        await this.#assertNoMembershipRepair();
+        const identity = commit.state.identity;
+        if (identity.kind !== "files")
+          throw new Error("Only session-only file lists use metadata commits");
+        if ((await this.#database.conversations.get(identity.conversationId)) === undefined)
+          throw new Error("The collection conversation is no longer authorized");
+        const current = await this.#database.metadata.get("state");
+        const collections = commitCollectionState(
+          parseCollectionStates(current?.collections),
+          current?.syncCursor ?? null,
+          commit,
+        );
+        await this.#database.metadata.put(mergeMetadataRow(current, this.#scope, { collections }));
+        signal?.throwIfAborted();
+      },
+    );
   }
 
   async load(): Promise<CachedWorkspaceState> {
@@ -932,6 +989,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             }),
           );
     return {
+      collections: parseCollectionStates(metadata?.collections).map((state) =>
+        state.identity.kind === "files" ? { ...state, loaded: false, nextCursor: null } : state,
+      ),
       bootstrap,
       messages: retainedMessages.sort(compareMessages),
       // A reservation may be written before its source message is available locally. Keep orphaned
@@ -962,6 +1022,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
     retractSourceMessageIds: readonly string[] = [],
+    collections?: SnapshotCollections,
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -1070,7 +1131,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             })),
           );
           await this.#database.messages.bulkPut(
-            parsedMessages.map((message) => messageRow(message, encrypted)),
+            parsedMessages.map((message) => ({
+              ...messageRow(message, encrypted),
+              ...(collections?.reactionPositions.has(message.id) === true
+                ? { reactionSnapshotPosition: collections.reactionPositions.get(message.id) }
+                : {}),
+            })),
           );
           await this.#database.reactions.bulkPut(
             reactionRows(parsedReactions, parsedMessages, encrypted),
@@ -1080,6 +1146,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             mergeMetadataRow(metadata, this.#scope, {
               ...this.#scope,
               syncCursor: parsed.syncCursor,
+              collections: parseCollectionStates(collections?.states),
               lastSyncedAt: new Date().toISOString(),
               repairMarker: null,
               retractReservations: nextReservations,
@@ -1101,6 +1168,100 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         retractSourceMessageIds,
       );
       return true;
+    }
+  }
+
+  async replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    const parsed = parseSnapshotInput(snapshot);
+    const visible = new Set(parsed.conversations.map((summary) => summary.conversation.id));
+    for (;;) {
+      signal?.throwIfAborted();
+      const reservations = parseRetractReservations(
+        (await this.#database.metadata.get("state"))?.retractReservations,
+      );
+      const summaries = applyRetractReservationsToConversations(
+        parsed.conversations,
+        retractReservationMap(reservations),
+      );
+      const encrypted = await encryptRecords(this.#crypto, [
+        protectedRecord("workspace", parsed.workspace.id, {
+          currentUser: parsed.currentUser,
+          workspace: parsed.workspace,
+          featureFlags: parsed.featureFlags,
+        } satisfies WorkspacePayload),
+        ...parsed.members.map((member) => protectedRecord("member", member.id, member)),
+        ...summaries.map((summary) =>
+          protectedRecord("conversation", summary.conversation.id, summary),
+        ),
+      ]);
+      signal?.throwIfAborted();
+      const result = await this.#database.transaction(
+        "rw",
+        [
+          this.#database.metadata,
+          this.#database.workspaces,
+          this.#database.members,
+          this.#database.conversations,
+          this.#database.messages,
+          this.#database.reactions,
+          this.#database.tasks,
+          this.#database.outbox,
+        ],
+        async () => {
+          signal?.throwIfAborted();
+          const metadata = await this.#database.metadata.get("state");
+          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null)
+            throw new Error("Membership repair must complete before replacing metadata");
+          if (
+            metadata?.syncCursor == null ||
+            !sameSyncPosition(metadata.syncCursor, parsed.syncCursor)
+          )
+            return "stale";
+          if (
+            !sameRetractReservations(
+              reservations,
+              parseRetractReservations(metadata.retractReservations),
+            )
+          )
+            return "retry";
+          // Retained collection rows and their reaction anchors stay in this transaction's stores.
+          // A page can commit while metadata encryption is in flight without being overwritten.
+          await Promise.all([
+            this.#database.workspaces.clear(),
+            this.#database.conversations.clear(),
+            this.#database.messages.filter((row) => !visible.has(row.conversationId)).delete(),
+            this.#database.reactions.filter((row) => !visible.has(row.conversationId)).delete(),
+            this.#database.tasks.filter((row) => !visible.has(row.conversationId)).delete(),
+            this.#database.outbox.filter((row) => !visible.has(row.conversationId)).delete(),
+          ]);
+          await this.#database.workspaces.put({
+            id: parsed.workspace.id,
+            value: encryptedValue(encrypted, "workspace", parsed.workspace.id),
+          });
+          await this.#writeMembers(parsed.members, encrypted, signal);
+          await this.#database.conversations.bulkPut(
+            summaries.map((summary) => ({
+              id: summary.conversation.id,
+              kind: summary.conversation.kind,
+              updatedAt: summary.conversation.updatedAt,
+              value: encryptedValue(encrypted, "conversation", summary.conversation.id),
+            })),
+          );
+          await this.#database.metadata.put(
+            mergeMetadataRow(metadata, this.#scope, {
+              collections: parseCollectionStates(metadata.collections).filter(
+                (state) =>
+                  state.identity.kind === "my_tasks" || visible.has(state.identity.conversationId),
+              ),
+              lastSyncedAt: new Date().toISOString(),
+            }),
+          );
+          signal?.throwIfAborted();
+          return "replaced";
+        },
+      );
+      if (result === "retry") continue;
+      return result === "replaced";
     }
   }
 
@@ -1334,7 +1495,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           ) {
             throw new SupersededCacheEvent(currentMetadata?.syncCursor ?? null);
           }
-          await this.#database.messages.put(messageRow(created, encrypted));
+          await this.#database.messages.put({
+            ...(await this.#database.messages.get(created.id)),
+            ...messageRow(created, encrypted),
+          });
           if (nextSummary !== null) {
             await this.#database.conversations.put({
               id: nextSummary.conversation.id,
@@ -1380,9 +1544,17 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
+        this.#database.messages,
         this.#database.reactions,
         this.#database.events,
         async () => {
+          const anchor = (await this.#database.messages.get(parsed.payload.reaction.messageId))
+            ?.reactionSnapshotPosition;
+          if (anchor !== undefined && compareSyncPositions(parsed.position, anchor) <= 0) {
+            changes = {};
+            await this.#recordEvent(parsed, signal);
+            return;
+          }
           await this.#database.reactions.put(
             reactionRow(parsed.payload.reaction, parsed.conversationId, encrypted),
           );
@@ -1394,9 +1566,17 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
+        this.#database.messages,
         this.#database.reactions,
         this.#database.events,
         async () => {
+          const anchor = (await this.#database.messages.get(parsed.payload.reaction.messageId))
+            ?.reactionSnapshotPosition;
+          if (anchor !== undefined && compareSyncPositions(parsed.position, anchor) <= 0) {
+            changes = {};
+            await this.#recordEvent(parsed, signal);
+            return;
+          }
           await this.#database.reactions.delete(parsed.payload.reaction.id);
           await this.#recordEvent(parsed, signal);
         },
@@ -1510,7 +1690,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             throw new SupersededCacheEvent(currentMetadata?.syncCursor ?? null);
           }
           if (tombstone !== null) {
-            await this.#database.messages.put(messageRow(tombstone, encrypted));
+            await this.#database.messages.put({
+              ...(await this.#database.messages.get(tombstone.id)),
+              ...messageRow(tombstone, encrypted),
+            });
           }
           await this.#database.reactions
             .where("messageId")
@@ -1645,7 +1828,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             ) {
               return "rejected";
             }
-            await this.#database.messages.put(messageRow(parsed, encrypted));
+            await this.#database.messages.put({
+              ...(await this.#database.messages.get(parsed.id)),
+              ...messageRow(parsed, encrypted),
+            });
             await this.#database.outbox.bulkDelete([
               ...new Set([expectedId, parsed.clientMessageId]),
             ]);
@@ -1679,9 +1865,17 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     signal?: AbortSignal,
+    collection?: CollectionCommit,
   ): Promise<boolean> {
     if (signal?.aborted) return false;
     const expectedConversationId = entityIdSchema.parse(conversationId);
+    if (
+      collection !== undefined &&
+      ((collection.state.identity.kind !== "timeline" &&
+        collection.state.identity.kind !== "thread") ||
+        collection.state.identity.conversationId !== expectedConversationId)
+    )
+      throw new Error("The collection identity does not match this history page");
     const inputMessages = messages.map((message) => messageSchema.parse(message));
     if (inputMessages.some((message) => message.conversationId !== expectedConversationId)) {
       throw new Error("The workspace history crossed conversation scope");
@@ -1730,9 +1924,20 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               this.#database.conversations.get(expectedConversationId),
               this.#database.messages.bulkGet(parsed.map((message) => message.id)),
             ]);
+            const collections =
+              collection === undefined
+                ? undefined
+                : commitCollectionState(
+                    parseCollectionStates(metadata?.collections),
+                    metadata?.syncCursor ?? null,
+                    collection,
+                  );
             const currentReservations = parseRetractReservations(metadata?.retractReservations);
             if (!sameRetractReservations(baseReservations, currentReservations)) return "retry";
             if (!sameMessageRows(existingRows, currentRows)) return "retry";
+            if (parsedReactions !== undefined)
+              for (const row of currentRows)
+                assertReactionSnapshotCurrent(row?.reactionSnapshotPosition, collection);
             if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
               throw new Error("Membership repair must complete before mutating the cache");
             }
@@ -1743,8 +1948,21 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             await this.#database.messages.bulkPut(
               parsed
                 .filter((message, index) => retainedMessages[index] === message)
-                .map((message) => messageRow(message, encrypted)),
+                .map((message) => ({
+                  ...existingRows.find((row) => row?.id === message.id),
+                  ...messageRow(message, encrypted),
+                  ...(collection === undefined || parsedReactions === undefined
+                    ? {}
+                    : { reactionSnapshotPosition: collection.state.snapshotPosition ?? undefined }),
+                })),
             );
+            if (collection?.state.snapshotPosition != null && parsedReactions !== undefined) {
+              for (const [index, message] of parsed.entries())
+                if (retainedMessages[index] !== message)
+                  await this.#database.messages.update(message.id, {
+                    reactionSnapshotPosition: collection.state.snapshotPosition,
+                  });
+            }
             const retractedIds = new Set(
               retainedMessages
                 .filter((message) => message.deletedAt !== null)
@@ -1763,7 +1981,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
                 .delete();
             }
             await this.#database.metadata.put(
-              mergeMetadataRow(metadata, this.#scope, { retractReservations: nextReservations }),
+              mergeMetadataRow(metadata, this.#scope, {
+                retractReservations: nextReservations,
+                ...(collections === undefined ? {} : { collections }),
+              }),
             );
             signal?.throwIfAborted();
             return "written";
@@ -1825,10 +2046,20 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     await this.#database.reactions.delete(reactionId);
   }
 
-  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
+  async upsertTasks(
+    tasks: readonly Task[],
+    signal?: AbortSignal,
+    collection?: CollectionCommit,
+  ): Promise<readonly Task[]> {
+    if (
+      collection !== undefined &&
+      collection.state.identity.kind !== "tasks" &&
+      collection.state.identity.kind !== "my_tasks"
+    )
+      throw new Error("The collection identity does not match this task page");
     if (signal?.aborted) return [];
     const parsed = tasks.map((task) => taskSchema.parse(task));
-    if (parsed.length === 0) return [];
+    if (parsed.length === 0 && collection === undefined) return [];
     const encrypted = await encryptRecords(
       this.#crypto,
       parsed.map((task) => protectedRecord("task", task.id, task)),
@@ -1846,6 +2077,21 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           if (parseMembershipRepairMarker(metadata?.repairMarker) !== null) {
             throw new Error("Membership repair must complete before mutating the cache");
           }
+          const collections =
+            collection === undefined
+              ? undefined
+              : commitCollectionState(
+                  parseCollectionStates(metadata?.collections),
+                  metadata?.syncCursor ?? null,
+                  collection,
+                );
+          if (collection !== undefined && collection.state.identity.kind !== "my_tasks") {
+            if (
+              (await this.#database.conversations.get(collection.state.identity.conversationId)) ===
+              undefined
+            )
+              throw new Error("The collection conversation is no longer authorized");
+          }
           const conversationIds = [...new Set(parsed.map((task) => task.conversationId))];
           const conversations = await this.#database.conversations.bulkGet(conversationIds);
           const authorizedIds = new Set(
@@ -1860,6 +2106,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             return acceptsTaskVersion(existingVersion, task.version);
           });
           await this.#database.tasks.bulkPut(accepted.map((task) => taskRow(task, encrypted)));
+          if (collections !== undefined)
+            await this.#database.metadata.put(
+              mergeMetadataRow(metadata, this.#scope, { collections }),
+            );
           signal?.throwIfAborted();
           return accepted;
         },
@@ -2104,6 +2354,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         });
         await this.#database.metadata.put(
           mergeMetadataRow(metadata, this.#scope, {
+            collections: parseCollectionStates(metadata?.collections).filter(
+              (state) =>
+                state.identity.kind !== "my_tasks" &&
+                state.identity.conversationId !== marker.conversationId,
+            ),
             syncCursor:
               metadata?.syncCursor === null ||
               metadata?.syncCursor === undefined ||
@@ -2247,6 +2502,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     await this.#database.metadata.put(
       mergeMetadataRow(current, this.#scope, {
         syncCursor,
+        collections: invalidateCollections(parseCollectionStates(current?.collections), event),
         lastSyncedAt: new Date().toISOString(),
         ...(retractReservations === undefined ? {} : { retractReservations }),
       }),
@@ -2290,6 +2546,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   readonly #tasks = new Map<string, Task>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
+  readonly #reactionSnapshotPositions = new Map<string, SyncPosition>();
+  #collections: readonly CollectionState[] = [];
   #syncCursor: SyncPosition | null = null;
   #lastSyncedAt: string | null = null;
   #repairMarker: MembershipRepairMarker | null = null;
@@ -2297,6 +2555,25 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   #currentUserId: string | null = null;
   /** Exact mention IDs from live creates, retained until their matching retract arrives. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
+
+  async readCollections(): Promise<readonly CollectionState[]> {
+    return this.#collections;
+  }
+
+  async commitCollectionMetadata(commit: CollectionCommit, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    this.#assertNoMembershipRepair();
+    const identity = commit.state.identity;
+    if (identity.kind !== "files")
+      throw new Error("Only session-only file lists use metadata commits");
+    if (
+      !this.#snapshot?.conversations.some(
+        (summary) => summary.conversation.id === identity.conversationId,
+      )
+    )
+      throw new Error("The collection conversation is no longer authorized");
+    this.#collections = commitCollectionState(this.#collections, this.#syncCursor, commit);
+  }
 
   async load(): Promise<CachedWorkspaceState> {
     this.#finishStagedMembershipEvent();
@@ -2324,6 +2601,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         ? null
         : canonicalSnapshot({ ...snapshot, members: [...this.#members], syncCursor });
     return {
+      collections: this.#collections.map((state) =>
+        state.identity.kind === "files" ? { ...state, loaded: false, nextCursor: null } : state,
+      ),
       bootstrap,
       // Map insertion order is arrival order, not conversation order; sort so "load older
       // messages" cannot append history below newer messages and so `messages.at(-1)` is really
@@ -2353,6 +2633,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     tasks: readonly Task[] = [],
     signal?: AbortSignal,
     retractSourceMessageIds: readonly string[] = [],
+    collections?: SnapshotCollections,
   ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const authorizedConversationIds = new Set(
@@ -2409,6 +2690,10 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       if (!authorizedConversationIds.has(item.operation.conversationId)) this.#outbox.delete(id);
     }
     this.#syncCursor = parsed.syncCursor;
+    this.#collections = parseCollectionStates(collections?.states);
+    this.#reactionSnapshotPositions.clear();
+    for (const [messageId, position] of collections?.reactionPositions ?? [])
+      this.#reactionSnapshotPositions.set(messageId, position);
     this.#lastSyncedAt = new Date().toISOString();
     this.#repairMarker = null;
     retainLiveMessageMentions(
@@ -2417,6 +2702,43 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       retainedConversations,
       retractSourceMessageIds,
     );
+    return true;
+  }
+
+  async replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    const parsed = parseSnapshotInput(snapshot);
+    signal?.throwIfAborted();
+    this.#assertNoMembershipRepair();
+    if (this.#syncCursor === null || !sameSyncPosition(this.#syncCursor, parsed.syncCursor))
+      return false;
+    const visible = new Set(parsed.conversations.map((summary) => summary.conversation.id));
+    this.#snapshot = {
+      ...parsed,
+      conversations: applyRetractReservationsToConversations(
+        parsed.conversations,
+        retractReservationMap(this.#retractReservations),
+      ),
+    };
+    this.#currentUserId = parsed.currentUser.user.id;
+    this.#members = parsed.members;
+    for (const [id, message] of this.#messages)
+      if (!visible.has(message.conversationId)) {
+        this.#messages.delete(id);
+        this.#reactionSnapshotPositions.delete(id);
+      }
+    for (const [id, conversationId] of this.#reactionConversationIds)
+      if (!visible.has(conversationId)) {
+        this.#reactions.delete(id);
+        this.#reactionConversationIds.delete(id);
+      }
+    for (const [id, task] of this.#tasks)
+      if (!visible.has(task.conversationId)) this.#tasks.delete(id);
+    for (const [id, item] of this.#outbox)
+      if (!visible.has(item.operation.conversationId)) this.#outbox.delete(id);
+    this.#collections = this.#collections.filter(
+      (state) => state.identity.kind === "my_tasks" || visible.has(state.identity.conversationId),
+    );
+    this.#lastSyncedAt = new Date().toISOString();
     return true;
   }
 
@@ -2512,9 +2834,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     ) {
       return ignoredCacheEvent(this.#syncCursor);
     }
+    this.#collections = invalidateCollections(this.#collections, parsed);
     this.#events.add(parsed.id);
     this.#syncCursor = parsed.position;
     this.#lastSyncedAt = new Date().toISOString();
+    if (parsed.type === "reaction.added" || parsed.type === "reaction.removed") {
+      const anchor = this.#reactionSnapshotPositions.get(parsed.payload.reaction.messageId);
+      if (anchor !== undefined && compareSyncPositions(parsed.position, anchor) <= 0)
+        return committedCacheEvent(parsed.position, {});
+    }
     if (parsed.type === "channel.membership_changed") {
       if (this.#snapshot !== null) {
         const conversations = new Map(
@@ -2732,10 +3060,18 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     messages: readonly Message[],
     reactions?: readonly Reaction[],
     signal?: AbortSignal,
+    collection?: CollectionCommit,
   ): Promise<boolean> {
     if (signal?.aborted) return false;
     const expectedConversationId = entityIdSchema.parse(conversationId);
     const parsedMessages = messages.map((message) => messageSchema.parse(message));
+    if (
+      collection !== undefined &&
+      ((collection.state.identity.kind !== "timeline" &&
+        collection.state.identity.kind !== "thread") ||
+        collection.state.identity.conversationId !== expectedConversationId)
+    )
+      throw new Error("The collection identity does not match this history page");
     if (parsedMessages.some((message) => message.conversationId !== expectedConversationId)) {
       throw new Error("The workspace history crossed conversation scope");
     }
@@ -2744,6 +3080,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     );
     this.#assertNoMembershipRepair();
     if (authorized !== true) return false;
+    const collections =
+      collection === undefined
+        ? this.#collections
+        : commitCollectionState(this.#collections, this.#syncCursor, collection);
+    if (reactions !== undefined)
+      for (const message of parsedMessages)
+        assertReactionSnapshotCurrent(this.#reactionSnapshotPositions.get(message.id), collection);
     this.#retractReservations = reserveTombstonedMessages(
       this.#retractReservations,
       parsedMessages,
@@ -2792,6 +3135,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         this.#reactionConversationIds.delete(id);
       }
     }
+    if (collection?.state.snapshotPosition != null && reactions !== undefined) {
+      for (const message of parsedMessages)
+        this.#reactionSnapshotPositions.set(message.id, collection.state.snapshotPosition);
+    }
+    this.#collections = collections;
     signal?.throwIfAborted();
     return true;
   }
@@ -2819,12 +3167,32 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#reactionConversationIds.delete(reactionId);
   }
 
-  async upsertTasks(tasks: readonly Task[], signal?: AbortSignal): Promise<readonly Task[]> {
+  async upsertTasks(
+    tasks: readonly Task[],
+    signal?: AbortSignal,
+    collection?: CollectionCommit,
+  ): Promise<readonly Task[]> {
+    if (
+      collection !== undefined &&
+      collection.state.identity.kind !== "tasks" &&
+      collection.state.identity.kind !== "my_tasks"
+    )
+      throw new Error("The collection identity does not match this task page");
     if (signal?.aborted) return [];
     this.#assertNoMembershipRepair();
     const authorizedConversationIds = new Set(
       this.#snapshot?.conversations.map((summary) => summary.conversation.id) ?? [],
     );
+    const collections =
+      collection === undefined
+        ? this.#collections
+        : commitCollectionState(this.#collections, this.#syncCursor, collection);
+    if (
+      collection !== undefined &&
+      collection.state.identity.kind !== "my_tasks" &&
+      !authorizedConversationIds.has(collection.state.identity.conversationId)
+    )
+      throw new Error("The collection conversation is no longer authorized");
     const accepted: Task[] = [];
     for (const task of tasks) {
       const parsed = taskSchema.parse(task);
@@ -2835,6 +3203,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         accepted.push(parsed);
       }
     }
+    this.#collections = collections;
     signal?.throwIfAborted();
     return accepted;
   }
@@ -2934,6 +3303,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#tasks.clear();
     this.#events.clear();
     this.#syncCursor = null;
+    this.#collections = [];
+    this.#reactionSnapshotPositions.clear();
     this.#lastSyncedAt = null;
     this.#createdMessageMentions.clear();
   }
@@ -2960,6 +3331,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     if (marker === null) return false;
     const alreadyRecorded = this.#events.has(marker.eventId);
     if (marker.selfRemoval) {
+      this.#collections = this.#collections.filter(
+        (state) =>
+          state.identity.kind !== "my_tasks" &&
+          state.identity.conversationId !== marker.conversationId,
+      );
       if (this.#snapshot !== null) {
         this.#snapshot = {
           ...this.#snapshot,

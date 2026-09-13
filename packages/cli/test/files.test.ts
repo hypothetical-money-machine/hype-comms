@@ -138,7 +138,12 @@ describe("safe attachment files", () => {
         `https://chat.example.test/v2/conversations/${CONVERSATION_ID}/files?limit=50`,
       );
       expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
-      return jsonResponse({ files: [attachment()], nextCursor: null, hasMore: false });
+      return jsonResponse({
+        snapshotPosition: testPosition("0"),
+        files: [attachment()],
+        nextCursor: null,
+        hasMore: false,
+      });
     });
     const value = runtime(homeDirectory, fetch);
 
@@ -255,7 +260,13 @@ describe("safe attachment files", () => {
           syncCursor: testPosition("1"),
         });
       }
-      return jsonResponse({ messages: [], attachments: [], nextCursor: null });
+      return jsonResponse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [],
+        attachments: [],
+        nextCursor: null,
+      });
     });
     const historyRuntime = runtime(homeDirectory, fetch);
     const sendRuntime = runtime(homeDirectory, fetch);

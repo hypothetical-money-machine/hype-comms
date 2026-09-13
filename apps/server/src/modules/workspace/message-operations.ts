@@ -30,6 +30,7 @@ import {
   type AgentContextMessage,
   type Attachment,
   type ListMessageReactionsResponse,
+  type Message,
   type MessageByIdResponse,
   type MessageHistoryResponse,
   type MessageSearchResponse,
@@ -295,12 +296,13 @@ export class WorkspaceMessageOperations {
     before: string | undefined,
     limit: number,
   ): Promise<MessageHistoryResponse> {
-    const client = await this.pool.connect();
-    try {
-      await requireVisibleConversation(client, identity, conversationId, false);
-      const beforeSequence = decodeHistoryCursor(before);
-      const result = await client.query<MessageRow>(
-        `SELECT *
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        await requireVisibleConversation(client, identity, conversationId, false);
+        const beforeSequence = decodeHistoryCursor(before);
+        const result = await client.query<MessageRow>(
+          `SELECT *
            FROM messages
           WHERE conversation_id = $1
             AND thread_root_id IS NULL
@@ -308,31 +310,33 @@ export class WorkspaceMessageOperations {
             AND ($2::bigint IS NULL OR conversation_sequence < $2::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $3`,
-        [conversationId, beforeSequence, limit + 1],
-      );
-      const hasMore = result.rows.length > limit;
-      const selected = result.rows.slice(0, limit);
-      const oldest = selected.at(-1);
-      const messages = selected.reverse().map(mapMessage);
-      return messageHistoryResponseSchema.parse({
-        messages,
-        attachments: await attachmentsForMessages(
-          client,
-          messages.map((message) => message.id),
-        ),
-        threadSummaries: await this.#threadSummaries(
-          client,
-          messages.map((message) => message.id),
-        ),
-        threadsSupported: true,
-        nextCursor:
-          hasMore && oldest !== undefined
-            ? encodeHistoryCursor(oldest.conversation_sequence)
-            : null,
-      });
-    } finally {
-      client.release();
-    }
+          [conversationId, beforeSequence, limit + 1],
+        );
+        const hasMore = result.rows.length > limit;
+        const selected = result.rows.slice(0, limit);
+        const oldest = selected.at(-1);
+        const messages = selected.reverse().map(mapMessage);
+        return messageHistoryResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          reactions: await this.#reactionsForMessages(client, messages),
+          messages,
+          attachments: await attachmentsForMessages(
+            client,
+            messages.map((message) => message.id),
+          ),
+          threadSummaries: await this.#threadSummaries(
+            client,
+            messages.map((message) => message.id),
+          ),
+          threadsSupported: true,
+          nextCursor:
+            hasMore && oldest !== undefined
+              ? encodeHistoryCursor(oldest.conversation_sequence)
+              : null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async contextHistory(
@@ -469,10 +473,11 @@ export class WorkspaceMessageOperations {
     before: string | undefined,
     limit: number,
   ): Promise<MessageThreadResponse> {
-    const client = await this.pool.connect();
-    try {
-      const rootResult = await client.query<MessageRow>(
-        `SELECT message.*
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        const rootResult = await client.query<MessageRow>(
+          `SELECT message.*
            FROM messages AS message
            JOIN conversations AS conversation ON conversation.id = message.conversation_id
           WHERE message.id = $1
@@ -490,17 +495,17 @@ export class WorkspaceMessageOperations {
             )
             AND conversation.workspace_id = $2
             AND ${conversationVisibilitySql("conversation", "$3")}`,
-        [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
-      );
-      const root = rootResult.rows[0];
-      if (root === undefined) {
-        // Missing, unauthorized, and reply-less retracted roots deliberately share one response.
-        throw new DomainError("not_found", "Thread not found");
-      }
+          [threadRootId, identity.currentUser.workspaceId, identity.currentUser.user.id],
+        );
+        const root = rootResult.rows[0];
+        if (root === undefined) {
+          // Missing, unauthorized, and reply-less retracted roots deliberately share one response.
+          throw new DomainError("not_found", "Thread not found");
+        }
 
-      const beforeSequence = decodeHistoryCursor(before);
-      const result = await client.query<MessageRow>(
-        `SELECT *
+        const beforeSequence = decodeHistoryCursor(before);
+        const result = await client.query<MessageRow>(
+          `SELECT *
            FROM messages
           WHERE thread_root_id = $1
             AND conversation_id = $2
@@ -508,30 +513,32 @@ export class WorkspaceMessageOperations {
             AND ($3::bigint IS NULL OR conversation_sequence < $3::bigint)
           ORDER BY conversation_sequence DESC, id DESC
           LIMIT $4`,
-        [threadRootId, root.conversation_id, beforeSequence, limit + 1],
-      );
-      const hasMore = result.rows.length > limit;
-      const selected = result.rows.slice(0, limit);
-      const oldest = selected.at(-1);
-      const replies = selected.reverse().map(mapMessage);
-      const rootMessage = mapMessage(
-        root.deleted_at === null ? root : { ...root, body: "Message retracted" },
-      );
-      return messageThreadResponseSchema.parse({
-        root: rootMessage,
-        replies,
-        attachments: await attachmentsForMessages(client, [
-          rootMessage.id,
-          ...replies.map((message) => message.id),
-        ]),
-        nextCursor:
-          hasMore && oldest !== undefined
-            ? encodeHistoryCursor(oldest.conversation_sequence)
-            : null,
-      });
-    } finally {
-      client.release();
-    }
+          [threadRootId, root.conversation_id, beforeSequence, limit + 1],
+        );
+        const hasMore = result.rows.length > limit;
+        const selected = result.rows.slice(0, limit);
+        const oldest = selected.at(-1);
+        const replies = selected.reverse().map(mapMessage);
+        const rootMessage = mapMessage(
+          root.deleted_at === null ? root : { ...root, body: "Message retracted" },
+        );
+        return messageThreadResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          reactions: await this.#reactionsForMessages(client, [rootMessage, ...replies]),
+          root: rootMessage,
+          replies,
+          attachments: await attachmentsForMessages(client, [
+            rootMessage.id,
+            ...replies.map((message) => message.id),
+          ]),
+          nextCursor:
+            hasMore && oldest !== undefined
+              ? encodeHistoryCursor(oldest.conversation_sequence)
+              : null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async messageById(
@@ -567,6 +574,21 @@ export class WorkspaceMessageOperations {
       message: mapMessage(message),
       attachments: attachments.rows.map(mapAttachment),
     });
+  }
+
+  async #reactionsForMessages(
+    client: PoolClient,
+    messages: readonly Message[],
+  ): Promise<Reaction[]> {
+    const ids = messages
+      .filter((message) => message.deletedAt === null)
+      .map((message) => message.id);
+    if (ids.length === 0) return [];
+    const reactions = await client.query<ReactionRow>(
+      "SELECT * FROM message_reactions WHERE message_id = ANY($1::uuid[]) ORDER BY created_at, id",
+      [ids],
+    );
+    return reactions.rows.map(mapReaction);
   }
 
   async listMessageReactions(
