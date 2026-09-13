@@ -1,21 +1,17 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_NOTIFICATION_PREFERENCE,
   MAX_NOTIFICATION_PREFERENCE_FILE_BYTES,
   NotificationPreferenceStore,
 } from "./notification-preference-store";
-
-const directories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-notification-preference-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hmm-notification-preference-");
 }
 
 function settingsDirectory(userDataPath: string): string {
@@ -30,12 +26,6 @@ async function writeStoredValue(userDataPath: string, value: string): Promise<vo
   await mkdir(settingsDirectory(userDataPath), { recursive: true });
   await writeFile(preferenceFile(userDataPath), value, "utf8");
 }
-
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
 
 describe("NotificationPreferenceStore", () => {
   it("defaults to disabled with message previews off", async () => {

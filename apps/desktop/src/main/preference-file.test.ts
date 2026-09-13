@@ -1,14 +1,15 @@
-import { constants, mkdtemp, open, rename, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { constants, open, rename, symlink, writeFile } from "node:fs/promises";
+
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { readPrivateBoundedUtf8File, type PrivateReadableFileHandle } from "./preference-file";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 describe("private preference file reads", () => {
   it("keeps reading the opened inode when the pathname is replaced after fstat", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "hype-comms-private-read-"));
+    const directory = await createTemporaryDirectory("hype-comms-private-read-");
     const filePath = path.join(directory, "configuration.json");
     const replacementPath = path.join(directory, "replacement.json");
     await writeFile(filePath, '{"source":"trusted"}\n', { mode: 0o600 });
@@ -39,7 +40,7 @@ describe("private preference file reads", () => {
   });
 
   it("refuses a final-component symlink and a file not owned by the current uid", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "hype-comms-private-read-"));
+    const directory = await createTemporaryDirectory("hype-comms-private-read-");
     const filePath = path.join(directory, "configuration.json");
     const linkPath = path.join(directory, "configuration-link.json");
     await writeFile(filePath, "{}\n", { mode: 0o600 });
