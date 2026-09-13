@@ -385,89 +385,6 @@ describeWithPostgres("WorkspaceRepository", () => {
     );
   });
 
-  it("bootstraps wake cursor and body-free conversation kinds from one snapshot", async () => {
-    const wakeAgentId = randomUUID();
-    const wakeAgentTokenId = randomUUID();
-    await pool.query(
-      `INSERT INTO users (id, kind, email, username, display_name)
-       VALUES ($1, 'agent', NULL, 'wake-agent', 'Wake Agent')`,
-      [wakeAgentId],
-    );
-    await pool.query(
-      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
-       VALUES ($1, $2, 'member', 'active')`,
-      [workspaceId, wakeAgentId],
-    );
-    await pool.query(
-      `INSERT INTO agents (user_id, workspace_id, created_by)
-       VALUES ($1, $2, $3)`,
-      [wakeAgentId, workspaceId, ownerId],
-    );
-    const currentAgent: AgentCurrentPrincipal = {
-      type: "agent",
-      user: {
-        id: wakeAgentId,
-        kind: "agent",
-        username: "wake-agent",
-        displayName: "Wake Agent",
-        avatarUrl: null,
-        title: null,
-        createdAt: now,
-        updatedAt: now,
-      },
-      workspaceId,
-      role: "member",
-      scopes: ["workspace:read"],
-    };
-    const wakeAgent: AuthenticatedAgentIdentity = {
-      currentUser: currentAgent,
-      authorizationScopes: ["workspace:read"],
-      principalKind: "agent",
-      agentTokenId: wakeAgentTokenId,
-    };
-    const cursorRead = Promise.withResolvers<void>();
-    const continueBootstrap = Promise.withResolvers<void>();
-    const racingRepository = new WorkspaceRepository(pool, {
-      afterAgentWakeBootstrapCursorRead: async () => {
-        cursorRead.resolve();
-        await continueBootstrap.promise;
-      },
-    });
-
-    const bootstrapping = racingRepository.agentWakeBootstrap(wakeAgent);
-    await cursorRead.promise;
-    let created: Awaited<ReturnType<WorkspaceRepository["createChannel"]>>;
-    let joined: Awaited<ReturnType<WorkspaceRepository["joinPublicChannel"]>>;
-    try {
-      created = await repository.createChannel(owner, {
-        name: "After Wake Snapshot",
-        slug: "after-wake-snapshot",
-        topic: null,
-        access: "workspace",
-      });
-      joined = await repository.joinPublicChannel(wakeAgent, created.conversation.conversation.id);
-    } finally {
-      continueBootstrap.resolve();
-    }
-    const bootstrap = await bootstrapping;
-    expect(bootstrap).toEqual({
-      agentUserId: wakeAgentId,
-      workspaceId,
-      highWaterCursor: "0",
-      conversations: [{ conversationId: generalId, kind: "channel" }],
-    });
-
-    const replay = await repository.sync(wakeAgent, bootstrap.highWaterCursor, 100);
-    expect(replay.events).toContainEqual(
-      expect.objectContaining({
-        type: "channel.membership_changed",
-        workspaceSequence: joined.syncCursor,
-        conversationId: created.conversation.conversation.id,
-        payload: { memberId: wakeAgentId, action: "added" },
-      }),
-    );
-  });
-
   it("emits remaining canonical counts only to the member advancing the cursor", async () => {
     const rendered = await repository.sendMessage(owner, generalId, message(randomUUID()));
     const committedAfterRender = await repository.sendMessage(
@@ -3074,11 +2991,6 @@ describeWithPostgres("WorkspaceRepository", () => {
     expect(
       agentConversations.conversations.some(
         (summary) => summary.conversation.id === conversationId,
-      ),
-    ).toBe(false);
-    expect(
-      (await repository.agentWakeBootstrap(agent)).conversations.some(
-        (conversation) => conversation.conversationId === conversationId,
       ),
     ).toBe(false);
     expect(

@@ -85,7 +85,6 @@ files list|for-message|get
 read-cursors advance
 sync
 watch
-wake watch
 invitations list|create|revoke
 agents list|create|disable
 agent-tokens list|create|revoke
@@ -210,24 +209,8 @@ cursor strings exactly. It reconnects with jitter from the last accepted cursor.
 given, it starts at bootstrap's current cursor rather than replaying history. A cursor expiry emits
 `system.resync_required` before exit so callers can bootstrap cleanly.
 
-`wake watch --json [--after DECIMAL_CURSOR]` requires an agent-authenticated profile and emits only
-strict, body-free `agent.wake`, `agent.wake.checkpoint`, and `agent.wake.repair_required` records.
-It initializes through the agent-only `GET /v1/agent-wake/bootstrap` route, whose strict response
-contains only the authenticated agent and workspace IDs, one high-water cursor, and at most 5,000
-visible `{conversationId, kind}` entries. It does not use the general workspace bootstrap,
-conversation summaries, message bodies, or history; the server rejects an over-limit projection
-instead of truncating it. Without `--after`, the first checkpoint is that high-water cursor and only
-later one-to-one DM or server-verified @mention messages can wake the agent. Supply the last durably
-accepted checkpoint with `--after` to replay after a restart. Wake IDs are stable across
-at-least-once redelivery; persist a wake before acting on it and deduplicate provider work by
-`wakeId`. On the opted-in Wake stream, the server also uses the same strict checkpoint shape after
-filtered scan rows advance the cursor without a visible event. The CLI validates that control only
-after the agent-bound handshake and durably forwards it before reconnecting from its cursor.
-
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
-`GET /v1/messages/:id`. Wake targets should use this command with the signaled `messageId`; using
-`messages history`, `workspace bootstrap`, or search to hydrate a wake violates the no-history
-boundary.
+`GET /v1/messages/:id`.
 
 Exit codes are:
 
