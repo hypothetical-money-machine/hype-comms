@@ -8,12 +8,14 @@ import {
   issuedChannelWebhookResponseSchema,
   manageChannelWebhookRequestSchema,
 } from "@hype-comms/contracts";
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { FastifyReply } from "fastify";
+import { z } from "zod";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
+import { humanPolicy } from "../../http/authentication-policies.js";
 
 import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
 import type { BotService } from "../bots/service.js";
-import { requireHumanIdentity } from "../identity/request-auth.js";
 import type { IdentityService } from "../identity/service.js";
 import type { WorkspaceRepository } from "../workspace/repository.js";
 
@@ -27,27 +29,11 @@ interface ChannelWebhookRoutesOptions {
   readonly throttle?: FixedWindowAttemptThrottle;
 }
 
-function channelId(value: unknown): string {
-  const parsed = entityIdSchema.safeParse(
-    typeof value === "object" && value !== null && "id" in value ? value.id : undefined,
-  );
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid channel id");
-  return parsed.data;
-}
-
-function webhookToken(value: unknown): string {
-  const parsed = botAccessTokenSchema.safeParse(
-    typeof value === "object" && value !== null && "token" in value ? value.token : undefined,
-  );
-  if (!parsed.success)
-    throw new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled");
-  return parsed.data;
-}
-
-function manageRequest(value: unknown): void {
-  const parsed = manageChannelWebhookRequestSchema.safeParse(value);
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid webhook request");
-}
+const channelParams = validateRequest(
+  z.object({ id: entityIdSchema }).strict(),
+  "Invalid channel id",
+);
+const manageBody = validateRequest(manageChannelWebhookRequestSchema, "Invalid webhook request");
 
 function secretResponse(reply: FastifyReply): FastifyReply {
   return reply
@@ -56,10 +42,8 @@ function secretResponse(reply: FastifyReply): FastifyReply {
     .header("x-content-type-options", "nosniff");
 }
 
-export const channelWebhookRoutes: FastifyPluginAsync<ChannelWebhookRoutesOptions> = async (
-  app,
-  options,
-) => {
+export const channelWebhookRoutes = routeModule<ChannelWebhookRoutesOptions>((routes, options) => {
+  const human = humanPolicy(options.identityService);
   const throttle =
     options.throttle ??
     new FixedWindowAttemptThrottle({
@@ -67,63 +51,120 @@ export const channelWebhookRoutes: FastifyPluginAsync<ChannelWebhookRoutesOption
       windowMs: WEBHOOK_POST_WINDOW_MS,
     });
 
-  app.get("/channels/:id/webhook", async (request) => {
-    const identity = await requireHumanIdentity(request, options.identityService);
-    return channelWebhookResponseSchema.parse({
-      webhook: await options.botService.getChannelWebhook(
+  routes.register({
+    method: "GET",
+    url: "/channels/:id/webhook",
+    policy: human,
+    scopes: [],
+    request: { params: channelParams },
+    handler: async ({
+      identity,
+      input: {
+        params: { id },
+      },
+    }) => {
+      return channelWebhookResponseSchema.parse({
+        webhook: await options.botService.getChannelWebhook(identity.currentUser.user.id, id),
+      });
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/channels/:id/webhook",
+    policy: human,
+    scopes: [],
+    request: { body: manageBody, params: channelParams },
+    handler: async ({
+      identity,
+      reply,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const issued = await options.botService.enableChannelWebhook(
         identity.currentUser.user.id,
-        channelId(request.params),
-      ),
-    });
-  });
-
-  app.post("/channels/:id/webhook", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, options.identityService);
-    manageRequest(request.body);
-    const issued = await options.botService.enableChannelWebhook(
-      identity.currentUser.user.id,
-      channelId(request.params),
-    );
-    return secretResponse(reply).code(201).send(issuedChannelWebhookResponseSchema.parse(issued));
-  });
-
-  app.post("/channels/:id/webhook/rotate", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, options.identityService);
-    manageRequest(request.body);
-    const issued = await options.botService.rotateChannelWebhook(
-      identity.currentUser.user.id,
-      channelId(request.params),
-    );
-    return secretResponse(reply).code(201).send(issuedChannelWebhookResponseSchema.parse(issued));
-  });
-
-  app.delete("/channels/:id/webhook", async (request) => {
-    const identity = await requireHumanIdentity(request, options.identityService);
-    return channelWebhookResponseSchema.parse({
-      webhook: await options.botService.disableChannelWebhook(
-        identity.currentUser.user.id,
-        channelId(request.params),
-      ),
-    });
-  });
-
-  app.post(
-    "/webhooks/incoming/:token",
-    { bodyLimit: INCOMING_WEBHOOK_BODY_LIMIT_BYTES, logLevel: "silent" },
-    async (request, reply) => {
-      const token = webhookToken(request.params);
-      const body = incomingWebhookMessageRequestSchema.safeParse(request.body);
-      if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid webhook message");
-      const idempotencyKey = incomingWebhookIdempotencyKeySchema.safeParse(
-        request.headers["idempotency-key"],
+        id,
       );
-      if (!idempotencyKey.success) {
-        throw new ApiError(400, "BAD_REQUEST", "A UUID Idempotency-Key is required");
-      }
-      const authenticated = await options.botService.authenticateChannelWebhook(token);
-      if (authenticated === null) {
-        throw new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled");
-      }
+      return secretResponse(reply).code(201).send(issuedChannelWebhookResponseSchema.parse(issued));
+    },
+  });
+
+  routes.register({
+    method: "POST",
+    url: "/channels/:id/webhook/rotate",
+    policy: human,
+    scopes: [],
+    request: { body: manageBody, params: channelParams },
+    handler: async ({
+      identity,
+      reply,
+      input: {
+        params: { id },
+      },
+    }) => {
+      const issued = await options.botService.rotateChannelWebhook(
+        identity.currentUser.user.id,
+        id,
+      );
+      return secretResponse(reply).code(201).send(issuedChannelWebhookResponseSchema.parse(issued));
+    },
+  });
+
+  routes.register({
+    method: "DELETE",
+    url: "/channels/:id/webhook",
+    policy: human,
+    scopes: [],
+    request: { params: channelParams },
+    handler: async ({
+      identity,
+      input: {
+        params: { id },
+      },
+    }) => {
+      return channelWebhookResponseSchema.parse({
+        webhook: await options.botService.disableChannelWebhook(identity.currentUser.user.id, id),
+      });
+    },
+  });
+
+  routes.registerCredential({
+    method: "POST",
+    url: "/webhooks/incoming/:token",
+    bodyLimit: INCOMING_WEBHOOK_BODY_LIMIT_BYTES,
+    logLevel: "silent",
+    scopes: [],
+    request: {
+      params: validateRequest(
+        z.object({ token: botAccessTokenSchema }).strict(),
+        () => new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled"),
+      ),
+      body: validateRequest(incomingWebhookMessageRequestSchema, "Invalid webhook message"),
+      headers: validateRequest(
+        z.object({ "idempotency-key": incomingWebhookIdempotencyKeySchema }),
+        "A UUID Idempotency-Key is required",
+      ),
+    },
+    policy: {
+      name: "channel-webhook-token",
+      authenticate: async ({ params }) => {
+        const authenticated = await options.botService.authenticateChannelWebhook(params.token);
+        if (authenticated === null) {
+          throw new ApiError(401, "UNAUTHORIZED", "Webhook URL is invalid or disabled");
+        }
+        return authenticated;
+      },
+    },
+    handler: async ({
+      identity: authenticated,
+      input: {
+        body,
+        headers: { "idempotency-key": idempotencyKey },
+      },
+      request,
+      reply,
+    }) => {
       const retryAfterMs = throttle.recordAttempt(authenticated.identity.credentialId);
       if (retryAfterMs > 0) {
         void reply.header("retry-after", Math.max(1, Math.ceil(retryAfterMs / 1_000)));
@@ -134,9 +175,9 @@ export const channelWebhookRoutes: FastifyPluginAsync<ChannelWebhookRoutesOption
           authenticated.identity,
           authenticated.conversationId,
           {
-            body: body.data.body,
+            body: body.body,
             bodyFormat: "hype_comms_markdown_v1",
-            clientMessageId: idempotencyKey.data,
+            clientMessageId: idempotencyKey,
             threadRootId: null,
             mentionedUserIds: [],
             attachmentIds: [],
@@ -145,5 +186,5 @@ export const channelWebhookRoutes: FastifyPluginAsync<ChannelWebhookRoutesOption
         ),
       );
     },
-  );
-};
+  });
+});
