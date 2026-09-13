@@ -2,14 +2,14 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, expect, it } from "vitest";
 import type { Pool } from "pg";
 
 import { loadConfig } from "../src/config.js";
 import { seedDevelopmentDemo, writeDevelopmentDemoCallbacks } from "../src/dev-seed.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
-describeWithPostgres("development demo seed", () => {
+describe("development demo seed", () => {
   let database: TestDatabase;
   let pool: Pool;
   let callbackDirectory: string;

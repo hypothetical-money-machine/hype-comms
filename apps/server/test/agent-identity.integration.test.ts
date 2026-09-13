@@ -33,7 +33,7 @@ import {
   workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
 import { type Pool, type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { z } from "zod";
 
@@ -46,7 +46,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -74,7 +74,7 @@ class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-describeWithPostgres("agent identity and owner administration", () => {
+describe("agent identity and owner administration", () => {
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
   const openSockets: WebSocket[] = [];
   let database: TestDatabase;

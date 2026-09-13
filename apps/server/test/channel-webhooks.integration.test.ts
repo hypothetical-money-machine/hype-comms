@@ -8,7 +8,7 @@ import {
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { BotService } from "../src/modules/bots/service.js";
@@ -19,7 +19,7 @@ import { hashToken } from "../src/modules/identity/tokens.js";
 import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { FixedWindowAttemptThrottle, SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const now = "2026-08-23T12:00:00.000Z";
 const publicApiUrl = "http://127.0.0.1:3000";
@@ -47,7 +47,7 @@ function webhookPath(webhookUrl: string): string {
   return new URL(webhookUrl).pathname;
 }
 
-describeWithPostgres("per-channel incoming webhooks", () => {
+describe("per-channel incoming webhooks", () => {
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
   let database: TestDatabase;
   let pool: Pool;

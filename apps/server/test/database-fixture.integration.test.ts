@@ -1,9 +1,9 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, expect, it } from "vitest";
 
 import { runMigrations } from "../src/db/migrate.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
-describeWithPostgres("isolated database fixture", () => {
+describe("isolated database fixture", () => {
   let first: TestDatabase;
   let second: TestDatabase;
 

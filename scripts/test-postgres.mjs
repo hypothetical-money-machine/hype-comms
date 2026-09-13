@@ -59,11 +59,15 @@ export async function waitForPostgres(
 
 async function runServerSuite(arguments_) {
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const child = spawn(npm, ["test", "--workspace", "@hype-comms/server", "--", ...arguments_], {
-    cwd: new URL("..", import.meta.url),
-    env: process.env,
-    stdio: "inherit",
-  });
+  const child = spawn(
+    npm,
+    ["run", "test:integration", "--workspace", "@hype-comms/server", "--", ...arguments_],
+    {
+      cwd: new URL("..", import.meta.url),
+      env: process.env,
+      stdio: "inherit",
+    },
+  );
   const [code, signal] = await once(child, "close");
   if (signal !== null) throw new Error(`Server test suite terminated by ${signal}`);
   if (code !== 0) process.exitCode = code ?? 1;
@@ -73,7 +77,8 @@ async function main() {
   const databaseUrl = requireTestDatabaseUrl(process.env);
   process.stdout.write("==> waiting for the PostgreSQL test database\n");
   await waitForPostgres(databaseUrl);
-  process.stdout.write("==> running the complete PostgreSQL-backed server suite\n");
+  if (process.argv.length === 3 && process.argv[2] === "--ready") return;
+  process.stdout.write("==> running PostgreSQL integration tests\n");
   await runServerSuite(process.argv.slice(2));
 }
 
