@@ -130,7 +130,9 @@ class CliBoundaryTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(self.run_cli(["adapter", "protocol"], cli=cli))
         try:
             async with asyncio.timeout(3):
-                while not pid_file.exists():
+                # The child can write its PID before process creation returns.
+                # Wait for the runner to own it before cancelling that runner.
+                while not pid_file.exists() or not self.processes:
                     await asyncio.sleep(0.01)
         finally:
             task.cancel()
