@@ -52,6 +52,11 @@ export class WorkspaceRecovery {
     return this.#work.has(kind);
   }
 
+  /** Work still in flight. Blocked work is known-stale, which a caller may allow to proceed. */
+  isPending(kind: WorkspaceRecoveryKind): boolean {
+    return this.#work.get(kind)?.entry.status === "pending";
+  }
+
   isCurrent(lease: RecoveryLease | undefined): boolean {
     return lease !== undefined && this.#work.get(lease.key)?.lease === lease;
   }

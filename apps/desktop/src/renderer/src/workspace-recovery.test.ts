@@ -21,6 +21,21 @@ describe("recovery ownership", () => {
     expect(workspaceNeedsRecovery(recovery.snapshot)).toBe(false);
   });
 
+  it("separates work in flight from work that is blocked", () => {
+    const recovery = new WorkspaceRecovery(() => undefined);
+    expect(recovery.isPending("catalog")).toBe(false);
+    const catalog = recovery.begin("catalog");
+    expect(recovery.isPending("catalog")).toBe(true);
+    recovery.block(catalog, "Could not refresh the workspace catalog");
+    expect(recovery.has("catalog")).toBe(true);
+    expect(recovery.isPending("catalog")).toBe(false);
+    recovery.begin("catalog");
+    expect(recovery.isPending("catalog")).toBe(true);
+    recovery.complete(recovery.current("catalog"));
+    expect(recovery.has("catalog")).toBe(false);
+    expect(recovery.isPending("catalog")).toBe(false);
+  });
+
   it("ignores old completions, phases and failures after session retirement", () => {
     const recovery = new WorkspaceRecovery(() => undefined);
     const old = recovery.begin("startup");
