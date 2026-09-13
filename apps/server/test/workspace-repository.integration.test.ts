@@ -3539,6 +3539,102 @@ describe("WorkspaceRepository", () => {
     return completed.attachment.id;
   }
 
+  it.each(["event insert", "commit"] as const)(
+    "rolls message delivery back on %s failure without consuming its attachment or retry key",
+    async (failurePoint) => {
+      const root = await repository.sendMessage(member, generalId, {
+        ...message(randomUUID(), "Discuss the release"),
+        mentionedUserIds: [],
+      });
+      const attachmentId = await stageReadyFile(generalId, "release.txt", "Release details");
+      const input = {
+        ...message(randomUUID(), "The release is ready @member"),
+        threadRootId: root.message.id,
+        attachmentIds: [attachmentId],
+      };
+      const state = async () => {
+        const tables = [
+          "messages",
+          "message_mentions",
+          "attachments",
+          "conversations",
+          "workspaces",
+          "sync_events",
+          "sync_event_audiences",
+          "sync_event_notification_reasons",
+          "api_idempotency_records",
+        ] as const;
+        const snapshot: Record<string, unknown> = {};
+        for (const table of tables) {
+          snapshot[table] = (
+            await pool.query(`SELECT to_jsonb(row) AS record FROM ${table} AS row
+              ORDER BY to_jsonb(row)::text`)
+          ).rows;
+        }
+        return snapshot;
+      };
+      const before = await state();
+      await pool.query(`CREATE FUNCTION reject_test_message_write() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_ARGV[0] = 'commit' AND NOT EXISTS (
+            SELECT 1 FROM api_idempotency_records
+             WHERE response_body->'message'->>'id' = NEW.payload->'message'->>'id'
+          ) THEN
+            RAISE EXCEPTION 'Message response was not stored before commit';
+          END IF;
+          RAISE EXCEPTION 'Injected message transaction failure';
+        END;
+        $$`);
+      try {
+        await pool.query(
+          failurePoint === "commit"
+            ? `CREATE CONSTRAINT TRIGGER reject_test_message_write
+                 AFTER INSERT ON sync_events DEFERRABLE INITIALLY DEFERRED
+                 FOR EACH ROW WHEN (NEW.event_type = 'message.created')
+                 EXECUTE FUNCTION reject_test_message_write('commit')`
+            : `CREATE TRIGGER reject_test_message_write
+                 BEFORE INSERT ON sync_events
+                 FOR EACH ROW WHEN (NEW.event_type = 'message.created')
+                 EXECUTE FUNCTION reject_test_message_write('event insert')`,
+        );
+        await expect(repository.sendMessage(owner, generalId, input)).rejects.toThrow(
+          "Injected message transaction failure",
+        );
+        expect(await state()).toEqual(before);
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_message_write ON sync_events");
+        await pool.query("DROP FUNCTION reject_test_message_write()");
+      }
+
+      const sent = await repository.sendMessage(owner, generalId, input);
+      expect(sent.message.conversationSequence).toBe("2");
+      expect(sent.syncCursor).toBe("2");
+      expect(sent.attachments).toEqual([
+        expect.objectContaining({ id: attachmentId, messageId: sent.message.id, status: "ready" }),
+      ]);
+      const committed = await state();
+      await expect(repository.sendMessage(owner, generalId, input)).resolves.toEqual(sent);
+      expect(await state()).toEqual(committed);
+      const transactions = await pool.query(
+        `SELECT message.xmin::text AS message, attachment.xmin::text AS attachment,
+                mention.xmin::text AS mention, event.xmin::text AS event,
+                notification.xmin::text AS notification, response.xmin::text AS response
+           FROM messages AS message
+           JOIN attachments AS attachment ON attachment.message_id = message.id
+           JOIN message_mentions AS mention ON mention.message_id = message.id
+           JOIN sync_events AS event ON event.payload->'message'->>'id' = message.id::text
+           JOIN sync_event_notification_reasons AS notification ON notification.event_id = event.id
+           JOIN api_idempotency_records AS response
+             ON response.response_body->'message'->>'id' = message.id::text
+          WHERE message.id = $1`,
+        [sent.message.id],
+      );
+      expect(transactions.rows).toHaveLength(1);
+      expect(new Set(Object.values(transactions.rows[0] ?? {})).size).toBe(1);
+    },
+  );
+
   it("uses the database clock for attachment upload expiry", async () => {
     const bytes = Buffer.from("database time");
     const contentSha256 = sha256Hex(bytes);
