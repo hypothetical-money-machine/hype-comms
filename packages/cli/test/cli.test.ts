@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { executeCli } from "../src/cli.js";
 import { loadProfileStore, saveProfile } from "../src/config.js";
-import { EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
+import { EXIT_CONTRACT, EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
 import {
   agentPrincipal,
   CLIENT_MESSAGE_ID,
@@ -52,6 +52,27 @@ describe("CLI output and exit contracts", () => {
     expect(exitCode).toBe(EXIT_SUCCESS);
     expect(JSON.parse(runtime.stdoutText())).toEqual({ status: "ok" });
     expect(runtime.stderrText()).toBe("");
+  });
+
+  it("refuses an old server whose healthy /livez carries no protocol header", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const runtime = testRuntime({
+      homeDirectory: await home(),
+      env: { HYPE_COMMS_API_ORIGIN: "https://chat.example.test" },
+      fetch,
+    });
+
+    expect(await executeCli(["health", "--json"], runtime)).toBe(EXIT_CONTRACT);
+    expect(runtime.stdoutText()).toBe("");
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: { code: "UPGRADE_REQUIRED", retryable: false },
+    });
   });
 
   it("serializes rotated profile refreshes across concurrent CLI processes", async () => {

@@ -15,7 +15,8 @@ External polling jobs are outside this change. Inventory their configured endpoi
 cutover; a job depending on retired first-party endpoints must be resolved before the window.
 
 Unsupported versioned product endpoints return HTTP 426 with the existing strict `CONFLICT`
-envelope and an upgrade message. API responses carry `x-hype-comms-protocol: 2`. Clients recognize
+envelope and an upgrade message. Every server response carries `x-hype-comms-protocol: 2`,
+including the unversioned operational and externally configured routes. Clients recognize
 426, a conflicting major, or an unmarked success/404 as incompatible. An unmarked 429 or gateway
 5xx remains a transient failure. Desktop retains credentials and local work while automatic
 network retries stop. CLI reports `UPGRADE_REQUIRED` with `retryable: false`.

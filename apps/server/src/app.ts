@@ -84,8 +84,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   app.addHook("onRequest", async (request, reply) => {
     void reply.header("x-request-id", request.id);
     const pathname = request.url.split("?", 1)[0] ?? "";
-    if (!/^\/v[0-9]+(?:\/|$)/.test(pathname)) return;
     void reply.header(WORKSPACE_PROTOCOL_HEADER, String(WORKSPACE_PROTOCOL_MAJOR));
+    if (!/^\/v[0-9]+(?:\/|$)/.test(pathname)) return;
     if (
       pathname === WORKSPACE_PROTOCOL_PREFIX ||
       pathname.startsWith(`${WORKSPACE_PROTOCOL_PREFIX}/`)
