@@ -18,10 +18,8 @@
     }
   },
   "scripts": {
-    "prebuild": "npm run build --workspace @hype-comms/contracts",
     "build": "tsc -b",
-    "pretest": "npm run build",
-    "test": "vitest run",
+    "test": "tsc -b && vitest run",
     "typecheck": "tsc -b && tsc -p tsconfig.test.json --noEmit"
   },
   "dependencies": {
