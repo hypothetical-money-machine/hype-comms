@@ -11,7 +11,6 @@ import { expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const PACKAGE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const REPOSITORY_ROOT = resolve(PACKAGE_DIRECTORY, "../..");
 const ATTACHMENT_ID = "66666666-6666-4666-8666-666666666666";
 const TOKEN = `hype_comms_agent_${"a".repeat(43)}`;
 
@@ -19,19 +18,8 @@ it(
   "the built CLI downloads through its adjacent private-file worker",
   { timeout: 30_000 },
   async () => {
-    const npmExecPath = process.env.npm_execpath;
-    if (npmExecPath === undefined)
-      throw new Error("npm_execpath is required for the package smoke");
-    await execFileAsync(
-      process.execPath,
-      [npmExecPath, "run", "build", "--workspace", "@hype-comms/cli"],
-      {
-        cwd: REPOSITORY_ROOT,
-        env: process.env,
-        maxBuffer: 2 * 1_024 * 1_024,
-      },
-    );
-
+    // npm test builds once before parallel suites start. Rebuilding here removes the
+    // shared dist directory while build-artifact and watch tests are reading it.
     const bytes = Buffer.from("packaged attachment bytes");
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
     let authenticatedDownloadSeen = false;
