@@ -8,9 +8,11 @@ describe("CLI adapter protocol", () => {
     const runtime = testRuntime({ fetch, homeDirectory: "/unused" });
     expect(
       await executeCli(["--adapter-protocol=2", "messages", "send", "anything", "--json"], runtime),
-    ).toBe(2);
+    ).toBe(6);
+    // Exit 6, not the usage exit: the Hermes adapter reads a usage exit from a threaded send as
+    // "the CLI refused --thread-root-id" and retries flat.
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
-      error: { code: "ADAPTER_UPGRADE_REQUIRED" },
+      error: { code: "ADAPTER_UPGRADE_REQUIRED", retryable: false },
     });
     expect(fetch).not.toHaveBeenCalled();
   });

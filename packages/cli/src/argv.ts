@@ -1,4 +1,4 @@
-import { UsageError } from "./errors.js";
+import { CliError, EXIT_CONTRACT, UsageError } from "./errors.js";
 import type { GlobalOptions } from "./types.js";
 
 export interface ParsedArguments {
@@ -141,8 +141,19 @@ export function extractGlobalOptions(argv: readonly string[]): {
     if (argument === "--adapter-protocol" || argument.startsWith("--adapter-protocol=")) {
       if (adapterProtocol !== undefined)
         throw new UsageError("--adapter-protocol may only be used once");
-      if (takeValue("--adapter-protocol") !== "1")
-        throw new UsageError("This CLI supports adapter protocol 1", "ADAPTER_UPGRADE_REQUIRED");
+      if (takeValue("--adapter-protocol") !== "1") {
+        // A protocol the parser refuses is a contract failure, not a usage mistake. The Hermes
+        // adapter reads the CLI's usage exit as "the flag I passed was refused" and retries the
+        // send without its thread root, so exiting 2 here would make an unrelated protocol
+        // rejection latch threading off. Exit 6 matches the code the adapter already raises when
+        // an envelope declares a protocol it cannot read.
+        throw new CliError({
+          exitCode: EXIT_CONTRACT,
+          code: "ADAPTER_UPGRADE_REQUIRED",
+          message: "This CLI supports adapter protocol 1",
+          retryable: false,
+        });
+      }
       adapterProtocol = 1;
       json = true;
     } else if (argument === "--json") {
