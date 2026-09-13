@@ -648,28 +648,15 @@ describe("main composer focus on conversation changes", () => {
   });
 
   it("leaves focus inside an open modal when the selection changes underneath it", async () => {
-    // WorkspaceSearch commits the selection before its dialog closes while the composer stays
-    // mounted behind it, so a detached node is a faithful stand-in.
     const harness = await renderWorkspace();
-    const dialog = document.createElement("section");
-    dialog.setAttribute("role", "dialog");
-    dialog.setAttribute("aria-modal", "true");
-    const control = document.createElement("button");
-    control.type = "button";
-    dialog.append(control);
-    document.body.append(dialog);
-    try {
-      control.focus();
-      expect(document.activeElement).toBe(control);
-
-      act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
-
-      await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
-      await waitFor(() => expect(document.activeElement).toBe(control), { timeout: 5_000 });
-      expect(dialog.contains(document.activeElement)).toBe(true);
-    } finally {
-      dialog.remove();
-    }
+    fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
+    const dialog = await screen.findByRole("dialog", { name: "Find a message" });
+    const control = screen.getByRole("button", { name: "Close search" });
+    control.focus();
+    act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
+    await waitFor(() => expect(channelComposer().placeholder).toBe("Message # Launch Planning"));
+    expect(document.activeElement).toBe(control);
+    expect(dialog.contains(document.activeElement)).toBe(true);
   });
 
   it("focuses the channel composer when the focused close button dismisses the thread", async () => {
@@ -817,6 +804,32 @@ describe("main composer focus on conversation changes", () => {
 
     await screen.findByRole("textbox", { name: "Message" });
     await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
+  });
+
+  it("focuses the composer when the dialog's trigger disappears before it closes", async () => {
+    // Opening the quick switcher captures whatever held focus. Here that control — the sidebar
+    // row for a channel the user is removed from mid-dialog — is gone by the time Escape closes
+    // the switcher, so restoration is requested but cannot land. Focus has to fall to the
+    // composer instead of being left on the body with the intent thrown away.
+    const harness = await renderWorkspace();
+    const launchRow = screen.getByRole("button", { name: "Launch Planning" });
+    launchRow.focus();
+
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    const searchbox = await screen.findByRole("searchbox", { name: "Jump to a conversation" });
+    await waitFor(() => expect(document.activeElement).toBe(searchbox));
+
+    act(() => harness.pushWorkspaceEvent(membershipRemoval(LAUNCH_ID)));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Launch Planning" })).toBeNull(),
+    );
+    expect(launchRow.isConnected).toBe(false);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await waitFor(() => expect(document.activeElement).toBe(channelComposer()));
+    expect(channelComposer().placeholder).toBe("Message # General");
   });
 
   it("does not steal focus when the pane toggle remounts the composer", async () => {

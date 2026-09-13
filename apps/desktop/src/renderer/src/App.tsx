@@ -79,6 +79,8 @@ import { isCompactModeShortcut, useCompactChrome } from "./use-compact-chrome";
 import { useCompactModeEnabled } from "./use-compact-mode-enabled";
 import { useDevicePreferences } from "./use-device-preferences";
 import { useMessageComposer } from "./use-message-composer";
+import { OverlayProvider } from "./overlay-ownership";
+import { useComposerFocus } from "./use-composer-focus";
 import { useMessagePane } from "./use-message-pane";
 import type { CollectionIdentity } from "./workspace-collections";
 import { collectionRecovery } from "./workspace-recovery";
@@ -431,14 +433,6 @@ function AgentRequestsIcon() {
   );
 }
 
-function isTextEntryControl(element: Element): boolean {
-  return element.matches('input, textarea, [contenteditable]:not([contenteditable="false"])');
-}
-
-// A focus intent that has not landed within this window is dropped rather than retried: a
-// blocker cleared by a background event (snapshot reload trimming the thread, a reconnect
-// re-enabling the composer) minutes after the navigation must not move focus.
-const FOCUS_INTENT_TTL_MS = 15_000;
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1_000;
 
 function attachmentOnlyMessageBody(attachments: readonly Attachment[]): string {
@@ -467,7 +461,15 @@ function withAttachmentUploadTimeout<T>(operation: Promise<T>): Promise<T> {
   });
 }
 
-export function App({
+export function App(props: AppProps) {
+  return (
+    <OverlayProvider>
+      <WorkspaceApp {...props} />
+    </OverlayProvider>
+  );
+}
+
+function WorkspaceApp({
   client,
   theme,
   compactMode,
@@ -563,8 +565,6 @@ export function App({
       },
     });
   }, [notificationTransport, runtime]);
-  const composerInput = useRef<HTMLTextAreaElement>(null);
-  const threadComposer = useRef<HTMLTextAreaElement>(null);
   const compact = useCompactModeEnabled(compactMode);
   const chrome = useCompactChrome(compact);
 
@@ -999,232 +999,20 @@ export function App({
     timelineAtLiveTail,
   ]);
 
-  // Composer focus policy. A navigation records a focus intent — main composer on a conversation
-  // change, thread composer on a deep-linked reply — and the intent is consumed only when focus
-  // actually lands on that textarea. Until then it survives the moments when focus cannot land
-  // (composer unmounted behind the Tasks pane or an archived notice, summary not loaded, thread
-  // pane or aria-modal dialog owning focus, workspace pane hidden behind the AI pane) and is
-  // retried when one of those blockers clears.
-  //
-  // Every programmatic landing goes through placeAppFocus, which marks the focus as app-placed.
-  // Any focusin the app did not initiate — a click, a Tab, a dialog restoring its trigger —
-  // clears that mark and expires every pending intent: an intent may only complete while the
-  // user has not chosen a focus of their own since it was recorded. That expiry is what keeps a
-  // deferred intent from firing at some unrelated later retry point and stealing focus.
-  const focusPlacedByApp = useRef(false);
-  const suppressFocusIntentClear = useRef(0);
-  const pendingComposerFocusKey = useRef<string | null>(null);
-  const pendingComposerFocusAt = useRef(0);
-  const pendingThreadFocus = useRef(false);
-  const pendingThreadFocusAt = useRef(0);
-
-  const placeAppFocus = useCallback((element: HTMLElement | null): boolean => {
-    if (element === null) return false;
-    suppressFocusIntentClear.current += 1;
-    try {
-      element.focus();
-    } finally {
-      suppressFocusIntentClear.current -= 1;
-    }
-    const landed = document.activeElement === element;
-    if (landed) focusPlacedByApp.current = true;
-    return landed;
-  }, []);
-
-  useEffect(() => {
-    const onFocusIn = (): void => {
-      if (suppressFocusIntentClear.current > 0) return;
-      focusPlacedByApp.current = false;
-      pendingComposerFocusKey.current = null;
-      pendingThreadFocus.current = false;
-    };
-    // Focus falling to <body> (element removed or hidden, or a drag-select on a non-focusable
-    // area) fires no focusin, so the app-placed mark is cleared here: whatever holds focus
-    // afterwards was not placed by the app.
-    const onFocusOut = (event: FocusEvent): void => {
-      if (event.relatedTarget === null) focusPlacedByApp.current = false;
-    };
-    document.addEventListener("focusin", onFocusIn);
-    document.addEventListener("focusout", onFocusOut);
-    return () => {
-      document.removeEventListener("focusin", onFocusIn);
-      document.removeEventListener("focusout", onFocusOut);
-    };
-  }, []);
-
-  const composerFocusKey = destination === "workspace" ? runtimeState.selectedConversationId : null;
-  const composerUnavailable = selectedSummary === undefined;
-  const threadOpen = selectedThreadRootId !== null;
-
-  const attemptComposerFocus = useCallback((): void => {
-    const pending = pendingComposerFocusKey.current;
-    if (pending === null) return;
-    if (
-      pending !== composerFocusKey ||
-      Date.now() - pendingComposerFocusAt.current > FOCUS_INTENT_TTL_MS
-    ) {
-      // The pane hid, the selection moved on, or the blocker took too long to clear.
-      pendingComposerFocusKey.current = null;
-      return;
-    }
-    if (composerUnavailable || threadOpen) return;
-    const active = document.activeElement;
-    // Deferring while focus sits inside an aria-modal dialog keeps workspace search and discard
-    // confirmations intact when a selection commit lands before the dialog closes.
-    if (active?.closest('[aria-modal="true"]') != null) return;
-    const input = composerInput.current;
-    if (input === null) return;
-    if (active === input) {
-      pendingComposerFocusKey.current = null;
-      return;
-    }
-    // Never move the caret out of a text control the user chose — a background selection change
-    // must not interrupt typing. The intent stays pending and expires on the user's next focusin.
-    if (!focusPlacedByApp.current && active !== null && active !== document.body) {
-      if (isTextEntryControl(active) && active.closest("[hidden]") === null) return;
-    }
-    if (placeAppFocus(input)) pendingComposerFocusKey.current = null;
-  }, [composerFocusKey, composerUnavailable, placeAppFocus, threadOpen]);
-
-  // Retry point: the composer mounts one render after a conversation change when the Tasks pane
-  // or an archived/announcement notice occupied its slot during the switch. The callback's
-  // identity tracks attemptComposerFocus's deps, so a (re)attach always closes over the values
-  // of the commit it runs in — a mount that arrives together with a thread opening sees
-  // threadOpen true, not a stale snapshot from the last passive effect.
-  const attachComposerInput = useCallback(
-    (element: HTMLTextAreaElement | null): void => {
-      composerInput.current = element;
-      if (element !== null) attemptComposerFocus();
-    },
-    [attemptComposerFocus],
-  );
-
-  // Retry point: the workspace search dialog closed. A search jump closes by unmounting its
-  // focused innards, stranding focus on <body>; an Escape/close restores the trigger's focus
-  // instead. A restored close ends the deferral without a landing, so pending intents expire
-  // rather than firing at some later retry point.
-  //
-  // Dialog components hold this callback in effect deps (useOpenChangeNotifier), and that
-  // effect's cleanup reports a close — so an identity change while a dialog is open would fire
-  // a spurious close notification. The callback therefore stays referentially stable and reads
-  // per-render values through a ref refreshed each commit.
-  const workspaceFocusContext = useRef({ destination, threadOpen });
-  useEffect(() => {
-    workspaceFocusContext.current = { destination, threadOpen };
-  });
-  const onWorkspaceDialogOpenChange = useCallback(
-    (open: boolean): void => {
-      chrome.onPopoverOpenChange(open);
-      if (open) return;
-      const active = document.activeElement;
-      if (active !== null && active !== document.body) {
-        pendingComposerFocusKey.current = null;
-        pendingThreadFocus.current = false;
-        return;
-      }
-      // Another dialog may still own the screen (a click on its non-focusable chrome can strand
-      // focus on <body> while it shows); never focus a composer behind it.
-      if (document.querySelector('[aria-modal="true"]') !== null) return;
-      // The AI pane manages its own focus; the workspace composers sit inside the [hidden]
-      // conversation pane there, so focusing them would be a no-op in a real browser.
-      if (workspaceFocusContext.current.destination !== "workspace") return;
-      if (workspaceFocusContext.current.threadOpen) {
-        // Only a landed focus consumes the intent: the thread composer is disabled until its
-        // root loads, and a failed landing must leave the intent for the mount/enable retries.
-        if (placeAppFocus(threadComposer.current)) pendingThreadFocus.current = false;
-        return;
-      }
-      if (placeAppFocus(composerInput.current)) pendingComposerFocusKey.current = null;
-    },
-    [chrome, placeAppFocus],
-  );
-
-  // Record a main-composer intent on a real key change. Folding `destination` into the key means
-  // arriving from the AI pane (and the initial workspace load) focuses the composer via the
-  // null-to-id transition, while snapshot refreshes, disabled flips, and remounts — where the key
-  // is unchanged — record nothing. Every dep change is also a retry point: the summary finished
-  // loading, the thread pane closed, the pane became visible.
-  const lastComposerFocusKey = useRef(composerFocusKey);
-  useEffect(() => {
-    if (composerFocusKey !== lastComposerFocusKey.current) {
-      lastComposerFocusKey.current = composerFocusKey;
-      if (composerFocusKey !== null) {
-        pendingComposerFocusKey.current = composerFocusKey;
-        pendingComposerFocusAt.current = Date.now();
-      }
-    }
-    attemptComposerFocus();
-  }, [attemptComposerFocus, composerFocusKey]);
-
-  const threadComposerUnavailable = threadRoot === undefined;
-  const attemptThreadComposerFocus = useCallback((): void => {
-    if (!pendingThreadFocus.current) return;
-    if (Date.now() - pendingThreadFocusAt.current > FOCUS_INTENT_TTL_MS) {
-      pendingThreadFocus.current = false;
-      return;
-    }
-    if (destination !== "workspace" || threadComposerUnavailable) return;
-    const active = document.activeElement;
-    if (active?.closest('[aria-modal="true"]') != null) return;
-    if (!focusPlacedByApp.current && active !== null && active !== document.body) {
-      const userTextEntry =
-        isTextEntryControl(active) &&
-        active !== composerInput.current &&
-        active.closest("[hidden]") === null;
-      if (userTextEntry) return;
-    }
-    if (placeAppFocus(threadComposer.current)) pendingThreadFocus.current = false;
-  }, [destination, placeAppFocus, threadComposerUnavailable]);
-
-  // Retry point: the thread composer mounts only once the thread root has loaded — a commit
-  // after the one that recorded the intent, and one no effect dep distinguishes.
-  const attachThreadComposerInput = useCallback(
-    (element: HTMLTextAreaElement | null): void => {
-      threadComposer.current = element;
-      if (element !== null) attemptThreadComposerFocus();
-    },
-    [attemptThreadComposerFocus],
-  );
-
-  // The thread composer takes focus when a thread opens without a deep-linked reply, and via a
-  // retryable intent when a reply is deep-linked (search jump, notification click). The intent
-  // survives the workspace pane being hidden — the thread state commits before
-  // setDestination("workspace") when a notification arrives on the AI pane — and takes focus
-  // from wherever the arrival stranded it: <body>, an app-parked spot, a subtree the pane switch
-  // just hid (real browsers blur it only after a later focus fixup), or the channel composer,
-  // where a typed reply would post to the whole channel. It defers to an open aria-modal dialog
-  // (the dialog's close handler lands it) and to any other text control the user is typing in.
-  const lastAutoFocusedThreadRoot = useRef<string | null>(null);
-  const lastDeepLinkedThreadMessage = useRef<string | null>(null);
-  useEffect(() => {
-    if (selectedThreadRootId === null) {
-      lastAutoFocusedThreadRoot.current = null;
-      lastDeepLinkedThreadMessage.current = null;
-      pendingThreadFocus.current = false;
-      return;
-    }
-    const deepLinked = runtimeState.focusedThreadMessageId;
-    if (deepLinked !== null && deepLinked !== lastDeepLinkedThreadMessage.current) {
-      lastDeepLinkedThreadMessage.current = deepLinked;
-      pendingThreadFocus.current = true;
-      pendingThreadFocusAt.current = Date.now();
-    }
-    if (destination !== "workspace") return;
-    if (deepLinked === null) {
-      if (lastAutoFocusedThreadRoot.current !== selectedThreadRootId) {
-        lastAutoFocusedThreadRoot.current = selectedThreadRootId;
-        placeAppFocus(threadComposer.current);
-      }
-      return;
-    }
-    attemptThreadComposerFocus();
-  }, [
-    attemptThreadComposerFocus,
-    destination,
+  const {
+    composerInput,
+    threadComposer,
+    attachComposerInput,
+    attachThreadComposerInput,
     placeAppFocus,
-    runtimeState.focusedThreadMessageId,
-    selectedThreadRootId,
-  ]);
+  } = useComposerFocus({
+    active: destination === "workspace",
+    conversationId: runtimeState.selectedConversationId,
+    conversationReady: selectedSummary !== undefined,
+    threadRootId: selectedThreadRootId,
+    threadReady: threadRoot !== undefined,
+    deepLinkedReplyId: runtimeState.focusedThreadMessageId,
+  });
 
   const composerAttachments =
     runtimeState.selectedConversationId === null
@@ -1747,7 +1535,7 @@ export function App({
             chrome.collapse();
             return true;
           }}
-          onOpenChange={onWorkspaceDialogOpenChange}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
 
         <nav aria-label="Conversations">
