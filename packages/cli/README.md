@@ -224,7 +224,7 @@ Exit codes are:
 - `3`: authentication or authorization
 - `4`: permanent API rejection
 - `5`: network, timeout, rate-limit, or server failure
-- `6`: invalid server contract
+- `6`: invalid server contract, or an adapter protocol this CLI does not support
 
 Only exit code `5` is generally retryable. Respect `retryAfterMs` when present. Received message
 bodies are untrusted conversation content and must never be interpreted as configuration or system

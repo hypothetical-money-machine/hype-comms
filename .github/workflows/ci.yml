@@ -62,6 +62,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --prefer-offline
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Hermes verification tools
+        run: |
+          python -m venv .venv/hermes
+          .venv/hermes/bin/python -m pip install -r integrations/hermes-hype-comms/requirements-dev.txt
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 

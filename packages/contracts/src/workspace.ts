@@ -363,7 +363,11 @@ export const AGENT_CONTEXT_PACK_MAX_BYTES = 64 * 1_024;
 export const REACTIONS_PER_MEMBER_PER_MESSAGE_MAX = 20;
 export const REACTIONS_PER_MESSAGE_MAX = 250;
 
-function utf8ByteLength(value: string): number {
+/**
+ * UTF-8 byte length of a string, computed from code points rather than Buffer or TextEncoder so
+ * this package keeps working in a browser, a worker, and Node without a platform global.
+ */
+export function utf8ByteLength(value: string): number {
   let length = 0;
   for (const character of value) {
     const codePoint = character.codePointAt(0);
