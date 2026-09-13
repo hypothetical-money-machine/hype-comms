@@ -4323,6 +4323,43 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(send_calls(factory)), 2)
         self.assertTrue(adapter._thread_root_supported)
 
+    async def test_a_protocol_rejection_is_never_retried_flat(self) -> None:
+        # A CLI that refuses this adapter's protocol is rejecting the whole
+        # conversation, not the thread root. Retrying flat would post nothing
+        # and latch threading off for the life of the process on the way, so
+        # the protocol code is excluded whatever exit code carries it -- the
+        # CLI raises it as a contract failure, but an older build exits 2.
+        anchor_id = message_id_for("101")
+        upgrade_required = json.dumps(
+            {
+                "error": {
+                    "code": "ADAPTER_UPGRADE_REQUIRED",
+                    "message": "This CLI supports adapter protocol 1",
+                }
+            }
+        ).encode("utf-8")
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    FakeProcess(stderr=upgrade_required, returncode=2),
+                ),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        failed = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertFalse(failed.success)
+        self.assertIn("ADAPTER_UPGRADE_REQUIRED", failed.error or "")
+        self.assertFalse(failed.retryable)
+        self.assertEqual(len(send_calls(factory)), 1)
+        self.assertTrue(adapter._thread_root_supported)
+
     async def test_a_direct_message_reply_is_never_threaded(self) -> None:
         # Threading is right for a channel and wrong for a direct message. Once
         # a client negotiates threads-v1 the desktop drops every message with a
