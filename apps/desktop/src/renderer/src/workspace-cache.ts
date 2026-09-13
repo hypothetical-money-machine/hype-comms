@@ -146,6 +146,53 @@ class SupersededCacheEvent extends Error {
   }
 }
 
+type MetadataWriteMode = "refresh" | "page" | "bootstrap";
+
+function canWriteMetadata(
+  current: SyncPosition | null,
+  incoming: SyncPosition,
+  marker: MembershipRepairMarker | null,
+  mode: MetadataWriteMode,
+): boolean {
+  if (current !== null && current.epoch !== incoming.epoch)
+    throw new Error("Reset the protocol replica before installing another epoch");
+  if (marker !== null) {
+    if (mode !== "bootstrap")
+      throw new Error("Membership repair must complete before replacing metadata");
+    if (
+      marker.position.epoch !== incoming.epoch ||
+      compareSyncPositions(incoming, marker.position) < 0
+    )
+      throw new Error("Authoritative snapshot predates the membership repair marker");
+  }
+  return mode === "refresh"
+    ? current !== null && sameSyncPosition(current, incoming)
+    : current === null || compareSyncPositions(current, incoming) <= 0;
+}
+
+function metadataCollections(
+  states: readonly CollectionState[],
+  visible: ReadonlySet<string>,
+  position: SyncPosition,
+  mode: MetadataWriteMode,
+): CollectionState[] {
+  if (mode === "page") return [...states];
+  return states
+    .filter(
+      (state) => state.identity.kind === "my_tasks" || visible.has(state.identity.conversationId),
+    )
+    .map((state) => {
+      if (
+        mode !== "bootstrap" ||
+        (state.snapshotPosition !== null &&
+          state.snapshotPosition.epoch === position.epoch &&
+          compareSyncPositions(state.snapshotPosition, position) >= 0)
+      )
+        return state;
+      return { ...state, invalidatedAt: position };
+    });
+}
+
 export interface SnapshotCollections {
   readonly states: readonly CollectionState[];
   readonly reactionPositions: ReadonlyMap<string, SyncPosition>;
@@ -172,6 +219,10 @@ export interface WorkspaceCache {
   ): Promise<boolean>;
   /** Replaces a complete catalog at the applied position without replacing retained collection rows. */
   replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean>;
+  /** Stages a validated catalog page without removing unseen work or advancing replay. */
+  stageMetadataPage(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean>;
+  /** Installs a complete catalog and its replay baseline after bootstrap/repair. */
+  installMetadataSnapshot(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean>;
   /**
    * Replaces the whole member directory with the server's answer to `GET /v2/members`.
    *
@@ -1172,6 +1223,25 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "refresh", signal);
+  }
+
+  async stageMetadataPage(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "page", signal);
+  }
+
+  async installMetadataSnapshot(
+    snapshot: WorkspaceSnapshot,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "bootstrap", signal);
+  }
+
+  async #writeMetadata(
+    snapshot: WorkspaceSnapshot,
+    mode: MetadataWriteMode,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     const visible = new Set(parsed.conversations.map((summary) => summary.conversation.id));
     for (;;) {
@@ -1210,30 +1280,33 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         async () => {
           signal?.throwIfAborted();
           const metadata = await this.#database.metadata.get("state");
-          if (parseMembershipRepairMarker(metadata?.repairMarker) !== null)
-            throw new Error("Membership repair must complete before replacing metadata");
           if (
-            metadata?.syncCursor == null ||
-            !sameSyncPosition(metadata.syncCursor, parsed.syncCursor)
+            !canWriteMetadata(
+              metadata?.syncCursor ?? null,
+              parsed.syncCursor,
+              parseMembershipRepairMarker(metadata?.repairMarker),
+              mode,
+            )
           )
             return "stale";
           if (
             !sameRetractReservations(
               reservations,
-              parseRetractReservations(metadata.retractReservations),
+              parseRetractReservations(metadata?.retractReservations),
             )
           )
             return "retry";
           // Retained collection rows and their reaction anchors stay in this transaction's stores.
           // A page can commit while metadata encryption is in flight without being overwritten.
-          await Promise.all([
-            this.#database.workspaces.clear(),
-            this.#database.conversations.clear(),
-            this.#database.messages.filter((row) => !visible.has(row.conversationId)).delete(),
-            this.#database.reactions.filter((row) => !visible.has(row.conversationId)).delete(),
-            this.#database.tasks.filter((row) => !visible.has(row.conversationId)).delete(),
-            this.#database.outbox.filter((row) => !visible.has(row.conversationId)).delete(),
-          ]);
+          if (mode !== "page")
+            await Promise.all([
+              this.#database.workspaces.clear(),
+              this.#database.conversations.clear(),
+              this.#database.messages.filter((row) => !visible.has(row.conversationId)).delete(),
+              this.#database.reactions.filter((row) => !visible.has(row.conversationId)).delete(),
+              this.#database.tasks.filter((row) => !visible.has(row.conversationId)).delete(),
+              this.#database.outbox.filter((row) => !visible.has(row.conversationId)).delete(),
+            ]);
           await this.#database.workspaces.put({
             id: parsed.workspace.id,
             value: encryptedValue(encrypted, "workspace", parsed.workspace.id),
@@ -1249,11 +1322,16 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           );
           await this.#database.metadata.put(
             mergeMetadataRow(metadata, this.#scope, {
-              collections: parseCollectionStates(metadata.collections).filter(
-                (state) =>
-                  state.identity.kind === "my_tasks" || visible.has(state.identity.conversationId),
+              collections: metadataCollections(
+                parseCollectionStates(metadata?.collections),
+                visible,
+                parsed.syncCursor,
+                mode,
               ),
-              lastSyncedAt: new Date().toISOString(),
+              ...(mode === "bootstrap"
+                ? { syncCursor: parsed.syncCursor, repairMarker: null }
+                : {}),
+              ...(mode === "page" ? {} : { lastSyncedAt: new Date().toISOString() }),
             }),
           );
           signal?.throwIfAborted();
@@ -2595,7 +2673,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           };
     // The reported snapshot cursor tracks applied events, matching how PersistentWorkspaceCache
     // rebuilds it from the metadata row.
-    const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? null;
+    const syncCursor = this.#syncCursor;
     const bootstrap =
       snapshot === null || syncCursor === null
         ? null
@@ -2706,39 +2784,68 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   }
 
   async replaceMetadata(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "refresh", signal);
+  }
+
+  async stageMetadataPage(snapshot: WorkspaceSnapshot, signal?: AbortSignal): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "page", signal);
+  }
+
+  async installMetadataSnapshot(
+    snapshot: WorkspaceSnapshot,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    return this.#writeMetadata(snapshot, "bootstrap", signal);
+  }
+
+  async #writeMetadata(
+    snapshot: WorkspaceSnapshot,
+    mode: MetadataWriteMode,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     const parsed = parseSnapshotInput(snapshot);
     signal?.throwIfAborted();
-    this.#assertNoMembershipRepair();
-    if (this.#syncCursor === null || !sameSyncPosition(this.#syncCursor, parsed.syncCursor))
+    if (!canWriteMetadata(this.#syncCursor, parsed.syncCursor, this.#repairMarker, mode))
       return false;
     const visible = new Set(parsed.conversations.map((summary) => summary.conversation.id));
     this.#snapshot = {
       ...parsed,
       conversations: applyRetractReservationsToConversations(
-        parsed.conversations,
+        mode === "page"
+          ? [
+              ...(this.#snapshot?.conversations ?? []).filter(
+                (summary) => !visible.has(summary.conversation.id),
+              ),
+              ...parsed.conversations,
+            ]
+          : parsed.conversations,
         retractReservationMap(this.#retractReservations),
       ),
     };
     this.#currentUserId = parsed.currentUser.user.id;
     this.#members = parsed.members;
-    for (const [id, message] of this.#messages)
-      if (!visible.has(message.conversationId)) {
-        this.#messages.delete(id);
-        this.#reactionSnapshotPositions.delete(id);
-      }
-    for (const [id, conversationId] of this.#reactionConversationIds)
-      if (!visible.has(conversationId)) {
-        this.#reactions.delete(id);
-        this.#reactionConversationIds.delete(id);
-      }
-    for (const [id, task] of this.#tasks)
-      if (!visible.has(task.conversationId)) this.#tasks.delete(id);
-    for (const [id, item] of this.#outbox)
-      if (!visible.has(item.operation.conversationId)) this.#outbox.delete(id);
-    this.#collections = this.#collections.filter(
-      (state) => state.identity.kind === "my_tasks" || visible.has(state.identity.conversationId),
-    );
-    this.#lastSyncedAt = new Date().toISOString();
+    if (mode !== "page") {
+      for (const [id, message] of this.#messages)
+        if (!visible.has(message.conversationId)) {
+          this.#messages.delete(id);
+          this.#reactionSnapshotPositions.delete(id);
+        }
+      for (const [id, conversationId] of this.#reactionConversationIds)
+        if (!visible.has(conversationId)) {
+          this.#reactions.delete(id);
+          this.#reactionConversationIds.delete(id);
+        }
+      for (const [id, task] of this.#tasks)
+        if (!visible.has(task.conversationId)) this.#tasks.delete(id);
+      for (const [id, item] of this.#outbox)
+        if (!visible.has(item.operation.conversationId)) this.#outbox.delete(id);
+    }
+    this.#collections = metadataCollections(this.#collections, visible, parsed.syncCursor, mode);
+    if (mode === "bootstrap") {
+      this.#syncCursor = parsed.syncCursor;
+      this.#repairMarker = null;
+    }
+    if (mode !== "page") this.#lastSyncedAt = new Date().toISOString();
     return true;
   }
 
