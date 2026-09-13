@@ -1168,6 +1168,20 @@ describe("WorkspaceRepository", () => {
     ).toBeGreaterThan(AGENT_CONTEXT_PACK_MAX_BYTES);
   });
 
+  it("rejects malformed file cursors instead of restarting the first page", async () => {
+    for (const cursor of [
+      "not-a-cursor",
+      Buffer.from(JSON.stringify({ createdAt: "invalid", id: generalId })).toString("base64url"),
+    ]) {
+      await expect(
+        repository.listConversationFiles(owner, generalId, cursor, 50),
+      ).rejects.toMatchObject({ kind: "invalid_input", message: "Invalid files cursor" });
+    }
+    await expect(
+      repository.listConversationFiles(owner, generalId, undefined, 50),
+    ).resolves.toMatchObject({ files: [], hasMore: false });
+  });
+
   it("rejects oversized history cursors before bigint casts for history and threads", async () => {
     const root = await repository.sendMessage(owner, generalId, {
       ...message(randomUUID(), "history cursor root"),

@@ -1,3 +1,4 @@
+import { parseAdminArguments } from "../../cli/arguments.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -74,7 +75,11 @@ function parseTarget(value: string | undefined): OwnerTarget {
 }
 
 export function parseOwnerCommand(argv: readonly string[]): OwnerCommand {
-  const [name, target, ...extra] = argv;
+  if ((argv[0] === "promote" || argv[0] === "demote") && argv[1]?.startsWith("--")) {
+    throw new Error(`A username or email is required\n${USAGE}`);
+  }
+  const { positionals } = parseAdminArguments(argv, {}, USAGE, true);
+  const [name, target, ...extra] = positionals;
   if (name === "list") {
     if (target !== undefined) throw new Error(`list does not accept arguments\n${USAGE}`);
     return { name };
