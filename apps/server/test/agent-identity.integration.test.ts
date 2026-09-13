@@ -38,6 +38,7 @@ import WebSocket from "ws";
 import { z } from "zod";
 
 import { buildApp } from "../src/app.js";
+import { BotService } from "../src/modules/bots/service.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -155,6 +156,7 @@ describe("agent identity and owner administration", () => {
   async function appWithWorkspace(
     options: {
       readonly repository?: WorkspaceRepository;
+      readonly botService?: BotService;
       readonly agentProvisioningEnabled?: boolean;
       readonly defaultAgentAgencyEnabled?: boolean;
     } = {},
@@ -180,6 +182,7 @@ describe("agent identity and owner administration", () => {
       identity: {
         service,
         agentProvisioningEnabled,
+        ...(options.botService === undefined ? {} : { botService: options.botService }),
       },
       workspace: {
         repository,
@@ -230,6 +233,88 @@ describe("agent identity and owner administration", () => {
     expect(response.statusCode).toBe(201);
     return createAgentTokenResponseSchema.parse(response.json());
   }
+
+  it("shares Bearer syntax while preserving agent and bot authentication policies", async () => {
+    const bots = new BotService(pool, () => new Date(now));
+    const app = await appWithWorkspace({ botService: bots });
+    const agent = await createAgent(app);
+    const agentCredential = await createToken(app, agent.user.id, "Header syntax", [
+      "workspace:read",
+    ]);
+    const bot = await bots.createBot(ownerId, {
+      username: "syntax-bot",
+      displayName: "Syntax Bot",
+      channelSlugs: ["general"],
+      scopes: ["tasks:read"],
+      expiresAt: "2026-10-01T12:00:00.000Z",
+    });
+    for (const prefix of ["Bearer ", "bearer ", "BEARER\t", "bEaReR \t  "]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/members",
+            headers: { authorization: prefix + agentCredential.token },
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/tasks/mine",
+            headers: { authorization: prefix + bot.token },
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/members",
+            headers: {
+              authorization: prefix + agentCredential.token,
+              cookie: `hype_comms_session=${ownerSessionToken}`,
+            },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
+    for (const authorization of [
+      "Bearer",
+      "Bearer invalid",
+      `Bearer ${bot.token} extra`,
+      `Basic ${bot.token}`,
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/tasks/mine",
+            headers: { authorization, cookie: `hype_comms_session=${ownerSessionToken}` },
+          })
+        ).statusCode,
+      ).toBe(401);
+    }
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/tasks/mine",
+          headers: { authorization: `Bearer ${agentCredential.token}` },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/members",
+          headers: { authorization: `Bearer ${bot.token}` },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
 
   it("refuses agent provisioning while the previous server remains a rollback target", async () => {
     const app = await appWithWorkspace({ agentProvisioningEnabled: false });
