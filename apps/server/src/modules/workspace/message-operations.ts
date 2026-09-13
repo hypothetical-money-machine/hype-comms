@@ -1,3 +1,5 @@
+import { positionForRetainedSequence } from "./protocol-epoch.js";
+import type { SyncPosition } from "@hype-comms/contracts";
 import {
   addReactionResponseSchema,
   advanceReadCursorResponseSchema,
@@ -68,7 +70,7 @@ import { type UserRow } from "./user-records.js";
 import { requireActivePrincipal } from "./workspace-access.js";
 import { auditAnnouncement, type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
-import { readWorkspaceSequence } from "./workspace-sequence.js";
+import { readWorkspacePosition } from "./workspace-sequence.js";
 
 const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 
@@ -635,7 +637,7 @@ export class WorkspaceMessageOperations {
       if (replay !== undefined) {
         return addReactionResponseSchema.parse({
           reaction: mapReaction(replay),
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
 
@@ -682,7 +684,7 @@ export class WorkspaceMessageOperations {
         payload: { reaction },
         audienceUserIds: await conversationAudience(client, conversation),
       });
-      return addReactionResponseSchema.parse({ reaction, syncCursor: event.workspaceSequence });
+      return addReactionResponseSchema.parse({ reaction, syncCursor: event.position });
     });
   }
 
@@ -707,7 +709,7 @@ export class WorkspaceMessageOperations {
       if (row === undefined) {
         return removeReactionResponseSchema.parse({
           removed: false,
-          syncCursor: await readWorkspaceSequence(client, identity.currentUser.workspaceId),
+          syncCursor: await readWorkspacePosition(client, identity.currentUser.workspaceId),
         });
       }
       const event = await this.events.insert(client, identity, {
@@ -719,7 +721,7 @@ export class WorkspaceMessageOperations {
       });
       return removeReactionResponseSchema.parse({
         removed: true,
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -954,7 +956,11 @@ export class WorkspaceMessageOperations {
         return sendMessageResponseSchema.parse({
           message: mapMessage(replay),
           attachments: await attachmentsForMessages(client, [replay.id]),
-          syncCursor: replay.committed_workspace_sequence,
+          syncCursor: await positionForRetainedSequence(
+            client,
+            identity.currentUser.workspaceId,
+            replay.committed_workspace_sequence,
+          ),
         });
       }
       if (access.is_archived) {
@@ -1138,7 +1144,7 @@ export class WorkspaceMessageOperations {
           ...attachment,
           messageId,
         })),
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
       await client.query(
         `INSERT INTO api_idempotency_records
@@ -1219,7 +1225,11 @@ export class WorkspaceMessageOperations {
       if (message.deleted_at !== null) {
         return retractMessageResponseSchema.parse({
           message: mapMessage(message),
-          syncCursor: message.committed_workspace_sequence,
+          syncCursor: await positionForRetainedSequence(
+            client,
+            identity.currentUser.workspaceId,
+            message.committed_workspace_sequence,
+          ),
         });
       }
       if (message.retract_window_elapsed) {
@@ -1266,7 +1276,7 @@ export class WorkspaceMessageOperations {
       });
       return retractMessageResponseSchema.parse({
         message: tombstone,
-        syncCursor: event.workspaceSequence,
+        syncCursor: event.position,
       });
     });
   }
@@ -1314,7 +1324,7 @@ export class WorkspaceMessageOperations {
         ],
       );
       let cursor = updated.rows[0];
-      let syncCursor: string;
+      let syncCursor: SyncPosition;
       if (cursor !== undefined) {
         // Allocate the read event's sequence before counting. Every message allocates its sequence
         // under the same workspace-row lock, so messages ordered before this event are visible to
@@ -1334,7 +1344,7 @@ export class WorkspaceMessageOperations {
           payload: { readCursor: mapReadCursor(cursor), ...counts },
           audienceUserIds: [identity.currentUser.user.id],
         });
-        syncCursor = event.workspaceSequence;
+        syncCursor = event.position;
       } else {
         const current = await client.query<ReadCursorRow>(
           `SELECT *
@@ -1343,7 +1353,7 @@ export class WorkspaceMessageOperations {
           [conversationId, identity.currentUser.user.id],
         );
         cursor = current.rows[0];
-        syncCursor = await readWorkspaceSequence(client, identity.currentUser.workspaceId);
+        syncCursor = await readWorkspacePosition(client, identity.currentUser.workspaceId);
       }
       if (cursor === undefined) throw new Error("Read cursor was not persisted");
       return advanceReadCursorResponseSchema.parse({

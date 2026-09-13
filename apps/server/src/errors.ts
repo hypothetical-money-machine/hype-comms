@@ -74,6 +74,12 @@ const DOMAIN_ERRORS: Readonly<Record<DomainErrorKind, DomainErrorResponse>> = {
   access_denied: { statusCode: 403, code: "FORBIDDEN" },
   authentication_required: { statusCode: 401, code: "UNAUTHORIZED" },
   sync_position_expired: { statusCode: 410, code: "CURSOR_EXPIRED" },
+  sync_epoch_mismatch: {
+    statusCode: 410,
+    code: "CURSOR_EXPIRED",
+    details: [{ field: "after.epoch", issue: "epoch_mismatch" }],
+  },
+  unavailable: { statusCode: 503, code: "SERVICE_UNAVAILABLE" },
   integrity_failure: { statusCode: 500, code: "INTERNAL_ERROR" },
 };
 

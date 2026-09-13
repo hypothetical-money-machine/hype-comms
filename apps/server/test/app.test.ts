@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -315,7 +316,7 @@ describe("realtime route", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/v2/realtime?ticket=${"a".repeat(32)}&after=0`,
+      url: `/v2/realtime?ticket=${"a".repeat(32)}&after=${encodeURIComponent(JSON.stringify(testPosition("0")))}`,
       headers: {
         connection: "upgrade",
         upgrade: "websocket",
@@ -344,14 +345,14 @@ describe("realtime route", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
     );
 
     const [data] = await once(socket, "message");
     const event = systemConnectedEventSchema.parse(JSON.parse(data.toString()));
     socket.close();
 
-    expect(event.workspaceSequence).toBe("9");
+    expect(event.position.sequence).toBe("9");
     expect(consumeTicket).toHaveBeenCalledOnce();
     expect(consumeTicket.mock.calls[0]?.[0]).toMatchObject({ origin: undefined });
   });
@@ -370,7 +371,7 @@ describe("realtime route", () => {
     apps.push(app);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
     const socket = new WebSocket(
-      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=9`,
+      `${address.replace("http://", "ws://")}/v2/realtime?ticket=${"a".repeat(32)}&after=${encodeURIComponent(JSON.stringify(testPosition("9")))}`,
     );
     const messages: string[] = [];
     socket.on("message", (data) => messages.push(data.toString()));

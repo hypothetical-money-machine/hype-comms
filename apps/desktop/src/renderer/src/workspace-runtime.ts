@@ -1,4 +1,6 @@
 import {
+  compareSyncPositions,
+  sameSyncPosition,
   sendMessageOperationSchema,
   TASK_PAGE_MAX_LIMIT,
   WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
@@ -25,6 +27,7 @@ import {
   type ScopedEphemeralActivityFrame,
   type ScopedProductRealtimeEvent,
   type SyncAttemptResult,
+  type SyncPosition,
   type Task,
   type TaskPriority,
   type TaskStatus,
@@ -618,7 +621,7 @@ export class WorkspaceRuntime {
   /** The signed-in scope, kept past `stop()` so a sign-out reset knows whose cache to delete. */
   #scope: CacheScope | null = null;
   /** The highest workspace sequence this client has durably applied. */
-  #syncCursor: string | null = null;
+  #syncCursor: SyncPosition | null = null;
   /**
    * A `member.updated` invalidation has been seen and not yet answered by a successful refetch.
    * Cleared only on success, so a failed re-read is retried by the next sync pass instead of
@@ -641,7 +644,7 @@ export class WorkspaceRuntime {
   /** Invalidates snapshot requests that began before the latest membership barrier. */
   #membershipEpoch = 0;
   /** Membership frames accepted by this renderer session but not yet durably repaired and acked. */
-  readonly #acceptedMembershipRepairs = new Map<string, string>();
+  readonly #acceptedMembershipRepairs = new Map<string, SyncPosition>();
   /** Retires frames queued by the realtime session stopped for authoritative membership repair. */
   #realtimeEpoch = 0;
   /** The immutable main-process scope currently authorized to mutate this renderer cache. */
@@ -801,7 +804,7 @@ export class WorkspaceRuntime {
         this.#rotateProjectionBarrier();
         // Acceptance happens before queueing. A repair ahead of this one may retire the socket,
         // but it must not retire this obligation or acknowledge a cursor that crosses it.
-        this.#acceptedMembershipRepairs.set(event.id, event.workspaceSequence);
+        this.#acceptedMembershipRepairs.set(event.id, event.position);
         this.#membershipRepairPending = true;
         this.#membershipEpoch += 1;
         this.#clearRetryTimer();
@@ -918,7 +921,7 @@ export class WorkspaceRuntime {
 
       if (this.#offlineOnly) return;
 
-      await this.#prepareRealtime(generation, cached.syncCursor ?? "0");
+      if (cached.syncCursor !== null) await this.#prepareRealtime(generation, cached.syncCursor);
       if (generation !== this.#generation || this.#cache !== cache) return;
 
       const replicaAvailable = cached.bootstrap !== null;
@@ -927,7 +930,7 @@ export class WorkspaceRuntime {
           generation,
           cache,
           cached.repairMarker,
-          cached.syncCursor ?? "0",
+          cached.repairMarker.position,
         );
         return;
       }
@@ -1095,7 +1098,7 @@ export class WorkspaceRuntime {
     }
   }
 
-  async #acknowledgeCurrentScope(cursor: string, generation: number): Promise<void> {
+  async #acknowledgeCurrentScope(cursor: SyncPosition, generation: number): Promise<void> {
     const scope = this.#realtimeScope;
     if (scope === null || !this.#isActiveRealtimeScope(scope, generation)) return;
     await this.#client.acknowledgeWorkspaceEvent({ scope, cursor });
@@ -2078,7 +2081,11 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
     await this.#serialize(async () => {
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
-      if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
+      if (
+        this.#syncCursor !== null &&
+        this.#syncCursor.epoch === result.syncCursor.epoch &&
+        compareSyncPositions(this.#syncCursor, result.syncCursor) >= 0
+      ) {
         return;
       }
       const persisted = await cache.upsertReaction(
@@ -2108,7 +2115,11 @@ export class WorkspaceRuntime {
     if (!result.removed || generation !== this.#generation || cache !== this.#cache) return;
     await this.#serialize(async () => {
       if (generation !== this.#generation || cache !== this.#cache) return;
-      if (this.#syncCursor !== null && compareSequence(this.#syncCursor, result.syncCursor) >= 0) {
+      if (
+        this.#syncCursor !== null &&
+        this.#syncCursor.epoch === result.syncCursor.epoch &&
+        compareSyncPositions(this.#syncCursor, result.syncCursor) >= 0
+      ) {
         return;
       }
       if (existing !== undefined) await cache.removeReaction(existing.id);
@@ -2553,7 +2564,52 @@ export class WorkspaceRuntime {
     };
   }
 
-  async #refreshSnapshot(generation: number, minimumCursor?: string): Promise<boolean> {
+  async #resetProtocolReplica(generation: number): Promise<boolean> {
+    const cache = this.#cache;
+    if (cache === null || generation !== this.#generation) return false;
+    this.#retireMembersReplacementQueue();
+    this.#membersRequest += 1;
+    this.#membersDirty = false;
+    this.#clearMembersRetryTimer();
+    this.#membershipEpoch += 1;
+    this.#realtimeEpoch += 1;
+    this.#acceptedMembershipRepairs.clear();
+    const scope = this.#realtimeScope;
+    this.#realtimeScope = null;
+    await this.#client.stopWorkspaceRealtime(scope ?? undefined);
+    if (cache !== this.#cache || generation !== this.#generation) return false;
+    await cache.resetProtocolReplica();
+    if (cache !== this.#cache || generation !== this.#generation) return false;
+    this.#acceptedMembershipRepairs.clear();
+    this.#membershipRepairPending = false;
+    this.#syncCursor = null;
+    this.#retractReservations = [];
+    this.#retractedMessageIds.clear();
+    this.#createdMessageMentions.clear();
+    this.#historyCursors.clear();
+    this.#historyHydrations.clear();
+    this.#threadCursors.clear();
+    this.#clearRetryTimer();
+    this.#clearReadTargets();
+    this.#clearActivity(true);
+    this.#setState({
+      bootstrap: null,
+      messages: [],
+      reactions: [],
+      attachments: [],
+      tasks: [],
+      threadSummaries: [],
+      conversationFiles: [],
+      stale: true,
+    });
+    return true;
+  }
+
+  async #refreshSnapshot(
+    generation: number,
+    minimumCursor?: SyncPosition,
+    prefetched?: WorkspaceSnapshot,
+  ): Promise<boolean> {
     const cache = this.#cache;
     const scope = this.#scope;
     const membershipEpoch = this.#membershipEpoch;
@@ -2568,7 +2624,7 @@ export class WorkspaceRuntime {
       !signal.aborted;
     const openThreadRootId = this.#state.selectedThreadRootId;
     const openThreadConversationId = this.#state.selectedConversationId;
-    const snapshot = await this.#fetchSnapshot();
+    const snapshot = prefetched ?? (await this.#fetchSnapshot());
     if (!isCurrent()) return false;
     if (
       snapshot.currentUser.user.id !== scope.userId ||
@@ -2576,7 +2632,16 @@ export class WorkspaceRuntime {
     ) {
       throw new Error("The workspace catalog did not match the signed-in session");
     }
-    if (minimumCursor !== undefined && compareSequence(snapshot.syncCursor, minimumCursor) < 0) {
+    const previousEpoch = this.#syncCursor?.epoch ?? this.#state.bootstrap?.syncCursor.epoch;
+    if (previousEpoch !== undefined && previousEpoch !== snapshot.syncCursor.epoch) {
+      if (!(await this.#resetProtocolReplica(generation))) return false;
+      return this.#refreshSnapshot(generation, undefined, snapshot);
+    }
+    if (
+      minimumCursor !== undefined &&
+      minimumCursor.epoch === snapshot.syncCursor.epoch &&
+      compareSyncPositions(snapshot.syncCursor, minimumCursor) < 0
+    ) {
       throw new Error("The workspace catalog has not caught up to the membership change");
     }
     const messages: Message[] = [];
@@ -2759,7 +2824,8 @@ export class WorkspaceRuntime {
     // result is reloaded. That event may be the source-less retract whose thread summaries and
     // unread totals the snapshot would otherwise incorrectly declare authoritative.
     if (
-      loaded.syncCursor !== snapshot.syncCursor ||
+      loaded.syncCursor === null ||
+      !sameSyncPosition(loaded.syncCursor, snapshot.syncCursor) ||
       sourceLessRetractMetadataVersion !== this.#sourceLessRetractMetadataVersion
     ) {
       if (!(await this.#reloadCache(generation, cache))) return false;
@@ -2994,7 +3060,8 @@ export class WorkspaceRuntime {
     this.#syncRecoveryPending = true;
     this.#clearSyncRetryTimer();
     let state = await cache.load();
-    let cursor = state.syncCursor ?? "0";
+    let cursor = state.syncCursor;
+    if (cursor === null) throw new Error("Sync requires an authoritative workspace position");
     let resets = 0;
     let sourceLessRetractApplied = false;
     for (;;) {
@@ -3024,12 +3091,17 @@ export class WorkspaceRuntime {
           return;
         }
         resets += 1;
-        await cache.clearServerStatePreservingOutbox();
+        if (result.reason === "epoch_mismatch") {
+          if (!(await this.#resetProtocolReplica(generation))) return;
+        } else {
+          await cache.clearServerStatePreservingOutbox();
+        }
         this.#syncCursor = null;
         await this.#refreshSnapshot(generation);
         if (generation !== this.#generation) return;
         state = await cache.load();
-        cursor = state.syncCursor ?? "0";
+        cursor = state.syncCursor;
+        if (cursor === null) throw new Error("Bootstrap did not establish a sync position");
         continue;
       }
       let repairedMembership = false;
@@ -3042,7 +3114,7 @@ export class WorkspaceRuntime {
           const repaired = await this.#repairMembershipEvent(event, generation, false);
           if (generation !== this.#generation || cache !== this.#cache) return;
           if (repaired) {
-            cursor = this.#syncCursor ?? event.workspaceSequence;
+            cursor = this.#syncCursor ?? event.position;
             repairedMembership = true;
             break;
           }
@@ -3077,7 +3149,7 @@ export class WorkspaceRuntime {
       if (generation !== this.#generation || cache !== this.#cache) return;
       if (
         this.#syncCursor === null ||
-        compareSequence(result.response.nextCursor, this.#syncCursor) > 0
+        compareSyncPositions(result.response.nextCursor, this.#syncCursor) > 0
       ) {
         this.#syncCursor = result.response.nextCursor;
       }
@@ -3110,15 +3182,15 @@ export class WorkspaceRuntime {
    */
   async #drainMembershipRepairGap(
     generation: number,
-    startCursor: string,
+    startCursor: SyncPosition,
   ): Promise<
-    | { readonly status: "ready"; readonly minimumCursor?: string }
+    | { readonly status: "ready"; readonly minimumCursor?: SyncPosition }
     | { readonly status: "retryable"; readonly retryAfterMs: number | null }
     | { readonly status: "blocked" }
   > {
     if (this.#protocolBlocked) return { status: "blocked" };
     let cursor = startCursor;
-    let targetHighWater: string | null = null;
+    let targetHighWater: SyncPosition | null = null;
     for (;;) {
       const result = await this.#client.syncWorkspace(cursor);
       if (generation !== this.#generation || this.#cache === null) {
@@ -3145,21 +3217,21 @@ export class WorkspaceRuntime {
 
       const { nextCursor, highWaterCursor } = result.response;
       if (
-        compareSequence(highWaterCursor, cursor) < 0 ||
-        compareSequence(nextCursor, cursor) < 0 ||
-        compareSequence(nextCursor, highWaterCursor) > 0
+        compareSyncPositions(highWaterCursor, cursor) < 0 ||
+        compareSyncPositions(nextCursor, cursor) < 0 ||
+        compareSyncPositions(nextCursor, highWaterCursor) > 0
       ) {
         throw new Error("The workspace sync response crossed its recovery high-water");
       }
       targetHighWater ??= highWaterCursor;
-      if (compareSequence(cursor, targetHighWater) >= 0) {
+      if (compareSyncPositions(cursor, targetHighWater) >= 0) {
         return { status: "ready", minimumCursor: cursor };
       }
-      if (compareSequence(nextCursor, cursor) <= 0) {
+      if (compareSyncPositions(nextCursor, cursor) <= 0) {
         throw new Error("The workspace sync response did not advance its recovery cursor");
       }
       cursor = nextCursor;
-      if (compareSequence(cursor, targetHighWater) >= 0) {
+      if (compareSyncPositions(cursor, targetHighWater) >= 0) {
         return { status: "ready", minimumCursor: cursor };
       }
       if (!result.response.hasMore) {
@@ -3193,11 +3265,11 @@ export class WorkspaceRuntime {
       return;
     }
     if (event.type === "system.connected") {
-      await this.#cache.advanceCursor(event.workspaceSequence);
+      await this.#cache.advanceCursor(event.position);
       if (generation !== this.#generation || this.#cache === null) return;
       await this.#client.acknowledgeWorkspaceEvent({
         scope: realtimeScope,
-        cursor: event.workspaceSequence,
+        cursor: event.position,
       });
       if (generation !== this.#generation || this.#cache === null) return;
       // A live socket makes a queued resync backoff pointless: the server took this cursor, so
@@ -3344,8 +3416,12 @@ export class WorkspaceRuntime {
       throw new Error("The workspace catalog did not match the signed-in session");
     }
 
-    const cursorBeforeMetadata = this.#syncCursor ?? "0";
-    if (compareSequence(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
+    const cursorBeforeMetadata = this.#syncCursor;
+    if (cursorBeforeMetadata === null) return false;
+    if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
+      return this.#refreshSnapshot(generation, undefined, snapshot);
+    }
+    if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
       await this.#repairAndFlush(generation, false, false);
       if (
         generation !== this.#generation ||
@@ -3361,18 +3437,19 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || cache !== this.#cache || loaded.bootstrap === null) {
       return false;
     }
-    const durableCursor = loaded.syncCursor ?? "0";
-    if (compareSequence(durableCursor, snapshot.syncCursor) < 0) {
+    const durableCursor = loaded.syncCursor;
+    if (durableCursor === null) return false;
+    if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
       throw new Error("The workspace metadata advanced beyond the repaired cursor");
     }
-    if (requireCurrentCatalog && compareSequence(snapshot.syncCursor, durableCursor) < 0) {
+    if (requireCurrentCatalog && compareSyncPositions(snapshot.syncCursor, durableCursor) < 0) {
       return false;
     }
 
     // When events landed after the metadata response, their cached catalog and member projection
     // is newer. Keep it while still taking workspace, identity-role, and feature metadata from the
     // response. The final catch-up closes the smaller race after this replacement.
-    const metadataAtDurableCursor = compareSequence(durableCursor, snapshot.syncCursor) === 0;
+    const metadataAtDurableCursor = compareSyncPositions(durableCursor, snapshot.syncCursor) === 0;
     const catalog = metadataAtDurableCursor
       ? snapshot.conversations
       : loaded.bootstrap.conversations;
@@ -3598,7 +3675,7 @@ export class WorkspaceRuntime {
     generation: number,
     cache: WorkspaceCache,
     marker: MembershipRepairMarker,
-    startCursor: string,
+    startCursor: SyncPosition,
   ): Promise<void> {
     if (generation !== this.#generation || cache !== this.#cache) return;
     const preflight = await this.#drainMembershipRepairGap(generation, startCursor);
@@ -3638,6 +3715,10 @@ export class WorkspaceRuntime {
     if (this.#protocolBlocked) return;
     if (generation !== this.#generation || this.#cache === null) return;
     this.#startupRealtimePending = true;
+    if (this.#realtimeScope === null && this.#syncCursor !== null) {
+      await this.#prepareRealtime(generation, this.#syncCursor);
+      if (generation !== this.#generation || this.#cache === null) return;
+    }
     await this.#repairAndFlush(generation);
     if (generation !== this.#generation || this.#cache === null) return;
     if (this.#syncRecoveryPending || this.#membershipRepairPending) {
@@ -3654,7 +3735,10 @@ export class WorkspaceRuntime {
     if (selectedConversationId !== null) this.#ensureConversationHistory(selectedConversationId);
   }
 
-  async #prepareRealtime(generation: number, after: string): Promise<RealtimeSessionScope | null> {
+  async #prepareRealtime(
+    generation: number,
+    after: SyncPosition,
+  ): Promise<RealtimeSessionScope | null> {
     if (this.#protocolBlocked) return null;
     const prepared = await this.#client.startWorkspaceRealtime(after);
     if (generation !== this.#generation) {
@@ -3683,8 +3767,9 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation) return;
     this.#syncCursor = loaded.syncCursor;
     this.#realtimeEpoch += 1;
+    if (loaded.syncCursor === null) throw new Error("Realtime requires a committed sync position");
     const prepared =
-      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor ?? "0"));
+      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor));
     if (prepared === null || generation !== this.#generation) return;
     try {
       await this.#client.activateWorkspaceRealtime(prepared);
@@ -3765,17 +3850,17 @@ export class WorkspaceRuntime {
       }
     }
 
-    const candidateCursor = this.#syncCursor ?? event.workspaceSequence;
+    const candidateCursor = this.#syncCursor ?? event.position;
     // A snapshot or mutation response may have advanced the local cursor beyond another accepted
     // repair. Cap this acknowledgement so a crash leaves that later event available for replay.
     const crossesAcceptedRepair = [...this.#acceptedMembershipRepairs].some(
       ([eventId, workspaceSequence]) =>
-        eventId !== event.id && compareSequence(workspaceSequence, candidateCursor) <= 0,
+        eventId !== event.id && compareSyncPositions(workspaceSequence, candidateCursor) <= 0,
     );
     if (realtimeScope !== null) {
       await this.#client.acknowledgeWorkspaceEvent({
         scope: realtimeScope,
-        cursor: crossesAcceptedRepair ? event.workspaceSequence : candidateCursor,
+        cursor: crossesAcceptedRepair ? event.position : candidateCursor,
       });
     }
     this.#acceptedMembershipRepairs.delete(event.id);
@@ -3950,11 +4035,11 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection)) return;
     await this.#client.acknowledgeWorkspaceEvent({
       scope: realtimeScope,
-      cursor: event.workspaceSequence,
+      cursor: event.position,
     });
     if (!this.#isProjectionCurrent(projection)) return;
     if (!applied) return;
-    this.#syncCursor = event.workspaceSequence;
+    this.#syncCursor = event.position;
     if (event.type === "member.updated") {
       // Announces THAT the directory changed, never what it now is. Re-read it instead of
       // projecting the payload, or disabling a member would re-assert it as a mention target.
@@ -4337,6 +4422,8 @@ export class WorkspaceRuntime {
         if (!patched || !this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) {
           return;
         }
+        const committedPosition = this.#syncCursor;
+        if (committedPosition === null) return;
         let result: Awaited<ReturnType<DesktopApi["sendConversationMessage"]>>;
         try {
           result = await this.#client.sendConversationMessage(next.operation);
@@ -4361,7 +4448,7 @@ export class WorkspaceRuntime {
           const persisted = await cache.upsertAcknowledgedMessage(
             result.response.message,
             id,
-            this.#syncCursor ?? "0",
+            this.#syncCursor ?? committedPosition,
             owner.signal,
           );
           if (!this.#isOutboxFlushOwnerCurrent(owner, next.operation.conversationId)) return;
@@ -4623,7 +4710,7 @@ export class WorkspaceRuntime {
     generation: number,
     cache: WorkspaceCache,
     marker: MembershipRepairMarker,
-    startCursor: string,
+    startCursor: SyncPosition,
     retryAfterMs: number | null,
   ): void {
     if (this.#protocolBlocked) return;

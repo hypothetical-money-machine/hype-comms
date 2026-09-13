@@ -1,3 +1,5 @@
+import { type SyncPosition } from "@hype-comms/contracts";
+import { testPosition } from "../../shared/test-support/sync-position";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -198,7 +200,7 @@ function memberUpdated(id: string, workspaceSequence: string, member: User): Wor
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: null,
-    workspaceSequence,
+    position: testPosition(workspaceSequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -219,7 +221,7 @@ function membershipChanged(
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId,
-    workspaceSequence,
+    position: testPosition(workspaceSequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -290,7 +292,7 @@ function groupConversationCreated(
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: id,
-    workspaceSequence,
+    position: testPosition(workspaceSequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -339,7 +341,7 @@ function bootstrapAt(
     conversations: [channel(CONVERSATION_ID, "general")],
     conversationsNextCursor: null,
     conversationsHasMore: false,
-    syncCursor,
+    syncCursor: testPosition(syncCursor),
     featureFlags: {
       channels: true,
       directMessages: true,
@@ -464,7 +466,7 @@ function taskUpdated(id: string, workspaceSequence: string, updated: Task): Work
     occurredAt: NOW,
     workspaceId: updated.workspaceId,
     conversationId: updated.conversationId,
-    workspaceSequence,
+    position: testPosition(workspaceSequence),
     conversationSequence: null,
     entityVersion: updated.version,
     delivery: "at_least_once",
@@ -479,7 +481,7 @@ const reactionAddedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: CONVERSATION_ID,
-  workspaceSequence: "11",
+  position: testPosition("11"),
   conversationSequence: "2",
   entityVersion: 1,
   delivery: "at_least_once",
@@ -490,7 +492,7 @@ const reactionRemovedEvent: WorkspaceEvent = {
   ...reactionAddedEvent,
   id: REACTION_REMOVED_EVENT_ID,
   type: "reaction.removed",
-  workspaceSequence: "12",
+  position: testPosition("12"),
 };
 
 /** A peer's event whose workspace sequence is below the sequence a send response reports. */
@@ -501,7 +503,7 @@ const peerEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: CONVERSATION_ID,
-  workspaceSequence: "11",
+  position: testPosition("11"),
   conversationSequence: "1",
   entityVersion: 1,
   delivery: "at_least_once",
@@ -521,7 +523,7 @@ function connectedAt(workspaceSequence: string): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: null,
-    workspaceSequence,
+    position: testPosition(workspaceSequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -536,7 +538,7 @@ const resyncRequired: ProductRealtimeEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: null,
-  workspaceSequence: "5",
+  position: testPosition("5"),
   conversationSequence: null,
   entityVersion: 1,
   delivery: "at_least_once",
@@ -560,7 +562,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     readonly clientMessageId: string;
   }[] = [];
   #snapshot: CachedWorkspaceState["bootstrap"] = null;
-  #syncCursor: string | null = null;
+  #syncCursor: SyncPosition | null = null;
   readonly #messages = new Map<string, Message>();
   readonly #reactions = new Map<string, Reaction>();
   readonly #tasks = new Map<string, Task>();
@@ -578,7 +580,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   upsertFailure: Error | null = null;
 
   get cursor(): string | null {
-    return this.#syncCursor;
+    return this.#syncCursor?.sequence ?? null;
   }
 
   async load(): Promise<CachedWorkspaceState> {
@@ -609,7 +611,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
-      BigInt(snapshot.syncCursor) < BigInt(this.#repairMarker.workspaceSequence)
+      BigInt(snapshot.syncCursor.sequence) < BigInt(this.#repairMarker.position.sequence)
     ) {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
@@ -617,7 +619,10 @@ class FakeWorkspaceCache implements WorkspaceCache {
     const barrier = this.snapshotReplaceBarriers.shift();
     if (barrier !== undefined) await barrier;
     signal?.throwIfAborted();
-    if (this.#syncCursor !== null && BigInt(snapshot.syncCursor) < BigInt(this.#syncCursor)) {
+    if (
+      this.#syncCursor !== null &&
+      BigInt(snapshot.syncCursor.sequence) < BigInt(this.#syncCursor.sequence)
+    ) {
       return false;
     }
     const reservations = retractReservationMap(this.#retractReservations);
@@ -673,13 +678,16 @@ class FakeWorkspaceCache implements WorkspaceCache {
     event: Extract<WorkspaceEvent, { type: "channel.membership_changed" }>,
   ): Promise<boolean> {
     if (this.#repairMarker !== null) return false;
-    if (this.#syncCursor !== null && BigInt(event.workspaceSequence) <= BigInt(this.#syncCursor)) {
+    if (
+      this.#syncCursor !== null &&
+      BigInt(event.position.sequence) <= BigInt(this.#syncCursor.sequence)
+    ) {
       return false;
     }
     this.#repairMarker = {
       kind: "membership",
       eventId: event.id,
-      workspaceSequence: event.workspaceSequence,
+      position: event.position,
       conversationId: event.conversationId,
       selfRemoval: event.payload.action === "removed" && event.payload.memberId === USER_ID,
     };
@@ -703,14 +711,17 @@ class FakeWorkspaceCache implements WorkspaceCache {
       throw new Error("Membership repair must complete before applying later events");
     }
     if (this.#events.has(event.id)) return false;
-    if (this.#syncCursor !== null && BigInt(event.workspaceSequence) <= BigInt(this.#syncCursor)) {
+    if (
+      this.#syncCursor !== null &&
+      BigInt(event.position.sequence) <= BigInt(this.#syncCursor.sequence)
+    ) {
       return false;
     }
     if (event.type === "channel.membership_changed" && this.#repairMarker === null) {
       await this.stageMembershipRepair(event);
     }
     this.#events.add(event.id);
-    this.#syncCursor = event.workspaceSequence;
+    this.#syncCursor = event.position;
     this.operations.push(`applyEvent:${event.type}`);
     if (event.type === "channel.membership_changed") {
       const marker = this.#repairMarker;
@@ -780,11 +791,14 @@ class FakeWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async advanceCursor(syncCursor: string): Promise<void> {
+  async advanceCursor(syncCursor: SyncPosition): Promise<void> {
     if (this.#repairMarker !== null) {
       throw new Error("Membership repair must complete before advancing the cursor");
     }
-    if (this.#syncCursor === null || BigInt(syncCursor) > BigInt(this.#syncCursor)) {
+    if (
+      this.#syncCursor === null ||
+      BigInt(syncCursor.sequence) > BigInt(this.#syncCursor.sequence)
+    ) {
       this.#syncCursor = syncCursor;
     }
   }
@@ -857,7 +871,7 @@ class FakeWorkspaceCache implements WorkspaceCache {
   async upsertAcknowledgedMessage(
     item: Message,
     expectedClientMessageId: string,
-    syncCursor: string,
+    syncCursor: SyncPosition,
     signal?: AbortSignal,
   ): Promise<boolean> {
     this.acknowledgedMessageAttempts += 1;
@@ -989,6 +1003,11 @@ class FakeWorkspaceCache implements WorkspaceCache {
     this.#repairMarker = null;
   }
 
+  async resetProtocolReplica(): Promise<void> {
+    await this.clearServerStatePreservingOutbox();
+    this.#retractReservations = [];
+  }
+
   async clearAll(): Promise<void> {
     await this.clearServerStatePreservingOutbox();
     this.#outbox.clear();
@@ -1081,7 +1100,7 @@ class FakeDesktopApi implements DesktopApi {
         readonly status: "accepted";
         readonly response: {
           readonly message: Message;
-          readonly syncCursor: string;
+          readonly syncCursor: SyncPosition;
           readonly attachments?: readonly Attachment[];
         };
       }
@@ -1134,7 +1153,7 @@ class FakeDesktopApi implements DesktopApi {
   readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
   readonly #notificationListeners = new Set<(action: NotificationAction) => void>();
   #preparedRealtimeScope: RealtimeSessionScope | null = null;
-  #preparedRealtimeCursor: string | null = null;
+  #preparedRealtimeCursor: SyncPosition | null = null;
   #activeRealtimeScope: RealtimeSessionScope | null = null;
   #nextRealtimeEpoch = 0;
 
@@ -1599,12 +1618,12 @@ class FakeDesktopApi implements DesktopApi {
         lastReadAt: NOW,
         updatedAt: NOW,
       },
-      syncCursor: "1",
+      syncCursor: testPosition("1"),
     };
   }
 
-  async syncWorkspace(after: string): Promise<SyncAttemptResult> {
-    this.syncedFrom.push(after);
+  async syncWorkspace(after: SyncPosition): Promise<SyncAttemptResult> {
+    this.syncedFrom.push(after.sequence);
     return await (this.syncResults.shift() ?? {
       status: "accepted",
       response: {
@@ -1616,7 +1635,7 @@ class FakeDesktopApi implements DesktopApi {
     });
   }
 
-  async startWorkspaceRealtime(after: string): Promise<RealtimeSessionScope> {
+  async startWorkspaceRealtime(after: SyncPosition): Promise<RealtimeSessionScope> {
     const scope = Object.freeze({
       userId: this.cryptoStatus.scope.userId,
       workspaceId: this.cryptoStatus.scope.workspaceId,
@@ -1632,7 +1651,7 @@ class FakeDesktopApi implements DesktopApi {
       throw new Error("The fake realtime scope was superseded");
     }
     this.#activeRealtimeScope = scope;
-    const preparedCursor = this.#preparedRealtimeCursor ?? "0";
+    const preparedCursor = this.#preparedRealtimeCursor?.sequence ?? "0";
     const acknowledgedCursor = this.acknowledged.at(-1);
     const startedCursor =
       acknowledgedCursor === undefined || BigInt(preparedCursor) > BigInt(acknowledgedCursor)
@@ -1657,7 +1676,7 @@ class FakeDesktopApi implements DesktopApi {
   }
 
   async acknowledgeWorkspaceEvent(input: RealtimeAcknowledgement): Promise<void> {
-    this.acknowledged.push(input.cursor);
+    this.acknowledged.push(input.cursor.sequence);
   }
 
   async getRealtimeState(): Promise<RealtimeConnectionState> {
@@ -1704,7 +1723,7 @@ class DeterministicMessageServer {
     }
     return {
       status: "accepted",
-      response: { message: canonical, attachments: [], syncCursor: "11" },
+      response: { message: canonical, attachments: [], syncCursor: testPosition("11") },
     };
   }
 
@@ -1718,7 +1737,7 @@ class DeterministicMessageServer {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: canonical.conversationSequence,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -1936,7 +1955,7 @@ describe("WorkspaceRuntime", () => {
     send.mockRejectedValueOnce(new Error("IPC session was replaced"));
     api.sendResults.push({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
     });
     try {
       await runtime.start(session);
@@ -1965,7 +1984,7 @@ describe("WorkspaceRuntime", () => {
     );
     api.sendResults.push({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
     });
     try {
       await runtime.start(session);
@@ -2047,7 +2066,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session, { offline: true });
 
     expect(runtime.state).toMatchObject({
-      bootstrap: expect.objectContaining({ syncCursor: "10" }),
+      bootstrap: expect.objectContaining({ syncCursor: testPosition("10") }),
       messages: [ownMessage],
       reactions: [ownReaction],
       tasks: [task],
@@ -2120,8 +2139,8 @@ describe("WorkspaceRuntime", () => {
         status: "accepted",
         response: {
           events: [server.event()],
-          nextCursor: "11",
-          highWaterCursor: "11",
+          nextCursor: testPosition("11"),
+          highWaterCursor: testPosition("11"),
           hasMore: false,
         },
       });
@@ -2209,8 +2228,8 @@ describe("WorkspaceRuntime", () => {
       status: "accepted",
       response: {
         events: [],
-        nextCursor: "10",
-        highWaterCursor: "10",
+        nextCursor: testPosition("10"),
+        highWaterCursor: testPosition("10"),
         hasMore: false,
       },
     });
@@ -2394,7 +2413,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -2404,7 +2423,7 @@ describe("WorkspaceRuntime", () => {
     await settle(
       () =>
         api.threadRequests.length === 2 &&
-        runtime.state.bootstrap?.syncCursor === "11" &&
+        runtime.state.bootstrap?.syncCursor.sequence === "11" &&
         runtime.state.messages.some((message) => message.id === THREAD_REPLY_ID),
       "open thread refresh",
     );
@@ -2512,8 +2531,8 @@ describe("WorkspaceRuntime", () => {
       status: "accepted",
       response: {
         events: [peerEvent],
-        nextCursor: "12",
-        highWaterCursor: "12",
+        nextCursor: testPosition("12"),
+        highWaterCursor: testPosition("12"),
         hasMore: false,
       },
     });
@@ -2566,15 +2585,15 @@ describe("WorkspaceRuntime", () => {
             occurredAt: NOW,
             workspaceId: WORKSPACE_ID,
             conversationId: CONVERSATION_ID,
-            workspaceSequence: "11",
+            position: testPosition("11"),
             conversationSequence: null,
             entityVersion: 1,
             delivery: "at_least_once",
             payload: { memberId: AGENT_ID, action: "added" },
           },
         ],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     });
@@ -2664,15 +2683,15 @@ describe("WorkspaceRuntime", () => {
             occurredAt: NOW,
             workspaceId: WORKSPACE_ID,
             conversationId: CONVERSATION_ID,
-            workspaceSequence: "11",
+            position: testPosition("11"),
             conversationSequence: closedThreadReply.conversationSequence,
             entityVersion: 2,
             delivery: "at_least_once",
             payload: { messageId: closedThreadReply.id, deletedAt: NOW },
           },
         ],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     });
@@ -2790,15 +2809,15 @@ describe("WorkspaceRuntime", () => {
             occurredAt: NOW,
             workspaceId: WORKSPACE_ID,
             conversationId: CONVERSATION_ID,
-            workspaceSequence: "11",
+            position: testPosition("11"),
             conversationSequence: hiddenMessage.conversationSequence,
             entityVersion: 2,
             delivery: "at_least_once",
             payload: { messageId: hiddenMessage.id, deletedAt: NOW },
           },
         ],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     });
@@ -2904,8 +2923,8 @@ describe("WorkspaceRuntime", () => {
           status: "accepted",
           response: {
             events: [],
-            nextCursor: "10",
-            highWaterCursor: "10",
+            nextCursor: testPosition("10"),
+            highWaterCursor: testPosition("10"),
             hasMore: false,
           },
         },
@@ -2935,7 +2954,7 @@ describe("WorkspaceRuntime", () => {
     };
     const cache = await cacheWithDurableMembershipMarker([privateMessage]);
     const purged = await cache.load();
-    expect(purged.repairMarker?.workspaceSequence).toBe("11");
+    expect(purged.repairMarker?.position).toEqual(testPosition("11"));
     expect(purged.messages).not.toContainEqual(privateMessage);
     expect(purged.bootstrap?.conversations.map((item) => item.conversation.id)).not.toContain(
       SECOND_CONVERSATION_ID,
@@ -2958,14 +2977,14 @@ describe("WorkspaceRuntime", () => {
     const firstGapEvent: WorkspaceEvent = {
       ...peerEvent,
       id: "20000000-0000-4000-8000-000000000060",
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: "2",
       payload: { message: firstGapMessage, mentionedUserIds: [] },
     };
     const secondGapEvent: WorkspaceEvent = {
       ...peerEvent,
       id: "20000000-0000-4000-8000-000000000061",
-      workspaceSequence: "14",
+      position: testPosition("14"),
       conversationSequence: "3",
       payload: { message: secondGapMessage, mentionedUserIds: [] },
     };
@@ -2989,16 +3008,16 @@ describe("WorkspaceRuntime", () => {
     expect(api.bootstrapRequests).toBe(0);
     expect(api.acknowledged).toEqual([]);
     expect(api.startedCursors).toEqual([]);
-    expect(stillBlocked.syncCursor).toBe("11");
-    expect(stillBlocked.repairMarker?.workspaceSequence).toBe("11");
+    expect(stillBlocked.syncCursor).toEqual(testPosition("11"));
+    expect(stillBlocked.repairMarker?.position).toEqual(testPosition("11"));
     expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(1);
 
     preflight.resolve({
       status: "accepted",
       response: {
         events: [firstGapEvent, secondGapEvent],
-        nextCursor: "14",
-        highWaterCursor: "14",
+        nextCursor: testPosition("14"),
+        highWaterCursor: testPosition("14"),
         hasMore: false,
       },
     });
@@ -3050,8 +3069,8 @@ describe("WorkspaceRuntime", () => {
       status: "accepted",
       response: {
         events: [],
-        nextCursor: "14",
-        highWaterCursor: "14",
+        nextCursor: testPosition("14"),
+        highWaterCursor: testPosition("14"),
         hasMore: false,
       },
     });
@@ -3064,8 +3083,8 @@ describe("WorkspaceRuntime", () => {
     expect(api.acknowledged).toEqual([]);
     expect(api.startedCursors).toEqual([]);
     expect(api.bootstrapRequests).toBe(1);
-    expect(durable.syncCursor).toBe("11");
-    expect(durable.repairMarker?.workspaceSequence).toBe("11");
+    expect(durable.syncCursor).toEqual(testPosition("11"));
+    expect(durable.repairMarker?.position).toEqual(testPosition("11"));
     expect(runtime.state).toMatchObject({
       busy: false,
       stale: true,
@@ -3097,8 +3116,8 @@ describe("WorkspaceRuntime", () => {
     expect(api.bootstrapRequests).toBe(0);
     expect(api.acknowledged).toEqual([]);
     expect(api.startedCursors).toEqual([]);
-    expect(durable.syncCursor).toBe("11");
-    expect(durable.repairMarker?.workspaceSequence).toBe("11");
+    expect(durable.syncCursor).toEqual(testPosition("11"));
+    expect(durable.repairMarker?.position).toEqual(testPosition("11"));
     expect(runtime.state).toMatchObject({ busy: false, stale: true, error });
     await runtime.stop();
   });
@@ -3114,8 +3133,8 @@ describe("WorkspaceRuntime", () => {
           status: "accepted",
           response: {
             events: [],
-            nextCursor: "14",
-            highWaterCursor: "14",
+            nextCursor: testPosition("14"),
+            highWaterCursor: testPosition("14"),
             hasMore: false,
           },
         },
@@ -3124,7 +3143,7 @@ describe("WorkspaceRuntime", () => {
 
       await runtime.start(session);
       expect(api.syncedFrom).toEqual(["11"]);
-      expect((await cache.load()).repairMarker?.workspaceSequence).toBe("11");
+      expect((await cache.load()).repairMarker?.position).toEqual(testPosition("11"));
       expect(api.startedCursors).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(999);
@@ -3156,7 +3175,7 @@ describe("WorkspaceRuntime", () => {
     expect(api.bootstrapRequests).toBe(1);
     expect(api.acknowledged).toEqual(["14"]);
     expect(api.startedCursors).toEqual(["14"]);
-    expect(repaired.syncCursor).toBe("14");
+    expect(repaired.syncCursor).toEqual(testPosition("14"));
     expect(repaired.repairMarker).toBeNull();
     expect(runtime.state).toMatchObject({ busy: false, stale: false, error: null });
   });
@@ -3189,8 +3208,8 @@ describe("WorkspaceRuntime", () => {
       status: "accepted",
       response: {
         events: [],
-        nextCursor: "10",
-        highWaterCursor: "10",
+        nextCursor: testPosition("10"),
+        highWaterCursor: testPosition("10"),
         hasMore: false,
       },
     });
@@ -3238,7 +3257,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: leaked.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3284,7 +3303,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: peerMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3324,7 +3343,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: liveMessage.conversationSequence,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -3349,7 +3368,7 @@ describe("WorkspaceRuntime", () => {
       members: [renamedUser, peer],
       conversations: [refreshedSummary],
     });
-    api.channelResults.push({ conversation: refreshedSummary, syncCursor: "11" });
+    api.channelResults.push({ conversation: refreshedSummary, syncCursor: testPosition("11") });
     await runtime.archiveChannel(CONVERSATION_ID);
 
     expect(runtime.state.messages.some((message) => message.id === liveMessage.id)).toBe(false);
@@ -3362,7 +3381,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: liveMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3418,7 +3437,7 @@ describe("WorkspaceRuntime", () => {
     const reaction: Reaction = { ...ownReaction, messageId: latestReply.id };
     liveApi.emitWorkspaceEvent({
       ...reactionAddedEvent,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: latestReply.conversationSequence,
       payload: { reaction },
     });
@@ -3430,7 +3449,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: latestReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3516,7 +3535,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: latestReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3561,7 +3580,7 @@ describe("WorkspaceRuntime", () => {
       nextCursor: null,
     });
     const retracted = { ...ownThreadReply, deletedAt: NOW, version: 2, updatedAt: NOW };
-    api.retractResults.push({ message: retracted, syncCursor: "11" });
+    api.retractResults.push({ message: retracted, syncCursor: testPosition("11") });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     await runtime.openThread(OWN_MESSAGE_ID);
@@ -3578,7 +3597,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: ownThreadReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3645,7 +3664,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: liveReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3696,7 +3715,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: ownMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3755,7 +3774,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: threadReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3806,7 +3825,7 @@ describe("WorkspaceRuntime", () => {
       threadsSupported: true,
       nextCursor: null,
     });
-    api.retractResults.push({ message: retracted, syncCursor: "11" });
+    api.retractResults.push({ message: retracted, syncCursor: testPosition("11") });
     const cache = new MemoryWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -3820,7 +3839,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: ownThreadReply.conversationSequence,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -3834,7 +3853,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: ownThreadReply.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -3880,7 +3899,7 @@ describe("WorkspaceRuntime", () => {
     });
     api.retractResults.push({
       message: { ...ownMessage, deletedAt: NOW, version: 2, updatedAt: NOW },
-      syncCursor: "11",
+      syncCursor: testPosition("11"),
     });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
@@ -3940,7 +3959,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: ownMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -4041,7 +4060,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: hiddenMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -4111,7 +4130,7 @@ describe("WorkspaceRuntime", () => {
         occurredAt: NOW,
         workspaceId: WORKSPACE_ID,
         conversationId: CONVERSATION_ID,
-        workspaceSequence: "11",
+        position: testPosition("11"),
         conversationSequence: hiddenMessage.conversationSequence,
         entityVersion: 2,
         delivery: "at_least_once",
@@ -4201,7 +4220,7 @@ describe("WorkspaceRuntime", () => {
           conversationSequence: "4",
         },
         attachments: [],
-        syncCursor: "12",
+        syncCursor: testPosition("12"),
       },
     });
     api.bootstrapFailures = 1;
@@ -4216,15 +4235,15 @@ describe("WorkspaceRuntime", () => {
             occurredAt: NOW,
             workspaceId: WORKSPACE_ID,
             conversationId: CONVERSATION_ID,
-            workspaceSequence: "11",
+            position: testPosition("11"),
             conversationSequence: hiddenMessage.conversationSequence,
             entityVersion: 2,
             delivery: "at_least_once",
             payload: { messageId: hiddenMessage.id, deletedAt: NOW },
           },
         ],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     });
@@ -4286,7 +4305,7 @@ describe("WorkspaceRuntime", () => {
         occurredAt: NOW,
         workspaceId: WORKSPACE_ID,
         conversationId: CONVERSATION_ID,
-        workspaceSequence: "11",
+        position: testPosition("11"),
         conversationSequence: hiddenMessage.conversationSequence,
         entityVersion: 2,
         delivery: "at_least_once",
@@ -4299,7 +4318,7 @@ describe("WorkspaceRuntime", () => {
 
       // A different local projection commits after the metadata cache read. The older catalog
       // must not satisfy the source-less retraction just because its replacement loses the race.
-      await cache.advanceCursor("12");
+      await cache.advanceCursor(testPosition("12"));
       api.bootstrap = bootstrapAt("12", {
         members: [user, peer],
         conversations: [afterRetract],
@@ -4383,7 +4402,7 @@ describe("WorkspaceRuntime", () => {
       { threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: latestThreadReply },
     ]);
 
-    api.channelResults.push({ conversation: beforeRetract, syncCursor: "10" });
+    api.channelResults.push({ conversation: beforeRetract, syncCursor: testPosition("10") });
     const snapshotReload = deferred<void>();
     cache.loadBarriers.push(snapshotReload.promise);
     const archiving = runtime.archiveChannel(CONVERSATION_ID);
@@ -4405,7 +4424,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: hiddenMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -4441,8 +4460,8 @@ describe("WorkspaceRuntime", () => {
       threadsSupported: true,
       nextCursor: null,
     });
-    api.addReactionResults.push({ reaction: ownReaction, syncCursor: "11" });
-    api.removeReactionResults.push({ removed: true, syncCursor: "12" });
+    api.addReactionResults.push({ reaction: ownReaction, syncCursor: testPosition("11") });
+    api.removeReactionResults.push({ removed: true, syncCursor: testPosition("12") });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
@@ -4492,7 +4511,7 @@ describe("WorkspaceRuntime", () => {
       description: "Include keyboard moves.",
       updatedAt: "2026-07-24T12:02:00.000Z",
     };
-    api.taskMutationResults.push({ task: updated, syncCursor: "12" });
+    api.taskMutationResults.push({ task: updated, syncCursor: testPosition("12") });
     await runtime.updateTask(task.id, {
       title: updated.title,
       description: updated.description,
@@ -4509,7 +4528,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: task.version,
       delivery: "at_least_once",
@@ -4526,7 +4545,7 @@ describe("WorkspaceRuntime", () => {
       rank: "2048",
       updatedAt: "2026-07-24T12:03:00.000Z",
     };
-    api.taskMutationResults.push({ task: moved, syncCursor: "13" });
+    api.taskMutationResults.push({ task: moved, syncCursor: testPosition("13") });
     await runtime.moveTask(task.id, "in_progress", null);
     expect(api.taskMutations[1]).toMatchObject({
       taskId: task.id,
@@ -4834,8 +4853,8 @@ describe("WorkspaceRuntime", () => {
           membershipChanged(MEMBER_EVENT_ID, "11"),
           taskUpdated(SECOND_MEMBER_EVENT_ID, "12", currentTask),
         ],
-        nextCursor: "12",
-        highWaterCursor: "12",
+        nextCursor: testPosition("12"),
+        highWaterCursor: testPosition("12"),
         hasMore: false,
       },
     });
@@ -4877,7 +4896,7 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     cache.reactionUpsertFailures = 1;
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    api.addReactionResults.push({ reaction: ownReaction, syncCursor: "11" });
+    api.addReactionResults.push({ reaction: ownReaction, syncCursor: testPosition("11") });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
@@ -5082,8 +5101,8 @@ describe("WorkspaceRuntime", () => {
         status: "accepted",
         response: {
           events: [],
-          nextCursor: "10",
-          highWaterCursor: "10",
+          nextCursor: testPosition("10"),
+          highWaterCursor: testPosition("10"),
           hasMore: false,
         },
       });
@@ -5175,7 +5194,7 @@ describe("WorkspaceRuntime", () => {
     // The send is allocated workspace sequence 12 while a peer's event 11 is still in flight.
     api.sendResults.push({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("12") },
     });
     await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
     await settle(() => runtime.state.outbox.length === 0, "send acknowledgement");
@@ -5226,7 +5245,7 @@ describe("WorkspaceRuntime", () => {
             messageId: "20000000-0000-4000-8000-0000000000ab",
           },
         ],
-        syncCursor: "11",
+        syncCursor: testPosition("11"),
       },
     });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
@@ -5286,7 +5305,7 @@ describe("WorkspaceRuntime", () => {
     });
     api.sendResults.push({
       status: "accepted",
-      response: { message: laterReply, syncCursor: "12" },
+      response: { message: laterReply, syncCursor: testPosition("12") },
     });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
@@ -5304,7 +5323,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: earlierReply.conversationSequence,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -5329,7 +5348,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: laterReply.conversationSequence,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -5368,7 +5387,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -5419,7 +5438,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -5459,7 +5478,7 @@ describe("WorkspaceRuntime", () => {
         ...createdSummary,
         conversation: { ...createdSummary.conversation, name: "Alpha Team" },
       },
-      syncCursor: "12",
+      syncCursor: testPosition("12"),
     });
 
     await runtime.createChannel(
@@ -5527,7 +5546,7 @@ describe("WorkspaceRuntime", () => {
     await settle(() => api.createdChannels.length === 1, "channel request");
     await runtime.stop();
     const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
-    resolveResult?.({ conversation: createdSummary, syncCursor: "12" });
+    resolveResult?.({ conversation: createdSummary, syncCursor: testPosition("12") });
 
     await expect(creation).resolves.toBeUndefined();
     expect(runtime.state.bootstrap).toBeNull();
@@ -5641,7 +5660,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
     cache.upsertFailure = new Error("disk full");
     const createdSummary = channel(CREATED_CHANNEL_ID, "alpha-team");
-    api.channelResults.push({ conversation: createdSummary, syncCursor: "12" });
+    api.channelResults.push({ conversation: createdSummary, syncCursor: testPosition("12") });
 
     await expect(
       runtime.createChannel("Alpha Team", "alpha-team", null, "workspace"),
@@ -5709,7 +5728,7 @@ describe("WorkspaceRuntime", () => {
     };
     const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
     const delayedHistory = deferred<MessageHistoryResponse>();
-    api.directConversationResults.push({ conversation: createdDm, syncCursor: "12" });
+    api.directConversationResults.push({ conversation: createdDm, syncCursor: testPosition("12") });
     api.historyResults.set(DIRECT_CONVERSATION_ID, [delayedHistory.promise]);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5783,7 +5802,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.stop();
     resolveResult?.({
       conversation: directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]),
-      syncCursor: "12",
+      syncCursor: testPosition("12"),
     });
 
     await expect(opening).resolves.toBeUndefined();
@@ -5801,7 +5820,7 @@ describe("WorkspaceRuntime", () => {
       api.sendResults.push({ status: "retryable", reason: "network", retryAfterMs: 5_000 });
       api.sendResults.push({
         status: "accepted",
-        response: { message: ownMessage, attachments: [], syncCursor: "11" },
+        response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
       });
 
       await runtime.sendMessage(CONVERSATION_ID, "Mine", []);
@@ -5822,7 +5841,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5841,7 +5860,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
     });
     await drain();
 
@@ -5871,7 +5890,7 @@ describe("WorkspaceRuntime", () => {
     };
     api.sendResults.push({ status: "permanent", reason: "validation" }, replacementSend.promise, {
       status: "accepted",
-      response: { message: secondMessage, syncCursor: "12" },
+      response: { message: secondMessage, syncCursor: testPosition("12") },
     });
     const cache = new FakeWorkspaceCache();
     cache.outboxUpdateBarriers.push(Promise.resolve(), delayedPermanentPatch.promise);
@@ -5899,7 +5918,7 @@ describe("WorkspaceRuntime", () => {
 
     replacementSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("11") },
     });
     await settle(() => api.sent.length === 3, "replacement owner second conversation send");
     await restarted;
@@ -5927,7 +5946,7 @@ describe("WorkspaceRuntime", () => {
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("12") },
     });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5954,7 +5973,7 @@ describe("WorkspaceRuntime", () => {
 
     hungSend.resolve({
       status: "accepted",
-      response: { message: ownMessage, attachments: [], syncCursor: "12" },
+      response: { message: ownMessage, attachments: [], syncCursor: testPosition("12") },
     });
     await drain();
 
@@ -6216,7 +6235,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: peerMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -6256,7 +6275,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: peerMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",
@@ -6513,7 +6532,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: alphaId,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -6560,7 +6579,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -6618,7 +6637,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -6702,7 +6721,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -6715,7 +6734,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: thirdConversationId,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7038,7 +7057,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7053,7 +7072,7 @@ describe("WorkspaceRuntime", () => {
     api.emitWorkspaceEvent({
       ...peerEvent,
       id: "20000000-0000-4000-8000-00000000004a",
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: "2",
       payload: { message: staleMessage, mentionedUserIds: [] },
     });
@@ -7119,7 +7138,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7152,7 +7171,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "12",
+      position: testPosition("12"),
       conversationSequence: "1",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7205,7 +7224,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7226,7 +7245,7 @@ describe("WorkspaceRuntime", () => {
           conversationId: SECOND_CONVERSATION_ID,
         },
         attachments: [],
-        syncCursor: "12",
+        syncCursor: testPosition("12"),
       },
     });
     await drain();
@@ -7291,7 +7310,7 @@ describe("WorkspaceRuntime", () => {
           conversationId: SECOND_CONVERSATION_ID,
         },
         attachments: [],
-        syncCursor: "12",
+        syncCursor: testPosition("12"),
       },
     });
     await drain();
@@ -7345,7 +7364,7 @@ describe("WorkspaceRuntime", () => {
           conversationId: SECOND_CONVERSATION_ID,
         },
         attachments: [],
-        syncCursor: "12",
+        syncCursor: testPosition("12"),
       },
     });
     await settle(
@@ -7417,7 +7436,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7493,7 +7512,7 @@ describe("WorkspaceRuntime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: SECOND_CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -7571,8 +7590,8 @@ describe("WorkspaceRuntime", () => {
       status: "accepted",
       response: {
         events: [memberUpdated(MEMBER_EVENT_ID, "11", agent)],
-        nextCursor: "11",
-        highWaterCursor: "11",
+        nextCursor: testPosition("11"),
+        highWaterCursor: testPosition("11"),
         hasMore: false,
       },
     });
@@ -7603,8 +7622,8 @@ describe("WorkspaceRuntime", () => {
           memberUpdated(SECOND_MEMBER_EVENT_ID, "12", agent),
           memberUpdated(THIRD_MEMBER_EVENT_ID, "13", agent),
         ],
-        nextCursor: "13",
-        highWaterCursor: "13",
+        nextCursor: testPosition("13"),
+        highWaterCursor: testPosition("13"),
         hasMore: false,
       },
     });
@@ -7677,8 +7696,8 @@ describe("WorkspaceRuntime", () => {
         status: "accepted",
         response: {
           events: [],
-          nextCursor: "11",
-          highWaterCursor: "11",
+          nextCursor: testPosition("11"),
+          highWaterCursor: testPosition("11"),
           hasMore: false,
         },
       });
@@ -8092,7 +8111,7 @@ describe("WorkspaceRuntime", () => {
         occurredAt: NOW,
         workspaceId: WORKSPACE_ID,
         conversationId: SECOND_CONVERSATION_ID,
-        workspaceSequence: "11",
+        position: testPosition("11"),
         conversationSequence: null,
         entityVersion: 1,
         delivery: "at_least_once",
@@ -8101,7 +8120,7 @@ describe("WorkspaceRuntime", () => {
       api.emitWorkspaceEvent({
         ...reactionAddedEvent,
         id: "20000000-0000-4000-8000-00000000002e",
-        workspaceSequence: "12",
+        position: testPosition("12"),
       });
 
       await settle(() => api.stopRequests === 1, "malformed membership repair block");
@@ -8126,7 +8145,7 @@ describe("WorkspaceRuntime", () => {
       expect(blocked.repairMarker).toEqual({
         kind: "membership",
         eventId: "20000000-0000-4000-8000-00000000002d",
-        workspaceSequence: "11",
+        position: testPosition("11"),
         conversationId: SECOND_CONVERSATION_ID,
         selfRemoval: true,
       });
@@ -8218,4 +8237,53 @@ describe("WorkspaceRuntime", () => {
       expect(runtime.state.bootstrap?.currentUser.user.title).toBeUndefined();
     });
   });
+});
+
+it("drops an old realtime frame queued behind a cache write when HTTP resets the protocol epoch", async () => {
+  vi.useFakeTimers();
+  const api = new FakeDesktopApi(bootstrapAt("10"));
+  const cache = new MemoryWorkspaceCache();
+  const runtime = runtimeWith(api, cache);
+  const pendingApply = deferred<void>();
+  const pendingBootstrap = deferred<HumanWorkspaceBootstrapResponse>();
+  const originalApply = cache.applyEvent.bind(cache);
+  const apply = vi.spyOn(cache, "applyEvent").mockImplementationOnce(async (...args) => {
+    await pendingApply.promise;
+    return originalApply(...args);
+  });
+  const acknowledge = vi.spyOn(api, "acknowledgeWorkspaceEvent");
+  const reset = vi.spyOn(cache, "resetProtocolReplica");
+  try {
+    api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 1000 });
+    await runtime.start(session);
+    api.emitWorkspaceEvent(peerEvent);
+    await settle(() => apply.mock.calls.length === 1, "blocked old-epoch cache write");
+    api.emitWorkspaceEvent(connectedAt("99"));
+    const nextPosition = testPosition("20", "eeeeeeee-0000-4000-8000-000000000002");
+    api.bootstrap = bootstrapAt("20", { syncCursor: nextPosition });
+    api.bootstrapResults.push(pendingBootstrap.promise);
+    api.syncResults.push({ status: "reset_required", reason: "epoch_mismatch" });
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle(
+      () => reset.mock.calls.length === 1 && api.bootstrapRequests === 2,
+      "HTTP epoch reset before bootstrap completes",
+    );
+    pendingApply.resolve();
+    await drain();
+    expect((await cache.load()).syncCursor).toBeNull();
+    expect(acknowledge.mock.calls.some(([input]) => input.cursor.sequence === "99")).toBe(false);
+    pendingBootstrap.resolve(api.bootstrap);
+    await drain();
+    const loaded = await cache.load();
+    expect(loaded.syncCursor).toEqual(nextPosition);
+    expect(loaded.messages).toEqual([]);
+    expect(acknowledge.mock.calls.some(([input]) => input.cursor.sequence === "99")).toBe(false);
+    expect(runtime.state.error).toBeNull();
+    expect(runtime.state.bootstrap?.syncCursor).toEqual(nextPosition);
+  } finally {
+    pendingApply.resolve();
+    pendingBootstrap.resolve(api.bootstrap);
+    await runtime.stop();
+    vi.useRealTimers();
+  }
 });
