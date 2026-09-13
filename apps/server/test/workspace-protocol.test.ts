@@ -33,6 +33,18 @@ describe("workspace protocol registration", () => {
     },
   );
 
+  it.each(["/livez", "/readyz"])(
+    "marks the unversioned operational route %s so a healthy server is never read as an old one",
+    async (url) => {
+      const app = await buildApp();
+      apps.push(app);
+      const response = await app.inject({ method: "GET", url });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers[WORKSPACE_PROTOCOL_HEADER]).toBe("2");
+    },
+  );
+
   it("marks a supported API error so clients can distinguish a missing resource from an old server", async () => {
     const app = await buildApp();
     apps.push(app);
