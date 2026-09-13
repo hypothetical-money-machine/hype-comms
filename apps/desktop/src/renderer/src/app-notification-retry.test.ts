@@ -1,9 +1,9 @@
 import { testPosition } from "../../shared/test-support/sync-position";
+import { createAppClient, createAppRuntimes } from "./app-test-fixture";
 // @vitest-environment happy-dom
 
 import "fake-indexeddb/auto";
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   AiChannelState,
   ChatSessionState,
@@ -14,21 +14,15 @@ import type {
   NotificationActionDrainRequest,
   NotificationActivityUpdate,
   NotificationContext,
-  NotificationState,
   RealtimeSessionScope,
-  ThemeState,
-  UpdateState,
 } from "@hype-comms/contracts";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
-import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
-import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
-import type { ThemeRuntime } from "./theme-runtime";
 import { clearPersistentWorkspaceCaches } from "./workspace-cache";
 
 const USER_ID = "20000000-0000-4000-8000-000000000001";
@@ -147,14 +141,6 @@ const notificationAction: NotificationAction = {
   threadRootId: null,
 };
 
-const notificationState: NotificationState = {
-  version: 1,
-  devicePreference: "enabled",
-  contentPreviewPreference: "disabled",
-  nativeSupport: "supported",
-  osPermission: "granted",
-};
-
 const aiChannelState: AiChannelState = {
   version: 1,
   generation: 1,
@@ -213,178 +199,157 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
   const bootstrapResponse = options.bootstrap ?? bootstrap;
   const aiStateResponse = options.aiChannelState ?? aiChannelState;
 
-  const client = {
-    platform: "linux",
-    isHeadless: true,
-    getSessionState: async () => session,
-    retrySession: async () => session,
-    onSessionChanged: (listener: (next: ChatSessionState) => void) => {
-      sessionListeners.add(listener);
-      return () => sessionListeners.delete(listener);
-    },
-    signOut: async () => ({ status: "signed-out" }) as const,
-    getAppVersion: async () => "0.1.21-test",
-    getUpdateState: async (): Promise<UpdateState> => ({ status: "idle" }),
-    checkForUpdates: async () => undefined,
-    restartToInstallUpdate: async () => undefined,
-    onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async () =>
-      options.persistentCache === true
-        ? ({
-            mode: "persistent",
-            scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
-            keyVersion: 1,
-          } as const)
-        : ({
-            mode: "memory_only",
-            scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
-            reason: "credential_store_unavailable",
-          } as const),
-    encryptCacheRecords: async (input: Parameters<DesktopApi["encryptCacheRecords"]>[0]) => ({
-      items: input.items.map((item) => ({
-        store: item.store,
-        recordId: item.recordId,
-        schemaVersion: 1 as const,
-        value: {
-          version: 1 as const,
-          keyVersion: 1 as const,
+  const client = createAppClient({
+    session,
+    bootstrap: () => bootstrapResponse,
+    overrides: {
+      onSessionChanged: (listener: (next: ChatSessionState) => void) => {
+        sessionListeners.add(listener);
+        return () => sessionListeners.delete(listener);
+      },
+      initializeCacheCrypto: async () =>
+        options.persistentCache === true
+          ? ({
+              mode: "persistent",
+              scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+              keyVersion: 1,
+            } as const)
+          : ({
+              mode: "memory_only",
+              scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
+              reason: "credential_store_unavailable",
+            } as const),
+      listMessageReactions: async () => {
+        reactionHydrations += 1;
+        return { reactions: [] };
+      },
+      getAiChannelState: async () => aiStateResponse,
+      startAiChannel: async () => aiStateResponse,
+      chooseAiChannelWorkspace: async () => aiStateResponse,
+      newAiChannelSession: async () => aiStateResponse,
+      sendAiChannelPrompt: async () => aiStateResponse,
+      cancelAiChannelPrompt: async () => aiStateResponse,
+      respondAiChannelPermission: async () => aiStateResponse,
+
+      signOut: async () => ({ status: "signed-out" }) as const,
+      encryptCacheRecords: async (input: Parameters<DesktopApi["encryptCacheRecords"]>[0]) => ({
+        items: input.items.map((item) => ({
+          store: item.store,
+          recordId: item.recordId,
           schemaVersion: 1 as const,
-          nonce: "AAAAAAAAAAAAAAAA",
-          ciphertext: btoa(String.fromCharCode(...new TextEncoder().encode(item.plaintext)))
-            .replaceAll("+", "-")
-            .replaceAll("/", "_")
-            .replaceAll("=", ""),
-        },
-      })),
-    }),
-    decryptCacheRecords: async (input: Parameters<DesktopApi["decryptCacheRecords"]>[0]) => ({
-      items: input.items.map((item) => ({
-        store: item.store,
-        recordId: item.recordId,
-        schemaVersion: 1 as const,
-        plaintext: new TextDecoder().decode(
-          Uint8Array.from(
-            atob(
-              item.value.ciphertext
-                .replaceAll("-", "+")
-                .replaceAll("_", "/")
-                .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+          value: {
+            version: 1 as const,
+            keyVersion: 1 as const,
+            schemaVersion: 1 as const,
+            nonce: "AAAAAAAAAAAAAAAA",
+            ciphertext: btoa(String.fromCharCode(...new TextEncoder().encode(item.plaintext)))
+              .replaceAll("+", "-")
+              .replaceAll("/", "_")
+              .replaceAll("=", ""),
+          },
+        })),
+      }),
+      decryptCacheRecords: async (input: Parameters<DesktopApi["decryptCacheRecords"]>[0]) => ({
+        items: input.items.map((item) => ({
+          store: item.store,
+          recordId: item.recordId,
+          schemaVersion: 1 as const,
+          plaintext: new TextDecoder().decode(
+            Uint8Array.from(
+              atob(
+                item.value.ciphertext
+                  .replaceAll("-", "+")
+                  .replaceAll("_", "/")
+                  .padEnd(Math.ceil(item.value.ciphertext.length / 4) * 4, "="),
+              ),
+              (character) => character.charCodeAt(0),
             ),
-            (character) => character.charCodeAt(0),
           ),
-        ),
-      })),
-    }),
-    resetCacheCrypto: async () => undefined,
-    getWorkspaceBootstrap: async () => {
-      bootstrapRequests += 1;
-      if (failFirstBootstrap && bootstrapRequests === 1) {
-        throw new Error("The workspace is temporarily unavailable");
-      }
-      return bootstrapResponse;
+        })),
+      }),
+      resetCacheCrypto: async () => undefined,
+      getWorkspaceBootstrap: async () => {
+        bootstrapRequests += 1;
+        if (failFirstBootstrap && bootstrapRequests === 1) {
+          throw new Error("The workspace is temporarily unavailable");
+        }
+        return bootstrapResponse;
+      },
+      getConversationMessages: async () => ({
+        attachments: [],
+        reactions: [],
+        snapshotPosition: testPosition("10"),
+        messages: [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      }),
+      getMessageById: async () => {
+        messageRequests += 1;
+        if (options.delayFirstMessage === true && messageRequests === 1)
+          return { ...(await firstMessage), attachments: [] };
+        return { message: notificationMessage, attachments: [] };
+      },
+      listConversationFiles: async () => ({
+        snapshotPosition: testPosition("10"),
+        files: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
+      openConversationFile: async () => ({ opened: true }),
+      listConversationTasks: async () => ({
+        snapshotPosition: testPosition("10"),
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
+        realtimeStarts += 1;
+        return Object.freeze({
+          userId: session.userId,
+          workspaceId: session.workspaceId,
+          epoch: realtimeStarts,
+        });
+      },
+      activateWorkspaceRealtime: async () => undefined,
+      stopWorkspaceRealtime: async () => undefined,
+      onWorkspaceEvent: () => () => undefined,
+      getNotificationContext: async (): Promise<NotificationContext> => {
+        contextRequests += 1;
+        return failFirstBootstrap && contextRequests === 1
+          ? {
+              version: 1,
+              status: "inactive",
+              sessionGeneration: null,
+              rendererSessionGeneration: activeContext.rendererSessionGeneration,
+              userId: null,
+              workspaceId: null,
+            }
+          : activeContext;
+      },
+      reportNotificationActivity: async (activity: NotificationActivityUpdate) => {
+        activities.push(activity);
+        if (options.delayFirstActivity === true && activities.length === 1) {
+          await firstActivity;
+        }
+      },
+      drainNotificationActions: async (ready: NotificationActionDrainRequest) => {
+        drains.push(ready);
+        return {
+          ...ready,
+          actions: options.notificationAction === undefined ? [] : [options.notificationAction],
+        };
+      },
+      acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
+        acknowledgements.push(acknowledgement);
+      },
+      onNotificationAction: () => () => undefined,
     },
-    getConversationMessages: async () => ({
-      attachments: [],
-      reactions: [],
-      snapshotPosition: testPosition("10"),
-      messages: [],
-      threadSummaries: [],
-      threadsSupported: true,
-      nextCursor: null,
-    }),
-    getMessageById: async () => {
-      messageRequests += 1;
-      if (options.delayFirstMessage === true && messageRequests === 1) return firstMessage;
-      return { message: notificationMessage };
-    },
-    listMessageReactions: async () => {
-      reactionHydrations += 1;
-      return { reactions: [] };
-    },
-    listConversationFiles: async () => ({
-      snapshotPosition: testPosition("10"),
-      files: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    listMessageAttachments: async () => ({ attachments: [] }),
-    chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
-    openConversationFile: async () => ({ opened: true }),
-    listConversationTasks: async () => ({
-      snapshotPosition: testPosition("10"),
-      tasks: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    syncWorkspace: async (after: string) =>
-      ({
-        status: "accepted",
-        response: {
-          events: [],
-          nextCursor: after,
-          highWaterCursor: after,
-          hasMore: false,
-        },
-      }) as const,
-    startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
-      realtimeStarts += 1;
-      return Object.freeze({
-        userId: session.userId,
-        workspaceId: session.workspaceId,
-        epoch: realtimeStarts,
-      });
-    },
-    activateWorkspaceRealtime: async () => undefined,
-    stopWorkspaceRealtime: async () => undefined,
-    acknowledgeWorkspaceEvent: async () => undefined,
-    onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: () => () => undefined,
-    getNotificationContext: async (): Promise<NotificationContext> => {
-      contextRequests += 1;
-      return failFirstBootstrap && contextRequests === 1
-        ? {
-            version: 1,
-            status: "inactive",
-            sessionGeneration: null,
-            rendererSessionGeneration: activeContext.rendererSessionGeneration,
-            userId: null,
-            workspaceId: null,
-          }
-        : activeContext;
-    },
-    reportNotificationActivity: async (activity: NotificationActivityUpdate) => {
-      activities.push(activity);
-      if (options.delayFirstActivity === true && activities.length === 1) {
-        await firstActivity;
-      }
-    },
-    drainNotificationActions: async (ready: NotificationActionDrainRequest) => {
-      drains.push(ready);
-      return {
-        ...ready,
-        actions: options.notificationAction === undefined ? [] : [options.notificationAction],
-      };
-    },
-    acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
-      acknowledgements.push(acknowledgement);
-    },
-    onNotificationAction: () => () => undefined,
-    getNotificationState: async () => notificationState,
-    setNotificationPreference: async () => notificationState,
-    refreshNotificationCapability: async () => notificationState,
-    onNotificationStateChanged: () => () => undefined,
-    getAiChannelState: async () => aiStateResponse,
-    startAiChannel: async () => aiStateResponse,
-    chooseAiChannelWorkspace: async () => aiStateResponse,
-    newAiChannelSession: async () => aiStateResponse,
-    sendAiChannelPrompt: async () => aiStateResponse,
-    cancelAiChannelPrompt: async () => aiStateResponse,
-    respondAiChannelPermission: async () => aiStateResponse,
-    onAiChannelStateChanged: () => () => undefined,
-  };
+  });
 
   return {
-    client: client as unknown as DesktopApi,
+    client,
     activities,
     drains,
     acknowledgements,
@@ -415,43 +380,6 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
   };
 }
 
-function createTheme(): ThemeRuntime {
-  const state: ThemeState = {
-    preference: "system",
-    resolvedThemeId: "dark",
-    resolvedColorScheme: "dark",
-  };
-  return {
-    state,
-    subscribe: () => () => undefined,
-    setPreference: async () => state,
-  } as unknown as ThemeRuntime;
-}
-
-function createCompactMode(): CompactModeRuntime {
-  return {
-    enabled: false,
-    subscribe: () => () => undefined,
-    toggle: async () => false,
-  } as unknown as CompactModeRuntime;
-}
-
-function createSidebarPosition(): SidebarPositionRuntime {
-  return {
-    position: "left",
-    subscribe: () => () => undefined,
-    setPosition: () => undefined,
-  } as unknown as SidebarPositionRuntime;
-}
-
-function createFencedBlockquotes(): FencedBlockquoteRuntime {
-  return {
-    mode: "off",
-    subscribe: () => () => undefined,
-    setMode: () => undefined,
-  } as unknown as FencedBlockquoteRuntime;
-}
-
 afterEach(async () => {
   cleanup();
   await clearPersistentWorkspaceCaches();
@@ -467,11 +395,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -505,11 +430,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -555,11 +477,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -604,11 +523,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -650,11 +566,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
@@ -681,11 +594,8 @@ describe("App notification session recovery", () => {
     render(
       createElement(App, {
         client: harness.client,
-        theme: createTheme(),
-        compactMode: createCompactMode(),
+        ...createAppRuntimes(harness.client),
         devicePreferences: createTestDevicePreferencesRuntime(),
-        fencedBlockquotes: createFencedBlockquotes(),
-        sidebarPosition: createSidebarPosition(),
       }),
     );
 
