@@ -1,9 +1,6 @@
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
 import {
   entityIdSchema,
-  listConversationsResponseSchema,
-  listMembersResponseSchema,
-  listPublicChannelsResponseSchema,
-  workspaceBootstrapResponseSchema,
   type ConversationSummary,
   type PublicChannelDirectoryEntry,
   type User,
@@ -29,11 +26,7 @@ async function fetchAllConversations(client: ApiClient): Promise<readonly Conver
   const seen = new Set<string>();
   let after: string | undefined;
   for (let page = 0; page < 100; page += 1) {
-    const response = await client.request({
-      path: "/v2/conversations",
-      query: { limit: 100, after },
-      responseSchema: listConversationsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.conversations({ limit: 100, after }) });
     conversations.push(...response.conversations);
     if (!response.hasMore) return conversations;
     if (response.nextCursor === null || seen.has(response.nextCursor)) {
@@ -62,11 +55,7 @@ async function fetchAllPublicChannels(
   const seen = new Set<string>();
   let after: string | undefined;
   for (let page = 0; page < 100; page += 1) {
-    const response = await client.request({
-      path: "/v2/channels",
-      query: { limit: 100, after },
-      responseSchema: listPublicChannelsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.publicChannels({ limit: 100, after }) });
     channels.push(...response.channels);
     if (!response.hasMore) return channels;
     if (response.nextCursor === null || seen.has(response.nextCursor)) {
@@ -94,9 +83,7 @@ export async function listAllPublicChannels(
 export async function listMembers(client: ApiClient): Promise<readonly User[]> {
   const cached = memberCache.get(client);
   if (cached !== undefined) return cached;
-  const pending = client
-    .request({ path: "/v2/members", responseSchema: listMembersResponseSchema })
-    .then((response) => response.members);
+  const pending = client.request({ ...endpoints.members() }).then((response) => response.members);
   memberCache.set(client, pending);
   return pending;
 }
@@ -105,10 +92,7 @@ async function currentUserId(client: ApiClient): Promise<string> {
   const cached = currentUserIdCache.get(client);
   if (cached !== undefined) return cached;
   const pending = client
-    .request({
-      path: "/v2/bootstrap",
-      responseSchema: workspaceBootstrapResponseSchema,
-    })
+    .request({ ...endpoints.bootstrap() })
     .then((bootstrap) => bootstrap.currentUser.user.id);
   currentUserIdCache.set(client, pending);
   return pending;
