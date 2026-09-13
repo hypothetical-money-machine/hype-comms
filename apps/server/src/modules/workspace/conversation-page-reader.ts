@@ -59,8 +59,6 @@ export async function readConversationPage(
   identity: AuthenticatedIdentity,
   after: string | null,
   limit: number,
-  includeGroupDirectMessages: boolean,
-  includeSystemChannels: boolean,
 ): Promise<ConversationPage> {
   const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), CONVERSATION_PAGE_MAX_LIMIT);
   const result = await client.query<ConversationRow>(
@@ -68,8 +66,6 @@ export async function readConversationPage(
          FROM conversations AS conversation
         WHERE conversation.workspace_id = $1
           AND ${conversationVisibilitySql("conversation", "$2")}
-          AND ($4::boolean OR conversation.kind <> 'group_direct_message')
-          AND ($6::boolean OR NOT conversation.is_system)
           AND (
             $3::uuid IS NULL
             OR (
@@ -86,8 +82,6 @@ export async function readConversationPage(
                    FROM conversations AS anchor
                   WHERE anchor.id = $3::uuid
                     AND anchor.workspace_id = $1
-                    AND ($4::boolean OR anchor.kind <> 'group_direct_message')
-                    AND ($6::boolean OR NOT anchor.is_system)
                     AND (
                       ${conversationVisibilitySql("anchor", "$2")}
                       OR (
@@ -106,15 +100,8 @@ export async function readConversationPage(
           )
         ORDER BY conversation.kind, lower(coalesce(conversation.name, '')),
                  conversation.created_at, conversation.id
-        LIMIT $5`,
-    [
-      identity.currentUser.workspaceId,
-      identity.currentUser.user.id,
-      after,
-      includeGroupDirectMessages,
-      pageLimit + 1,
-      includeSystemChannels,
-    ],
+        LIMIT $4`,
+    [identity.currentUser.workspaceId, identity.currentUser.user.id, after, pageLimit + 1],
   );
   const rows = result.rows.slice(0, pageLimit);
   const summaries = await readConversationSummaries(client, identity.currentUser.user.id, rows);

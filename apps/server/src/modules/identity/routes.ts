@@ -1,9 +1,7 @@
 import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   AGENT_ENROLLMENT_AUTHORIZATION_SCHEME,
-  agentEnrollmentPolicyResponseSchema,
   agentEnrollmentNoBodyRequestSchema,
+  agentEnrollmentPolicyResponseSchema,
   agentEnrollmentResponseSchema,
   agentTokenSecretSchema,
   authKitLogoutUrlHeaderName,
@@ -13,28 +11,26 @@ import {
   createAgentTokenRequestSchema,
   createAgentTokenResponseSchema,
   createInvitationSchema,
-  clientCapabilitiesHeaderSchema,
   currentPrincipalSchema,
   currentUserSchema,
   deviceSessionSchema,
   entityIdSchema,
   idempotencyKeySchema,
   invitationSchema,
+  listAgentEnrollmentsResponseSchema,
   listAgentsResponseSchema,
   listAgentTokensResponseSchema,
-  listAgentEnrollmentsResponseSchema,
   listInvitationsResponseSchema,
   magicLinkLandingQuerySchema,
   magicLinkRequestedSchema,
-  MEMBER_PROFILES_CAPABILITY,
-  requestMagicLinkSchema,
-  requestAgentEnrollmentSchema,
   redeemAgentEnrollmentResponseSchema,
+  requestAgentEnrollmentSchema,
+  requestMagicLinkSchema,
   reviewAgentEnrollmentRequestSchema,
   sessionTokenSchema,
+  updateAgentEnrollmentPolicyRequestSchema,
   updateProfileRequestSchema,
   updateProfileResponseSchema,
-  updateAgentEnrollmentPolicyRequestSchema,
   verifyMagicLinkSchema,
   type AgentScope,
   type CurrentUser,
@@ -42,14 +38,13 @@ import {
 } from "@hype-comms/contracts";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { routeModule, validateRequest } from "../../http/route-registrar.js";
-import { humanPolicy, publicPolicy, workspacePolicy } from "../../http/authentication-policies.js";
-
 import { ApiError } from "../../errors.js";
+import { humanPolicy, publicPolicy, workspacePolicy } from "../../http/authentication-policies.js";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
-import { rejectAmbiguousCredentials, type AuthenticatedRequestIdentity } from "./request-auth.js";
 import type { AgentEnrollmentActor, AgentEnrollmentModule } from "./agent-enrollment.js";
 import type { AuthKitService } from "./authkit-service.js";
+import { rejectAmbiguousCredentials, type AuthenticatedRequestIdentity } from "./request-auth.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
 
 const COOKIE_NAME = "hype_comms_session";
@@ -65,8 +60,7 @@ const DESKTOP_CALLBACK_SCHEMES = {
   development: "hype-comms-dev",
 } as const;
 const PROFILE_UPDATE_LIMIT = 10;
-const PROFILE_UPDATE_WINDOW_MS = 15 * 60 * 1_000;
-
+const PROFILE_UPDATE_WINDOW_MS = 15 * 60 * 1000;
 interface IdentityRoutesOptions {
   readonly service: IdentityService;
   readonly agentEnrollment?: AgentEnrollmentModule;
@@ -135,7 +129,10 @@ function requiredEnrollmentCredential(request: Pick<FastifyRequest, "headers">) 
 function sessionCookie(
   token: string,
   secure: boolean,
-  options: { readonly expiresAt?: string; readonly clear?: boolean } = {},
+  options: {
+    readonly expiresAt?: string;
+    readonly clear?: boolean;
+  } = {},
 ): string {
   return [
     `${COOKIE_NAME}=${token}`,
@@ -170,63 +167,17 @@ function requiredSessionToken(request: FastifyRequest): SessionToken {
 async function requireCurrentUser(
   request: FastifyRequest,
   service: IdentityService,
-): Promise<{ readonly token: SessionToken; readonly currentUser: CurrentUser }> {
+): Promise<{
+  readonly token: SessionToken;
+  readonly currentUser: CurrentUser;
+}> {
   const token = requiredSessionToken(request);
   const currentUser = await service.authenticate(token);
   if (currentUser === null) throw new ApiError(401, "UNAUTHORIZED", "Sign in to continue");
   return { token, currentUser };
 }
-
-/**
- * Desktop releases through v0.1.11 validate the public user object strictly and predate the
- * additive `kind` discriminator. Omit the human-only constant on identity responses; newer
- * contracts default the missing value back to `"human"`, so both generations accept this wire
- * shape while internal identity objects remain discriminated.
- */
-export function supportsMemberProfiles(value: string | string[] | undefined): boolean {
-  if (value === undefined) return false;
-  if (typeof value !== "string")
-    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  return parsed.data.includes(MEMBER_PROFILES_CAPABILITY);
-}
-
-function supportsAgentEffectiveScopes(value: string | string[] | undefined): boolean {
-  if (value === undefined) return false;
-  if (typeof value !== "string") {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  }
-  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  return parsed.data.includes(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
-}
-
-function supportsAgentEnrollmentReviewChannels(value: string | string[] | undefined): boolean {
-  if (value === undefined) return false;
-  if (typeof value !== "string") {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  }
-  const parsed = clientCapabilitiesHeaderSchema.safeParse(value);
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid client capabilities");
-  return parsed.data.includes(AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY);
-}
-
-function withoutTitle<T extends { readonly title?: unknown }>(user: T): Omit<T, "title"> {
-  const { title, ...legacy } = user;
-  void title;
-  return legacy;
-}
-
-function withoutAgentTitle<T extends { readonly user: { readonly title?: unknown } }>(agent: T) {
-  return { ...agent, user: withoutTitle(agent.user) };
-}
-
-export function desktopCurrentUserResponse(currentUser: CurrentUser, memberProfiles = false) {
-  const parsed = currentUserSchema.parse(currentUser);
-  const { kind, ...user } = parsed.user;
-  void kind;
-  return { ...parsed, user: memberProfiles ? user : withoutTitle(user) };
+export function desktopCurrentUserResponse(currentUser: CurrentUser) {
+  return currentUserSchema.parse(currentUser);
 }
 
 export function setSessionCookie(
@@ -406,16 +357,9 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
           return { session, currentUser };
         },
       },
-      handler: async ({ identity: { session, currentUser }, request, reply }) => {
+      handler: async ({ identity: { session, currentUser }, reply }) => {
         setSessionCookie(reply, session, cookieSecure);
-        return reply
-          .code(200)
-          .send(
-            desktopCurrentUserResponse(
-              currentUser,
-              supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
-            ),
-          );
+        return reply.code(200).send(desktopCurrentUserResponse(currentUser));
       },
     });
 
@@ -425,20 +369,15 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       policy: workspace,
       scopes: [],
       request: {},
-      handler: async ({ identity, request }) => {
-        const memberProfiles = supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]);
+      handler: async ({ identity }) => {
         return identity.credentialType === "session"
-          ? desktopCurrentUserResponse(identity.currentUser, memberProfiles)
+          ? desktopCurrentUserResponse(identity.currentUser)
           : (() => {
               const principal = currentPrincipalSchema.parse({
                 ...identity.currentUser,
-                ...(supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"])
-                  ? { effectiveScopes: identity.authorizationScopes }
-                  : {}),
+                ...{ effectiveScopes: identity.authorizationScopes },
               });
-              return memberProfiles
-                ? principal
-                : { ...principal, user: withoutTitle(principal.user) };
+              return principal;
             })();
       },
     });
@@ -452,17 +391,15 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       beforeValidation: ({ identity: { currentUser }, reply }) => {
         const retryAfterMs = profileUpdateThrottle.recordAttempt(currentUser.user.id);
         if (retryAfterMs > 0) {
-          void reply.header("retry-after", Math.ceil(retryAfterMs / 1_000).toString());
+          void reply.header("retry-after", Math.ceil(retryAfterMs / 1000).toString());
           throw new ApiError(429, "RATE_LIMITED", "Too many requests");
         }
       },
-      handler: async ({ identity: { currentUser }, request, input: { body } }) => {
+      handler: async ({ identity: { currentUser }, input: { body } }) => {
         const response = updateProfileResponseSchema.parse({
           user: await service.updateProfileTitle(currentUser.user.id, body.title),
         });
-        return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
-          ? response
-          : { ...response, user: withoutTitle(response.user) };
+        return response;
       },
     });
 
@@ -665,12 +602,9 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       beforeAuthentication: ({ reply }) => {
         void reply.header("cache-control", "no-store");
       },
-      handler: async ({ identity, request }) => {
+      handler: async ({ identity }) => {
         return listAgentEnrollmentsResponseSchema.parse({
-          enrollments: await requireEnrollmentModule().list(
-            enrollmentActor(identity),
-            supportsAgentEnrollmentReviewChannels(request.headers["x-hype-comms-capabilities"]),
-          ),
+          enrollments: await requireEnrollmentModule().list(enrollmentActor(identity)),
         });
       },
     });
@@ -806,13 +740,11 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       policy: human,
       scopes: [],
       request: {},
-      handler: async ({ identity, request }) => {
+      handler: async ({ identity }) => {
         const response = listAgentsResponseSchema.parse({
           agents: await service.listAgents(identity.currentUser.user.id),
         });
-        return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
-          ? response
-          : { ...response, agents: response.agents.map(withoutAgentTitle) };
+        return response;
       },
     });
 
@@ -831,16 +763,10 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
           );
         }
       },
-      handler: async ({ identity, request, reply, input: { body: input } }) => {
+      handler: async ({ identity, reply, input: { body: input } }) => {
         const agent = await service.createAgent(identity.currentUser.user.id, input);
         const response = createAgentResponseSchema.parse({ agent });
-        return reply
-          .code(201)
-          .send(
-            supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
-              ? response
-              : { ...response, agent: withoutAgentTitle(response.agent) },
-          );
+        return reply.code(201).send(response);
       },
     });
 
@@ -876,17 +802,12 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       },
       handler: async ({
         identity,
-        request,
         input: {
           params: { id: agentId },
         },
       }) => {
         return listAgentTokensResponseSchema.parse({
-          tokens: await service.listAgentTokens(
-            identity.currentUser.user.id,
-            agentId,
-            supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
-          ),
+          tokens: await service.listAgentTokens(identity.currentUser.user.id, agentId),
         });
       },
     });
@@ -902,7 +823,6 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
       },
       handler: async ({
         identity,
-        request,
         reply,
         input: {
           params: { id: agentId },
@@ -923,12 +843,7 @@ export const identityRoutes = routeModule<IdentityRoutesOptions>(
           .code(201)
           .send(
             createAgentTokenResponseSchema.parse(
-              await service.createAgentToken(
-                identity.currentUser.user.id,
-                agentId,
-                input,
-                supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
-              ),
+              await service.createAgentToken(identity.currentUser.user.id, agentId, input),
             ),
           );
       },

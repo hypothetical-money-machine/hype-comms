@@ -34,7 +34,6 @@ import {
   sha256Hex,
   type AttachmentStore,
 } from "./file-store.js";
-import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import { fingerprintApiRequest, runIdempotentMutation } from "./idempotency.js";
 import { UUID_PATTERN } from "./pagination.js";
 import { iso } from "./records.js";
@@ -45,8 +44,10 @@ import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 function encodeFilesCursor(createdAt: string, id: string): string {
   return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
 }
-
-function decodeFilesCursor(cursor: string | undefined): { createdAt: string; id: string } | null {
+function decodeFilesCursor(cursor: string | undefined): {
+  createdAt: string;
+  id: string;
+} | null {
   if (cursor === undefined) return null;
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
@@ -337,7 +338,11 @@ export class WorkspaceAttachmentOperations {
     }
     const client = await this.pool.connect();
     try {
-      const visible = await client.query<{ id: string } & QueryResultRow>(
+      const visible = await client.query<
+        {
+          id: string;
+        } & QueryResultRow
+      >(
         `SELECT message.id
            FROM messages AS message
            JOIN conversations AS conversation ON conversation.id = message.conversation_id
@@ -361,7 +366,6 @@ export class WorkspaceAttachmentOperations {
   async readFileContent(
     identity: AuthenticatedIdentity,
     attachmentId: string,
-    supportsGroupDirectMessages: boolean,
   ): Promise<{
     readonly attachment: Attachment;
     readonly bytes: Buffer;
@@ -406,9 +410,6 @@ export class WorkspaceAttachmentOperations {
       );
       const row = result.rows[0];
       if (row === undefined) throw new DomainError("not_found", "File not found");
-      if (!supportsGroupDirectMessages && row.conversation_kind === "group_direct_message") {
-        throw new GroupDirectClientUpgradeRequiredError();
-      }
       const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
       const contentSha256 = row.content_sha256.toString("hex");
       if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {

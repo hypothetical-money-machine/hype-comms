@@ -38,7 +38,6 @@ import {
   readConversationPage,
 } from "./conversation-page-reader.js";
 import { readConversationSummaries } from "./conversation-summary-reader.js";
-import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import {
   fingerprintApiRequest,
   lockIdempotencyScope,
@@ -47,7 +46,6 @@ import {
 import {
   iso,
   mapConversation,
-  mapStoredConversation,
   nullableIso,
   participants,
   type ConversationRow,
@@ -92,7 +90,13 @@ interface CommunicationPathRow extends QueryResultRow {
  * The canonical low/high ordering behind the `(workspace_id, dm_user_low_id, dm_user_high_id)`
  * unique index. Every DM lookup and insert derives its pair here so the two cannot drift.
  */
-function directMessagePair(actorId: string, memberId: string): { low: string; high: string } {
+function directMessagePair(
+  actorId: string,
+  memberId: string,
+): {
+  low: string;
+  high: string;
+} {
   const pair = [actorId, memberId].sort();
   const low = pair[0];
   const high = pair[1];
@@ -126,111 +130,6 @@ export class WorkspaceConversationOperations {
       client.release();
     }
   }
-
-  async requireGroupDirectMessagesForConversations(
-    identity: AuthenticatedIdentity,
-    conversationIds: readonly string[],
-    supported: boolean,
-  ): Promise<void> {
-    if (supported || conversationIds.length === 0) return;
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT EXISTS (
-         SELECT 1
-           FROM conversations AS conversation
-          WHERE conversation.workspace_id = $1
-            AND conversation.id = ANY($3::uuid[])
-            AND conversation.kind = 'group_direct_message'
-            AND ${conversationVisibilitySql("conversation", "$2")}
-       ) AS blocked`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, conversationIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
-  async requireGroupDirectMessagesForMessages(
-    identity: AuthenticatedIdentity,
-    messageIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "active" | "retractable" = "any",
-  ): Promise<void> {
-    if (supported || messageIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "active"
-        ? "AND message.deleted_at IS NULL"
-        : eligibility === "retractable"
-          ? `AND message.author_id = $2
-             AND (
-               message.deleted_at IS NOT NULL
-               OR (
-                 message.edited_at IS NULL
-                 AND clock_timestamp() <= message.created_at + interval '5 minutes'
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM messages AS message
-           JOIN conversations AS conversation
-             ON conversation.id = message.conversation_id
-            AND conversation.workspace_id = message.workspace_id
-          WHERE message.workspace_id = $1
-            AND message.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, messageIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
-  async requireGroupDirectMessagesForAttachments(
-    identity: AuthenticatedIdentity,
-    attachmentIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "content-write" | "complete" = "any",
-  ): Promise<void> {
-    if (supported || attachmentIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "content-write"
-        ? `AND attachment.uploaded_by = $2
-           AND attachment.status = 'pending'
-           AND (
-             attachment.upload_expires_at IS NULL
-             OR attachment.upload_expires_at > clock_timestamp()
-           )`
-        : eligibility === "complete"
-          ? `AND attachment.uploaded_by = $2
-             AND (
-               attachment.status = 'ready'
-               OR (
-                 attachment.status = 'pending'
-                 AND (
-                   attachment.upload_expires_at IS NULL
-                   OR attachment.upload_expires_at > clock_timestamp()
-                 )
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM attachments AS attachment
-           JOIN conversations AS conversation
-             ON conversation.id = attachment.conversation_id
-            AND conversation.workspace_id = attachment.workspace_id
-          WHERE attachment.workspace_id = $1
-            AND attachment.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, attachmentIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
   /**
    * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
    * workspace-membership join makes each best-effort authorization reflect revocation immediately
@@ -242,9 +141,12 @@ export class WorkspaceConversationOperations {
     workspaceId: string,
     userId: string,
     conversationId: string,
-    includeGroupDirectMessages: boolean,
   ): Promise<boolean> {
-    const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
+    const result = await this.pool.query<
+      {
+        visible: boolean;
+      } & QueryResultRow
+    >(
       `SELECT EXISTS (
          SELECT 1
            FROM conversations AS conversation
@@ -255,9 +157,8 @@ export class WorkspaceConversationOperations {
           WHERE conversation.id = $3
             AND conversation.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
-            AND ($4::boolean OR conversation.kind <> 'group_direct_message')
        ) AS visible`,
-      [workspaceId, userId, conversationId, includeGroupDirectMessages],
+      [workspaceId, userId, conversationId],
     );
     return result.rows[0]?.visible ?? false;
   }
@@ -434,21 +335,12 @@ export class WorkspaceConversationOperations {
     identity: AuthenticatedIdentity,
     after: string | undefined,
     limit: number,
-    includeGroupDirectMessages = true,
-    includeSystemChannels = false,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
     return runWorkspaceTransaction(
       this.pool,
       async (client) => {
-        const page = await readConversationPage(
-          client,
-          identity,
-          anchorId,
-          limit,
-          includeGroupDirectMessages,
-          includeSystemChannels,
-        );
+        const page = await readConversationPage(client, identity, anchorId, limit);
         return listConversationsResponseSchema.parse({
           conversations: page.conversations,
           nextCursor: page.nextCursor,
@@ -595,7 +487,6 @@ export class WorkspaceConversationOperations {
     identity: AuthenticatedIdentity,
     input: CreateChannelRequest,
     idempotencyKey?: string,
-    announcementCapability = false,
     correlationId?: string,
     defaultAgentAgencyEnabled = true,
   ): Promise<ConversationMutationResponse> {
@@ -622,7 +513,6 @@ export class WorkspaceConversationOperations {
           );
           const allowed =
             announcementChannelsAvailable &&
-            announcementCapability &&
             principal.kind === "human" &&
             principal.role === "owner";
           if (!allowed) {
@@ -685,7 +575,7 @@ export class WorkspaceConversationOperations {
           type: "channel.created",
           conversation: row,
           payload: {
-            conversation: mapStoredConversation(row),
+            conversation: mapConversation(row),
             participantIds: audienceUserIds,
           },
           audienceUserIds,
@@ -934,7 +824,7 @@ export class WorkspaceConversationOperations {
         type: "channel.archived",
         conversation: row,
         payload: {
-          conversation: mapStoredConversation(row),
+          conversation: mapConversation(row),
           participantIds: audienceUserIds,
         },
         audienceUserIds,
@@ -981,7 +871,7 @@ export class WorkspaceConversationOperations {
           type: "direct_conversation.created",
           conversation: row,
           payload: {
-            conversation: mapStoredConversation(row),
+            conversation: mapConversation(row),
             participantIds,
           },
           audienceUserIds: participantIds,
@@ -1055,7 +945,7 @@ export class WorkspaceConversationOperations {
           const event = await this.events.insert(client, identity, {
             type: "direct_conversation.created",
             conversation,
-            payload: { conversation: mapStoredConversation(conversation), participantIds },
+            payload: { conversation: mapConversation(conversation), participantIds },
             audienceUserIds: participantIds,
           });
           return conversationMutationResponseSchema.parse({
@@ -1134,7 +1024,10 @@ export class WorkspaceConversationOperations {
   async #requireHumansOnlyCreator(
     client: PoolClient,
     identity: AuthenticatedIdentity,
-  ): Promise<{ readonly role: "owner" | "member"; readonly kind: "human" }> {
+  ): Promise<{
+    readonly role: "owner" | "member";
+    readonly kind: "human";
+  }> {
     const result = await client.query<
       {
         user_id: string;
@@ -1169,7 +1062,11 @@ export class WorkspaceConversationOperations {
   ): Promise<void> {
     const actorId = identity.currentUser.user.id;
     const participantIds = [...new Set([actorId, ...memberIds])].sort();
-    const result = await client.query<{ id: string } & QueryResultRow>(
+    const result = await client.query<
+      {
+        id: string;
+      } & QueryResultRow
+    >(
       `SELECT membership.user_id AS id
          FROM workspace_memberships AS membership
          JOIN users AS user_account ON user_account.id = membership.user_id
@@ -1362,7 +1259,11 @@ export class WorkspaceConversationOperations {
     conversation: ConversationRow,
   ): Promise<"owner" | "member" | null> {
     if (conversation.kind === "direct_message") return null;
-    const result = await client.query<{ role: "owner" | "member" } & QueryResultRow>(
+    const result = await client.query<
+      {
+        role: "owner" | "member";
+      } & QueryResultRow
+    >(
       `SELECT role
          FROM conversation_memberships
         WHERE conversation_id = $1
@@ -1383,7 +1284,11 @@ export class WorkspaceConversationOperations {
         [workspaceId],
       );
     }
-    const result = await client.query<{ humans_only_channels_available: boolean } & QueryResultRow>(
+    const result = await client.query<
+      {
+        humans_only_channels_available: boolean;
+      } & QueryResultRow
+    >(
       `SELECT humans_only_channels_available
          FROM workspaces
         WHERE id = $1

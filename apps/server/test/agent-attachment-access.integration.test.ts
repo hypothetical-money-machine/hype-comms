@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  ATTACHMENTS_CAPABILITY,
   DEFAULT_AGENCY_AGENT_SCOPES,
   apiErrorEnvelopeSchema,
   completeFileUploadResponseSchema,
@@ -14,7 +13,7 @@ import {
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
@@ -177,7 +176,7 @@ describe("default agent attachment access", () => {
     const bytes = Buffer.from("read only", "utf8");
     const response = await app.inject({
       method: "POST",
-      url: "/v1/files/uploads",
+      url: "/v2/files/uploads",
       headers: {
         authorization: `Bearer ${defaultAgentToken}`,
         "idempotency-key": randomUUID(),
@@ -201,7 +200,7 @@ describe("default agent attachment access", () => {
     const app = await appWithAttachments();
     const minted = await app.inject({
       method: "POST",
-      url: `/v1/agents/${agentId}/tokens`,
+      url: `/v2/agents/${agentId}/tokens`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: {
         label: "Explicit writer",
@@ -217,7 +216,7 @@ describe("default agent attachment access", () => {
 
     const unknownScope = await app.inject({
       method: "POST",
-      url: `/v1/agents/${agentId}/tokens`,
+      url: `/v2/agents/${agentId}/tokens`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
       payload: {
         label: "Invalid writer",
@@ -234,7 +233,7 @@ describe("default agent attachment access", () => {
     const contentSha256 = sha256Hex(bytes);
     const upload = await app.inject({
       method: "POST",
-      url: "/v1/files/uploads",
+      url: "/v2/files/uploads",
       headers: {
         authorization: `Bearer ${writeAgentToken}`,
         "idempotency-key": randomUUID(),
@@ -252,7 +251,7 @@ describe("default agent attachment access", () => {
 
     const deniedBytes = await app.inject({
       method: "PUT",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: {
         authorization: `Bearer ${defaultAgentToken}`,
         "content-type": "text/plain",
@@ -264,7 +263,7 @@ describe("default agent attachment access", () => {
 
     const acceptedBytes = await app.inject({
       method: "PUT",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: {
         authorization: `Bearer ${writeAgentToken}`,
         "content-type": "text/plain",
@@ -275,7 +274,7 @@ describe("default agent attachment access", () => {
 
     const deniedCompletion = await app.inject({
       method: "POST",
-      url: `/v1/files/${attachment.id}/complete`,
+      url: `/v2/files/${attachment.id}/complete`,
       headers: {
         authorization: `Bearer ${defaultAgentToken}`,
         "idempotency-key": randomUUID(),
@@ -287,7 +286,7 @@ describe("default agent attachment access", () => {
 
     const acceptedCompletion = await app.inject({
       method: "POST",
-      url: `/v1/files/${attachment.id}/complete`,
+      url: `/v2/files/${attachment.id}/complete`,
       headers: {
         authorization: `Bearer ${writeAgentToken}`,
         "idempotency-key": randomUUID(),
@@ -301,7 +300,7 @@ describe("default agent attachment access", () => {
 
     const writerCanReadUnattached = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${writeAgentToken}` },
     });
     expect(writerCanReadUnattached.statusCode).toBe(200);
@@ -309,7 +308,7 @@ describe("default agent attachment access", () => {
 
     const hiddenFromReadOnlyToken = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${defaultAgentToken}` },
     });
     expect(hiddenFromReadOnlyToken.statusCode).toBe(404);
@@ -320,11 +319,11 @@ describe("default agent attachment access", () => {
     const deniedMessageId = randomUUID();
     const deniedMessage = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         authorization: `Bearer ${defaultAgentToken}`,
         "idempotency-key": deniedMessageId,
-        "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+        "x-hype-comms-capabilities": "attachments-v1",
       },
       payload: {
         threadRootId: null,
@@ -362,11 +361,11 @@ describe("default agent attachment access", () => {
     const writerMessageId = randomUUID();
     const writerMessage = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         authorization: `Bearer ${writeAgentToken}`,
         "idempotency-key": writerMessageId,
-        "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+        "x-hype-comms-capabilities": "attachments-v1",
       },
       payload: {
         threadRootId: null,
@@ -389,7 +388,7 @@ describe("default agent attachment access", () => {
     const contentSha256 = sha256Hex(bytes);
     const upload = await app.inject({
       method: "POST",
-      url: "/v1/files/uploads",
+      url: "/v2/files/uploads",
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": randomUUID(),
@@ -407,7 +406,7 @@ describe("default agent attachment access", () => {
       (
         await app.inject({
           method: "PUT",
-          url: `/v1/files/${attachment.id}/content`,
+          url: `/v2/files/${attachment.id}/content`,
           headers: {
             cookie: `hype_comms_session=${ownerSessionToken}`,
             "content-type": "text/plain",
@@ -420,7 +419,7 @@ describe("default agent attachment access", () => {
       (
         await app.inject({
           method: "POST",
-          url: `/v1/files/${attachment.id}/complete`,
+          url: `/v2/files/${attachment.id}/complete`,
           headers: {
             cookie: `hype_comms_session=${ownerSessionToken}`,
             "idempotency-key": randomUUID(),
@@ -432,7 +431,7 @@ describe("default agent attachment access", () => {
 
     const unattached = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${defaultAgentToken}` },
     });
     expect(unattached.statusCode).toBe(404);
@@ -441,11 +440,11 @@ describe("default agent attachment access", () => {
     const clientMessageId = randomUUID();
     const sentResponse = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${generalId}/messages`,
+      url: `/v2/conversations/${generalId}/messages`,
       headers: {
         cookie: `hype_comms_session=${ownerSessionToken}`,
         "idempotency-key": clientMessageId,
-        "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY,
+        "x-hype-comms-capabilities": "attachments-v1",
       },
       payload: {
         threadRootId: null,
@@ -462,7 +461,7 @@ describe("default agent attachment access", () => {
 
     const metadata = await app.inject({
       method: "POST",
-      url: "/v1/attachments/query",
+      url: "/v2/attachments/query",
       headers: { authorization: `Bearer ${defaultAgentToken}` },
       payload: { messageIds: [sent.message.id] },
     });
@@ -475,7 +474,7 @@ describe("default agent attachment access", () => {
 
     const content = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${defaultAgentToken}` },
     });
     expect(content.statusCode).toBe(200);
@@ -484,7 +483,7 @@ describe("default agent attachment access", () => {
 
     const inaccessibleMetadata = await app.inject({
       method: "POST",
-      url: "/v1/attachments/query",
+      url: "/v2/attachments/query",
       headers: { authorization: `Bearer ${outsiderAgentToken}` },
       payload: { messageIds: [sent.message.id] },
     });
@@ -493,7 +492,7 @@ describe("default agent attachment access", () => {
 
     const inaccessibleContent = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${outsiderAgentToken}` },
     });
     expect(inaccessibleContent.statusCode).toBe(404);
@@ -501,14 +500,14 @@ describe("default agent attachment access", () => {
 
     const retracted = await app.inject({
       method: "DELETE",
-      url: `/v1/messages/${sent.message.id}`,
+      url: `/v2/messages/${sent.message.id}`,
       headers: { cookie: `hype_comms_session=${ownerSessionToken}` },
     });
     expect(retracted.statusCode).toBe(200);
 
     const hiddenMetadata = await app.inject({
       method: "POST",
-      url: "/v1/attachments/query",
+      url: "/v2/attachments/query",
       headers: { authorization: `Bearer ${defaultAgentToken}` },
       payload: { messageIds: [sent.message.id] },
     });
@@ -517,7 +516,7 @@ describe("default agent attachment access", () => {
 
     const hiddenContent = await app.inject({
       method: "GET",
-      url: `/v1/files/${attachment.id}/content`,
+      url: `/v2/files/${attachment.id}/content`,
       headers: { authorization: `Bearer ${defaultAgentToken}` },
     });
     expect(hiddenContent.statusCode).toBe(404);

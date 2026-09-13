@@ -1,20 +1,19 @@
-import { createHash } from "node:crypto";
-
 import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
+  isWorkspaceProtocolMismatch,
+  WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
 } from "@hype-comms/contracts";
+import { createHash } from "node:crypto";
 import type { z } from "zod";
 
 import type { ResolvedProfile, StoredCredential } from "./config.js";
 import {
-  CliError,
-  EXIT_CONTRACT,
-  UsageError,
   apiResponseError,
+  CliError,
   contractError,
+  EXIT_CONTRACT,
   networkError,
+  UsageError,
 } from "./errors.js";
 
 export interface ApiRequestOptions<TRequest, TResponse> {
@@ -54,9 +53,7 @@ export interface ApiClientOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly timeoutMs: number;
 }
-
-export const RESPONSE_BODY_MAX_BYTES = 4 * 1_024 * 1_024;
-
+export const RESPONSE_BODY_MAX_BYTES = 4 * 1024 * 1024;
 const RESPONSE_TOO_LARGE_MESSAGE = "The server response was too large";
 
 class ResponseTooLargeError extends CliError {
@@ -86,19 +83,6 @@ function authorizationHeaders(credential: StoredCredential | undefined): Record<
     return { cookie: `hype_comms_session=${credential.sessionToken}` };
   }
   return { authorization: `Bearer ${credential.token}` };
-}
-
-function withDefaultCapabilities(headers: Record<string, string>): Record<string, string> {
-  const name = "x-hype-comms-capabilities";
-  const capabilities = new Set(
-    (headers[name] ?? "")
-      .split(",")
-      .map((capability) => capability.trim())
-      .filter((capability) => capability.length > 0),
-  );
-  capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
-  capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
-  return { ...headers, [name]: [...capabilities].join(",") };
 }
 
 function responseAccepted(
@@ -240,13 +224,12 @@ export class ApiClient {
       }
       serializedBody = JSON.stringify(parsed.data);
     }
-
-    const headers = withDefaultCapabilities({
+    const headers = {
       accept: "application/json",
       ...(serializedBody === undefined ? {} : { "content-type": "application/json" }),
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
-    });
+    };
     let response: Response;
     try {
       response = await this.#fetch(url, {
@@ -258,6 +241,16 @@ export class ApiClient {
       });
     } catch (error) {
       throw networkError(error, options.clientMessageId);
+    }
+    if (isWorkspaceProtocolMismatch(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CliError({
+        exitCode: EXIT_CONTRACT,
+        code: "UPGRADE_REQUIRED",
+        message: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+        httpStatus: response.status,
+        retryable: false,
+      });
     }
 
     if (response.status >= 300 && response.status < 400) {
@@ -319,12 +312,12 @@ export class ApiClient {
       }
       serializedBody = JSON.stringify(parsed.data);
     }
-    const headers = withDefaultCapabilities({
+    const headers = {
       accept: "application/json",
       ...(serializedBody === undefined ? {} : { "content-type": "application/json" }),
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
-    });
+    };
     let response: Response;
     try {
       response = await this.#fetch(new URL(options.path, this.#origin), {
@@ -336,6 +329,16 @@ export class ApiClient {
       });
     } catch (error) {
       throw networkError(error);
+    }
+    if (isWorkspaceProtocolMismatch(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CliError({
+        exitCode: EXIT_CONTRACT,
+        code: "UPGRADE_REQUIRED",
+        message: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+        httpStatus: response.status,
+        retryable: false,
+      });
     }
     if (response.status >= 300 && response.status < 400) {
       throw new CliError({
@@ -367,13 +370,12 @@ export class ApiClient {
     if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
       throw new Error("Download limits must be positive safe integers");
     }
-
-    const headers = withDefaultCapabilities({
+    const headers = {
       accept: "application/octet-stream",
       ...this.#authorizationHeaders(options.includeCredential),
       ...options.headers,
       "accept-encoding": "identity",
-    });
+    };
     let response: Response;
     try {
       response = await this.#fetch(new URL(options.path, this.#origin), {
@@ -384,6 +386,16 @@ export class ApiClient {
       });
     } catch (error) {
       throw networkError(error);
+    }
+    if (isWorkspaceProtocolMismatch(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CliError({
+        exitCode: EXIT_CONTRACT,
+        code: "UPGRADE_REQUIRED",
+        message: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
+        httpStatus: response.status,
+        retryable: false,
+      });
     }
 
     if (response.status >= 300 && response.status < 400) {

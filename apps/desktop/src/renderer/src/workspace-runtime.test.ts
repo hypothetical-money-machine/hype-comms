@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
-  AdvanceReadCursorResponse,
   AddReactionResponse,
+  AdvanceReadCursorResponse,
   AgentEnrollmentResponse,
   AiChannelState,
   Attachment,
@@ -19,11 +19,13 @@ import type {
   ConversationSummary,
   CreateChannelOperation,
   CreateTaskOperation,
-  DirectConversationRequest,
   DevicePreferences,
+  DirectConversationRequest,
+  NotificationAction as ExactNotificationAction,
+  HumanWorkspaceBootstrapResponse,
+  ListAgentEnrollmentsResponse,
   ListConversationsQuery,
   ListConversationsResponse,
-  ListAgentEnrollmentsResponse,
   ListMembersResponse,
   ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
@@ -33,19 +35,19 @@ import type {
   MessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
-  MoveTaskOperation,
   MessageThreadResponse,
-  OpenAttachmentResponse,
-  NotificationAction as ExactNotificationAction,
+  MoveTaskOperation,
   NotificationContext,
+  OpenAttachmentResponse,
   ProductRealtimeEvent,
   Reaction,
   ReactionEmoji,
   RealtimeAcknowledgement,
-  RemoveReactionResponse,
-  RetractMessageResponse,
   RealtimeConnectionState,
   RealtimeSessionScope,
+  RemoveReactionResponse,
+  RetractMessageResponse,
+  ScopedProductRealtimeEvent,
   SendAttemptResult,
   SendMessageOperation,
   SyncAttemptResult,
@@ -55,21 +57,19 @@ import type {
   TaskMutationResponse,
   ThemeState,
   UpdateState,
-  User,
-  HumanWorkspaceBootstrapResponse,
   UpdateTaskOperation,
+  User,
   WorkspaceEvent,
-  ScopedProductRealtimeEvent,
 } from "@hype-comms/contracts";
 
-import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
+import type { AttachmentUploadResult } from "../../shared/attachment-upload";
 import type {
   DesktopApi,
   DesktopPlatform,
   NotificationAction,
   ServerStatus,
 } from "../../shared/desktop-api";
-import type { AttachmentUploadResult } from "../../shared/attachment-upload";
+import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import type {
   CachedWorkspaceState,
   MembershipRepairMarker,
@@ -1014,7 +1014,7 @@ class FakeDesktopApi implements DesktopApi {
   bootstrapRequests = 0;
   stopRequests = 0;
   readonly stopResults: Promise<void>[] = [];
-  /** What `GET /v1/members` answers with. The real route lists active memberships only. */
+  /** What `GET /v2/members` answers with. The real route lists active memberships only. */
   members: readonly User[] = [user];
   /** Queued directory responses, for tests that need a slow read to be overtaken by a newer one. */
   readonly memberResults: (ListMembersResponse | Promise<ListMembersResponse>)[] = [];
@@ -1911,6 +1911,131 @@ describe("WorkspaceRuntime", () => {
     expect(api.attachmentUploadRequests).toEqual([
       { conversationId: CONVERSATION_ID, maxFiles: 2 },
     ]);
+  });
+
+  it("retains the real memory cache and its unsent work during a same-account offline transition", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = new WorkspaceRuntime(api);
+    await runtime.start(session);
+    api.sendResults.push({ status: "upgrade_required" });
+    await runtime.sendMessage(CONVERSATION_ID, "Keep my memory outbox", []);
+    await settle(() => runtime.state.connection === "incompatible", "protocol mismatch");
+    const operation = runtime.state.outbox[0]!.operation;
+    await runtime.start(session, { offline: true });
+    expect(runtime.state.bootstrap).not.toBeNull();
+    expect(runtime.state.outbox).toHaveLength(1);
+    expect(runtime.state.outbox[0]!.operation).toEqual(operation);
+    await runtime.stop();
+  });
+
+  it("retains a rejected IPC send and retries the same operation", async () => {
+    vi.useFakeTimers();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = new WorkspaceRuntime(api);
+    const send = vi.spyOn(api, "sendConversationMessage");
+    send.mockRejectedValueOnce(new Error("IPC session was replaced"));
+    api.sendResults.push({
+      status: "accepted",
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+    });
+    try {
+      await runtime.start(session);
+      await runtime.sendMessage(CONVERSATION_ID, "Retain after IPC rejection", []);
+      await settle(() => runtime.state.outbox[0]?.status === "retry_wait", "IPC rejection");
+      const operation = runtime.state.outbox[0]!.operation;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runtime.state.outbox).toEqual([]);
+      expect(send.mock.calls.map(([input]) => input)).toEqual([operation, operation]);
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a sending memory outbox when session retirement precedes IPC rejection", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = new WorkspaceRuntime(api);
+    let rejectSend: (error: Error) => void = () => undefined;
+    const send = vi.spyOn(api, "sendConversationMessage");
+    send.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    api.sendResults.push({
+      status: "accepted",
+      response: { message: ownMessage, attachments: [], syncCursor: "11" },
+    });
+    try {
+      await runtime.start(session);
+      await runtime.sendMessage(CONVERSATION_ID, "Retain during retirement", []);
+      await settle(() => send.mock.calls.length === 1, "in-flight IPC");
+      const operation = runtime.state.outbox[0]!.operation;
+      await runtime.start(session, { offline: true });
+      rejectSend(new Error("Workspace session was replaced"));
+      await drain();
+      expect(runtime.state.outbox).toHaveLength(1);
+      expect(runtime.state.outbox[0]).toMatchObject({ status: "pending", operation });
+      expect(send).toHaveBeenCalledOnce();
+      await runtime.start(session);
+      await settle(() => runtime.state.outbox.length === 0, "recovered delivery");
+      expect(send.mock.calls.map(([input]) => input)).toEqual([operation, operation]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("keeps an incompatible send pending and preserves new local work without retries", async () => {
+    vi.useFakeTimers();
+    const cache = new FakeWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.sendResults.push({ status: "upgrade_required" });
+    const runtime = runtimeWith(api, cache);
+    try {
+      await runtime.start(session);
+      await runtime.sendMessage(CONVERSATION_ID, "Preserve this send", []);
+      await settle(
+        () =>
+          runtime.state.outbox[0]?.status === "pending" &&
+          runtime.state.connection === "incompatible",
+        "upgrade pause",
+      );
+      const operation = runtime.state.outbox[0]!.operation;
+      await runtime.sendMessage(CONVERSATION_ID, "Written while awaiting upgrade", []);
+      api.emitRealtimeState("live");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.sent).toEqual([operation]);
+      expect(runtime.state.connection).toBe("incompatible");
+      expect((await cache.load()).outbox.map((item) => item.operation.message.body)).toEqual([
+        "Preserve this send",
+        "Written while awaiting upgrade",
+      ]);
+      expect((await cache.load()).outbox[0]?.operation).toEqual(operation);
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks realtime and outbox delivery when startup sync requires an upgrade", async () => {
+    vi.useFakeTimers();
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage]);
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.syncResults.push({ status: "upgrade_required" });
+    const runtime = runtimeWith(api, cache);
+    try {
+      await runtime.start(session);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runtime.state).toMatchObject({ connection: "incompatible", busy: false, stale: true });
+      expect(api.syncedFrom).toEqual(["10"]);
+      expect(api.sent).toEqual([]);
+      expect((await cache.load()).messages).toEqual([ownMessage]);
+    } finally {
+      await runtime.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
@@ -3734,7 +3859,7 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
-  it("applies DELETE /v1/messages/:id without emptying the stored body", async () => {
+  it("applies DELETE /v2/messages/:id without emptying the stored body", async () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", {
         conversations: [
