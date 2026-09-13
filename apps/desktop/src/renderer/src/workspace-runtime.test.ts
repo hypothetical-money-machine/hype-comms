@@ -2017,6 +2017,75 @@ describe("WorkspaceRuntime", () => {
     await runtime.stop();
   });
 
+  it("serves history and outbox work from the last good catalog while a refresh is blocked", async () => {
+    const second = channel(SECOND_CONVERSATION_ID, "second");
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversations: [channel(CONVERSATION_ID, "general"), second] }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    api.channelResults.push({
+      conversation: channel(CONVERSATION_ID, "general"),
+      syncCursor: testPosition("10"),
+    });
+    // The refresh publishes its first page, then fails before it can confirm the second.
+    api.bootstrap = bootstrapAt("10", {
+      conversations: [channel(CONVERSATION_ID, "general")],
+      conversationsHasMore: true,
+      conversationsNextCursor: NEXT_PAGE_CURSOR,
+    });
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [],
+      nextCursor: "again",
+      hasMore: true,
+    });
+    await runtime.archiveChannel(CONVERSATION_ID);
+    const catalogRecovery = runtime.state.recovery.find((entry) => entry.key === "catalog");
+    expect(catalogRecovery?.status).toBe("blocked");
+    expect(catalogRecovery?.reason).toMatch(/did not make progress/);
+    expect(
+      runtime.state.bootstrap?.conversations.map((summary) => summary.conversation.id),
+    ).toContain(SECOND_CONVERSATION_ID);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.includes(SECOND_CONVERSATION_ID),
+      "second conversation history from the last good catalog",
+    );
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "Sent while the catalog is stale", []);
+    await settle(() => api.sent.length === 1, "queued send flushed against the blocked catalog");
+    expect(api.sent.map((operation) => operation.message.body)).toEqual([
+      "Sent while the catalog is stale",
+    ]);
+    await drain();
+    expect(api.sent).toHaveLength(1);
+    await runtime.stop();
+  });
+
+  it("settles the catalog lease when the cache keeps its own metadata projection", async () => {
+    class DecliningMetadataCache extends FakeWorkspaceCache {
+      // A durable winner newer than the response leaves the cached catalog in place.
+      override replaceMetadata(): Promise<boolean> {
+        return Promise.resolve(false);
+      }
+    }
+    const cache = new DecliningMetadataCache();
+    await cache.replaceSnapshot(bootstrapAt("10"), []);
+    const pending = queuedOperation(
+      "20000000-0000-4000-8000-000000000097",
+      "Queued before the window reopened",
+    );
+    await cache.enqueue(pending);
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.recovery.filter((entry) => entry.key === "catalog")).toEqual([]);
+    expect(api.sent).toEqual([pending]);
+    await runtime.stop();
+  });
+
   it.each([
     ["20000000-0000-4000-8000-000000000099", 1],
     [THREAD_REPLY_ID, 0],

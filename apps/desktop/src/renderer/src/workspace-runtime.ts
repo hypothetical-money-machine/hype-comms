@@ -167,6 +167,9 @@ const NOTIFICATION_TARGET_UNAVAILABLE = "That notification is no longer availabl
 const SOURCE_LESS_RETRACT_METADATA_ERROR =
   "Could not refresh unread counts after a message was deleted.";
 
+/** Shown whenever a metadata refresh leaves the cached catalog in place. */
+const CATALOG_REFRESH_FAILED = "Could not refresh the workspace catalog";
+
 /** Mirrors the encrypted replica's `workspaceSnapshotSchema` conversation bound. */
 const WORKSPACE_CONVERSATION_LIMIT = 5_000;
 
@@ -427,8 +430,13 @@ export class WorkspaceRuntime {
   get #startupMetadataPending(): boolean {
     return this.#recovery.has("startup");
   }
+  /**
+   * A catalog refresh still in flight. A blocked catalog is known-stale rather than moving, so it
+   * keeps the health banner and its retry without holding sends back: such a send targets a
+   * conversation the last good catalog still names, and the server authorizes it either way.
+   */
   get #catalogPending(): boolean {
-    return this.#recovery.has("catalog");
+    return this.#recovery.isPending("catalog");
   }
   #catalogConfirmedIds: Set<string> | null = null;
   #catalogRequest = 0;
@@ -2776,6 +2784,17 @@ export class WorkspaceRuntime {
       this.#ensureConversationHistory(selectedConversationId);
   }
 
+  /**
+   * Drops a half-filled page set once the refresh that opened it can no longer complete it, so
+   * `#ensureConversationHistory` and the outbox fall back to the last good catalog rather than to
+   * whichever pages happened to arrive. The lease stays blocked, keeping the banner and its retry.
+   */
+  #releasePartialCatalog(partial: Set<string> | null): void {
+    if (partial === null || this.#catalogConfirmedIds !== partial) return;
+    if (this.#state.bootstrap === null) return;
+    this.#catalogConfirmedIds = null;
+  }
+
   async #refreshSnapshot(
     generation: number,
     minimumCursor?: SyncPosition,
@@ -2828,22 +2847,27 @@ export class WorkspaceRuntime {
       if (!(await cache.stageMetadataPage(page, signal)) || !isCurrent()) return;
       this.#publishMetadataPage(page, confirmed, this.#startupMetadataPending);
     };
+    const abandon = (): boolean => {
+      this.#releasePartialCatalog(confirmed);
+      return false;
+    };
     try {
       const snapshot = prefetched ?? (await this.#fetchSnapshot(publishPage));
-      if (!isCurrent()) return false;
+      if (!isCurrent()) return abandon();
       validate(snapshot);
       const previousEpoch = this.#syncCursor?.epoch ?? this.#state.bootstrap?.syncCursor.epoch;
       if (previousEpoch !== undefined && previousEpoch !== snapshot.syncCursor.epoch) {
-        if (!(await this.#resetProtocolReplica(generation))) return false;
+        if (!(await this.#resetProtocolReplica(generation))) return abandon();
+        // The replay below opens its own catalog lease and page set, retiring both of these.
         return this.#refreshSnapshot(generation, undefined, snapshot);
       }
       if (prefetched !== undefined) await publishPage(snapshot);
-      if (!isCurrent()) return false;
+      if (!isCurrent()) return abandon();
       return await this.#commitCacheProjection(async () => {
-        if (!isCurrent()) return false;
+        if (!isCurrent()) return abandon();
         const installed = await cache.installMetadataSnapshot(snapshot, signal);
-        if (!isCurrent()) return false;
-        if (!(await this.#reloadCache(generation, cache, true)) || !isCurrent()) return false;
+        if (!isCurrent()) return abandon();
+        if (!(await this.#reloadCache(generation, cache, true)) || !isCurrent()) return abandon();
         const visible = new Set(
           this.#state.bootstrap?.conversations.map((summary) => summary.conversation.id),
         );
@@ -2887,6 +2911,7 @@ export class WorkspaceRuntime {
         return true;
       });
     } catch (error) {
+      this.#releasePartialCatalog(confirmed);
       if (isCurrent()) {
         this.#recovery.block(
           catalogRecovery,
@@ -3401,7 +3426,21 @@ export class WorkspaceRuntime {
       this.#startupReplicaCatchUpPending && !requireCurrentCatalog ? new Set<string>() : null;
     const projection = this.#captureProjection(cache);
     const catalogRecovery = preview === null ? undefined : this.#recovery.begin("catalog");
-    let catalogFailed = false;
+    // Every exit below settles that lease: a superseded refresh completes it, a catalog that
+    // could not be applied blocks it with a reason, and neither leaves the preview gate installed.
+    const completeCatalog = (): void => {
+      this.#recovery.complete(catalogRecovery);
+      this.#releasePartialCatalog(preview);
+    };
+    const superseded = (): boolean => {
+      completeCatalog();
+      return false;
+    };
+    const unusable = (reason: string): boolean => {
+      this.#recovery.block(catalogRecovery, reason);
+      this.#releasePartialCatalog(preview);
+      return false;
+    };
     try {
       if (preview !== null) {
         this.#catalogConfirmedIds = preview;
@@ -3434,7 +3473,7 @@ export class WorkspaceRuntime {
             },
       );
       if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
-        return false;
+        return superseded();
       }
       if (
         snapshot.currentUser.user.id !== scope.userId ||
@@ -3444,35 +3483,31 @@ export class WorkspaceRuntime {
       }
 
       const cursorBeforeMetadata = this.#syncCursor;
-      if (cursorBeforeMetadata === null) return false;
+      if (cursorBeforeMetadata === null) return unusable(CATALOG_REFRESH_FAILED);
       if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
+        // The replacement refresh opens its own catalog lease and page set, retiring both of these.
         return this.#refreshSnapshot(generation, undefined, snapshot);
       }
       if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
         await this.#repairAndFlush(generation, false, false);
-        if (
-          generation !== this.#generation ||
-          cache !== this.#cache ||
-          this.#syncRecoveryPending ||
-          this.#membershipRepairPending
-        ) {
-          return false;
+        if (generation !== this.#generation || cache !== this.#cache) return superseded();
+        if (this.#syncRecoveryPending || this.#membershipRepairPending) {
+          return unusable("The workspace catalog is waiting for a cache repair");
         }
       }
 
       return await this.#commitCacheProjection(async () => {
-        if (!this.#isProjectionCurrent(projection)) return false;
+        if (!this.#isProjectionCurrent(projection)) return superseded();
         const loaded = await cache.load();
-        if (!this.#isProjectionCurrent(projection) || loaded.bootstrap === null) {
-          return false;
-        }
+        if (!this.#isProjectionCurrent(projection)) return superseded();
+        if (loaded.bootstrap === null) return unusable(CATALOG_REFRESH_FAILED);
         const durableCursor = loaded.syncCursor;
-        if (durableCursor === null) return false;
+        if (durableCursor === null) return unusable(CATALOG_REFRESH_FAILED);
         if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
           throw new Error("The workspace metadata advanced beyond the repaired cursor");
         }
         if (requireCurrentCatalog && compareSyncPositions(snapshot.syncCursor, durableCursor) < 0) {
-          return false;
+          return unusable(CATALOG_REFRESH_FAILED);
         }
 
         // When events landed after the metadata response, their cached catalog and member projection
@@ -3497,15 +3532,17 @@ export class WorkspaceRuntime {
           },
           signal,
         );
-        if (!this.#isProjectionCurrent(projection)) return false;
+        if (!this.#isProjectionCurrent(projection)) return superseded();
         if (!replaced) {
           const reloaded = await this.#reloadCache(generation, cache);
           // Source-less retractions cannot reconcile counters from their event payload. A durable
           // winner newer than this catalog may still have those old totals, so require a fresh server
           // catalog before its retry state can be cleared.
-          return !requireCurrentCatalog && reloaded;
+          if (requireCurrentCatalog || !reloaded) return superseded();
+          completeCatalog();
+          return true;
         }
-        if (!(await this.#reloadCache(generation, cache))) return false;
+        if (!(await this.#reloadCache(generation, cache))) return superseded();
 
         for (const conversationId of this.#historyCursors.keys()) {
           if (!visibleConversationIds.has(conversationId))
@@ -3523,24 +3560,13 @@ export class WorkspaceRuntime {
             threadError: null,
           });
         }
-        if (preview !== null && this.#catalogConfirmedIds === preview) {
-          this.#recovery.complete(catalogRecovery);
-          this.#catalogConfirmedIds = null;
-        }
+        completeCatalog();
         return true;
       });
     } catch (error) {
-      catalogFailed = true;
-      this.#recovery.block(
-        catalogRecovery,
-        errorMessage(error, "Could not refresh the workspace catalog"),
-      );
+      this.#recovery.block(catalogRecovery, errorMessage(error, CATALOG_REFRESH_FAILED));
+      this.#releasePartialCatalog(preview);
       throw error;
-    } finally {
-      if (preview !== null && this.#catalogConfirmedIds === preview) {
-        this.#catalogConfirmedIds = null;
-        if (!catalogFailed) this.#recovery.complete(catalogRecovery);
-      }
     }
   }
 
