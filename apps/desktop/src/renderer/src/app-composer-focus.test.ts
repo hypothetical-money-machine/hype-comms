@@ -806,6 +806,32 @@ describe("main composer focus on conversation changes", () => {
     await waitFor(() => expect(document.activeElement).toBe(chatToggle), { timeout: 5_000 });
   });
 
+  it("focuses the composer when the dialog's trigger disappears before it closes", async () => {
+    // Opening the quick switcher captures whatever held focus. Here that control — the sidebar
+    // row for a channel the user is removed from mid-dialog — is gone by the time Escape closes
+    // the switcher, so restoration is requested but cannot land. Focus has to fall to the
+    // composer instead of being left on the body with the intent thrown away.
+    const harness = await renderWorkspace();
+    const launchRow = screen.getByRole("button", { name: "Launch Planning" });
+    launchRow.focus();
+
+    fireEvent.keyDown(document, { key: "k", ctrlKey: true });
+    const searchbox = await screen.findByRole("searchbox", { name: "Jump to a conversation" });
+    await waitFor(() => expect(document.activeElement).toBe(searchbox));
+
+    act(() => harness.pushWorkspaceEvent(membershipRemoval(LAUNCH_ID)));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Launch Planning" })).toBeNull(),
+    );
+    expect(launchRow.isConnected).toBe(false);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await waitFor(() => expect(document.activeElement).toBe(channelComposer()));
+    expect(channelComposer().placeholder).toBe("Message # General");
+  });
+
   it("does not steal focus when the pane toggle remounts the composer", async () => {
     // Tasks -> Chat swaps TasksView for the message list + composer on the same conversation, so
     // the remounted composer must leave focus on the toggle the user just pressed.

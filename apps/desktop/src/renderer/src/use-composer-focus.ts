@@ -150,10 +150,12 @@ export function useComposerFocus(context: ComposerFocusContext) {
   }, [attempt, deepLinkedReplyId, key, threadRootId]);
 
   // Overlay callbacks read the committed context, without resubscribing on every navigation.
-  const retryAfterOverlay = useRef<(restoreRequested: boolean) => void>(() => undefined);
+  const retryAfterOverlay = useRef<(restored: boolean) => void>(() => undefined);
   useLayoutEffect(() => {
-    retryAfterOverlay.current = (restoreRequested) => {
-      if (restoreRequested) {
+    retryAfterOverlay.current = (restored) => {
+      // Only a landing on the opener ends the deferral. An overlay that opted out, or one whose
+      // opener went away while it was open, leaves focus on the body for the composer to claim.
+      if (restored) {
         state.current.intent = null;
         return;
       }

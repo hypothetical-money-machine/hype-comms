@@ -57,12 +57,13 @@ export interface OverlayLease {
 /** One instance per App, including its portals. Removing a covered overlay never takes focus. */
 export class OverlayOwnership {
   readonly #entries: OverlayEntry[] = [];
-  readonly #closed = new Set<(restoreRequested: boolean) => void>();
+  readonly #closed = new Set<(restored: boolean) => void>();
   #revision = 0;
 
   hasOpen = (): boolean => this.#entries.length > 0;
 
-  onClosed = (listener: (restoreRequested: boolean) => void): (() => void) => {
+  /** Listeners receive whether focus actually landed on the opener, not whether it was asked for. */
+  onClosed = (listener: (restored: boolean) => void): (() => void) => {
     this.#closed.add(listener);
     return () => this.#closed.delete(listener);
   };
@@ -92,12 +93,14 @@ export class OverlayOwnership {
           const top = this.#entries.at(-1);
           const focused = document.activeElement;
           const stillOwned = focused === document.body || entry.container.contains(focused);
-          if (restoreFocus && stillOwned && available(entry.returnTarget)) {
-            if (top === undefined || top.container.contains(entry.returnTarget)) {
-              entry.returnTarget.focus();
-            }
-          }
-          for (const listener of this.#closed) listener(restoreFocus);
+          const target = entry.returnTarget;
+          const restored =
+            restoreFocus &&
+            stillOwned &&
+            available(target) &&
+            (top === undefined || top.container.contains(target));
+          if (restored) target.focus();
+          for (const listener of this.#closed) listener(restored);
         });
       },
     };

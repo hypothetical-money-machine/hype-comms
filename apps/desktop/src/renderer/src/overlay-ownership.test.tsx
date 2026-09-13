@@ -107,6 +107,28 @@ describe("overlay ownership", () => {
     }
   });
 
+  it("reports that focus was not restored when the opener left while the overlay was open", async () => {
+    const owner = new OverlayOwnership();
+    const opener = document.createElement("button");
+    const container = document.createElement("section");
+    document.body.append(opener, container);
+    const closed = vi.fn();
+    owner.onClosed(closed);
+    try {
+      opener.focus();
+      const lease = owner.acquire(container, opener);
+      opener.remove();
+      lease.release(true);
+      await act(async () => undefined);
+      expect(closed).toHaveBeenCalledTimes(1);
+      expect(closed).toHaveBeenCalledWith(false);
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      opener.remove();
+      container.remove();
+    }
+  });
+
   it("cancels deferred restoration when a new overlay opens or the user chooses focus", async () => {
     const owner = new OverlayOwnership();
     const opener = document.createElement("button");
