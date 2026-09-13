@@ -41,7 +41,9 @@ docs               Operational runbooks and showcase assets
 
 [WorkspaceRepository](apps/server/src/modules/workspace/repository.ts) is a delegating facade.
 The task, message, conversation, attachment, and sync operation modules own their database
-transactions and pass the same `PoolClient` to query and event helpers. `WorkspaceRetention`
+transactions and pass the same `PoolClient` to query and event helpers. Expected operation failures
+use `DomainError`; HTTP status codes and error envelopes belong to the server's error handler.
+`WorkspaceRetention`
 and `SystemChannelSeeder` own background cleanup and built-in publishing. System acceptance
 audits run after the database commit.
 

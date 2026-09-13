@@ -359,7 +359,7 @@ describe("AgentEnrollmentModule", () => {
         { ...candidate.request, displayName: "Changed child" },
         "same-key",
       ),
-    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
+    ).rejects.toMatchObject({ kind: "conflict" });
     await expect(
       enrollment.request(
         ownerActor(),
