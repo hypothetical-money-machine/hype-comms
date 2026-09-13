@@ -96,7 +96,13 @@ export function createWorkspaceInvokeHandlers(
       return run((transport) => transport.conversations(input));
     },
     workspaceMessagesList: async (_context, input) => {
-      return run((transport) => transport.history(input));
+      return run((transport) =>
+        transport.history({
+          conversationId: input.conversationId,
+          limit: input.limit,
+          ...(input.before === undefined ? {} : { before: input.before }),
+        }),
+      );
     },
     workspaceMessageGet: async (_context, id) => {
       return run((transport) => transport.messageById(id));

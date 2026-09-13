@@ -10,9 +10,7 @@
     "noEmit": true,
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "exactOptionalPropertyTypes": false,
-    "verbatimModuleSyntax": false
+    "noUnusedParameters": true
   },
   "include": [
     "electron.vite.config.ts",

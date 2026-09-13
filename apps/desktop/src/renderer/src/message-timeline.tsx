@@ -47,9 +47,9 @@ export function WorkspaceMessageRow({
   readonly message: Message;
   readonly highlightedId: string | null;
   readonly continuation?: boolean;
-  readonly domIdPrefix?: "message" | "thread-message";
-  readonly onCreateTask?: (message: Message) => Promise<void>;
-  readonly reply?: { readonly count: number; readonly open: (() => void) | undefined };
+  readonly domIdPrefix?: "message" | "thread-message" | undefined;
+  readonly onCreateTask?: ((message: Message) => Promise<void>) | undefined;
+  readonly reply?: { readonly count: number; readonly open: (() => void) | undefined } | undefined;
 }) {
   return (
     <MessageRow
@@ -98,9 +98,10 @@ export function MessageTimeline({
   readonly highlightedId: string | null;
   readonly editingId: string | null;
   readonly onEditPending: (item: OutboxItem) => void;
-  readonly domIdPrefix?: "message" | "thread-message";
-  readonly unread?: { readonly conversationId: string; readonly messageId: string | null };
-  readonly onCreateTask?: (message: Message) => Promise<void>;
+  readonly domIdPrefix?: "message" | "thread-message" | undefined;
+  readonly unread?:
+    { readonly conversationId: string; readonly messageId: string | null } | undefined;
+  readonly onCreateTask?: ((message: Message) => Promise<void>) | undefined;
   readonly replyFor?: (message: Message) => {
     readonly count: number;
     readonly open: (() => void) | undefined;
