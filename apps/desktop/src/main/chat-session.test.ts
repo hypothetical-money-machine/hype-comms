@@ -336,6 +336,23 @@ describe("ChatSession restore", () => {
     session.stop();
   });
 
+  it("preserves an expired credential when its rotation hits a protocol mismatch", async () => {
+    const cookies = storedIdentityCookies();
+    let identityProbe = 0;
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL && identityProbe++ === 0) {
+        return jsonResponse({ error: "unauthorized" }, 401);
+      }
+      return new Response(null, { status: 426 });
+    }, cookies);
+
+    await expect(session.restore()).resolves.toMatchObject({
+      status: "session-unavailable",
+      reason: "protocol_mismatch",
+    });
+    expectPreservedCredential(cookies);
+  });
+
   it("keeps the stored credential when the identity check fails with a server error", async () => {
     const cookies = storedIdentityCookies();
     const session = createSession(async () => jsonResponse({ error: "boom" }, 500), cookies);
@@ -1103,6 +1120,26 @@ describe("ChatSession renewal", () => {
     expect(session.state).toMatchObject({ status: "signed-in" });
     expect(cookies.removals).toEqual([]);
     expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+    session.stop();
+  });
+
+  it("publishes an unavailable state when renewal hits a protocol mismatch", async () => {
+    const requests: string[] = [];
+    const cookies = storedIdentityCookies();
+    const session = createRenewingSession(
+      () => new Response(null, { status: 426 }),
+      cookies,
+      requests,
+    );
+
+    await session.restore();
+    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+
+    expect(session.state).toMatchObject({
+      status: "session-unavailable",
+      reason: "protocol_mismatch",
+    });
+    expectPreservedCredential(cookies);
     session.stop();
   });
 

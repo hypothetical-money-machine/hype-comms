@@ -2298,6 +2298,36 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
+  it("cancels a pending read retry when the workspace requires an upgrade", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const api = new FakeDesktopApi(bootstrapAt("10"));
+      api.histories.set(CONVERSATION_ID, {
+        messages: [peerMessage],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+      api.readCursorFailures = 1;
+      const runtime = runtimeWith(api, new FakeWorkspaceCache());
+      await runtime.start(session);
+
+      runtime.markConversationReadThrough(CONVERSATION_ID, PEER_MESSAGE_ID);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.readCursorRequests).toHaveLength(1);
+      api.emitRealtimeState("incompatible");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.readCursorRequests).toHaveLength(1);
+      expect(runtime.state.connection).toBe("incompatible");
+
+      await runtime.stop();
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("hydrates reactions with initial history and restores them from the cache", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));

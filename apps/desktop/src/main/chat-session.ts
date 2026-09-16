@@ -264,7 +264,18 @@ export class ChatSession {
     // A `401` gets exactly one credential rotation before this device pauses for login.
     if (probe.status === "expired") {
       const previousContext = await this.#loadAuthenticatedContext();
-      if (await this.#rotateSession()) {
+      let rotated = false;
+      try {
+        rotated = await this.#rotateSession();
+      } catch (error) {
+        if (error instanceof WorkspaceProtocolError) {
+          this.#cacheAuthorizationActive = previousContext !== null;
+          this.#setState(unavailableState("upgrade_required", previousContext ?? undefined));
+          return this.#state;
+        }
+        throw error;
+      }
+      if (rotated) {
         if (previousContext !== null) await this.#rememberAuthenticatedContext(previousContext);
         probe = await this.#probeIdentity();
       }
@@ -605,11 +616,20 @@ export class ChatSession {
     }
 
     const context = this.#authenticatedContextFromState();
-    if (await this.#rotateSession()) {
-      this.#renewalFailures = 0;
-      if (context !== null) await this.#rememberAuthenticatedContext(context);
-      await this.#scheduleRenewal();
-      return;
+    try {
+      if (await this.#rotateSession()) {
+        this.#renewalFailures = 0;
+        if (context !== null) await this.#rememberAuthenticatedContext(context);
+        await this.#scheduleRenewal();
+        return;
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) {
+        this.#cacheAuthorizationActive = context !== null;
+        this.#setState(unavailableState("upgrade_required", context ?? undefined));
+        return;
+      }
+      throw error;
     }
 
     // A failed renewal is never an escalation: the credential stays in the jar and we try again.
@@ -625,7 +645,8 @@ export class ChatSession {
     try {
       const response = await this.#fetch(this.#sessionRefreshUrl, { method: "POST" });
       return response.ok;
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkspaceProtocolError) throw error;
       return false;
     }
   }

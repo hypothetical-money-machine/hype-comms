@@ -1168,6 +1168,7 @@ export class WorkspaceRuntime {
 
   #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
     if (
+      this.#protocolBlocked ||
       generation !== this.#generation ||
       this.#readTargets.get(conversationId) !== target ||
       target.inFlight
@@ -1198,7 +1199,11 @@ export class WorkspaceRuntime {
         }
       })
       .catch(() => {
-        if (generation !== this.#generation || this.#readTargets.get(conversationId) !== target) {
+        if (
+          this.#protocolBlocked ||
+          generation !== this.#generation ||
+          this.#readTargets.get(conversationId) !== target
+        ) {
           return;
         }
         target.inFlight = false;
@@ -4271,6 +4276,7 @@ export class WorkspaceRuntime {
     this.#clearRetryTimer();
     this.#clearSyncRetryTimer();
     this.#clearMembersRetryTimer();
+    this.#clearReadTargets();
     this.#setState({
       busy: false,
       stale: true,
