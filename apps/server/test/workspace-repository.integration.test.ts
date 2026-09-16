@@ -2283,6 +2283,15 @@ describe("WorkspaceRepository", () => {
     await expect(
       repository.findDirectConversation(pairActor, { memberId: pairPeerId.toUpperCase() }),
     ).resolves.toMatchObject({ conversation: { conversation: { id: direct.conversation.conversation.id } } });
+    const groupKey = randomUUID();
+    const group = await repository.createGroupDirectConversation(
+      pairActor,
+      { memberIds: [pairPeerId, memberId] },
+      groupKey,
+    );
+    await expect(
+      repository.createGroupDirectConversation(pairActor, { memberIds: [memberId, pairPeerId] }, groupKey),
+    ).resolves.toEqual(group);
     await expect(
       repository.createGroupDirectConversation(
         pairActor,

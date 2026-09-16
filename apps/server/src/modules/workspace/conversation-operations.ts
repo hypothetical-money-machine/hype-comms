@@ -997,7 +997,7 @@ export class WorkspaceConversationOperations {
     input: GroupDirectConversationRequest,
     idempotencyKey: string,
   ): Promise<ConversationMutationResponse> {
-    const rawMemberIds = [...input.memberIds];
+    const rawMemberIds = [...input.memberIds].sort();
     const memberIds = rawMemberIds.map((id) => id.toLowerCase()).sort();
     if (new Set(memberIds).size !== memberIds.length) {
       throw new ApiError(400, "BAD_REQUEST", "Group participants must be unique");
