@@ -211,8 +211,8 @@ export const realtimeRoutes: FastifyPluginAsync<RealtimeRoutesOptions> = async (
         } catch (error) {
           request.log.error({ err: error }, "Realtime session revalidation failed");
           if (principal.agentTokenId === null) {
-            // Preserve the existing human-session availability tradeoff. Wake-bearing agent
-            // sockets instead fail closed because a stale credential must never receive work.
+            // Preserve the existing human-session availability tradeoff. Agent sockets instead
+            // fail closed because a stale credential must never receive work.
             return true;
           }
           if (!closed && socket.readyState === 1) {

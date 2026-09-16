@@ -36,7 +36,7 @@ import type { CommandContext } from "./types.js";
 function syntheticResyncEvent(
   workspaceId: string,
   cursor: string,
-  reason: "client_replay_overflow" | "cursor_expired",
+  reason: "cursor_expired",
 ): ProductRealtimeEvent {
   return productRealtimeEventSchema.parse({
     version: 1,
