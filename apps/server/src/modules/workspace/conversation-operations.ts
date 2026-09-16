@@ -1102,13 +1102,7 @@ export class WorkspaceConversationOperations {
                    AND target_membership.status = 'active'
                    AND target.kind IN ('human', 'agent')
               )`,
-          [
-            identity.currentUser.workspaceId,
-            low,
-            high,
-            identity.currentUser.user.id,
-            memberId,
-          ],
+          [identity.currentUser.workspaceId, low, high, identity.currentUser.user.id, memberId],
         );
         const row = existing.rows[0];
         if (row === undefined) return null;
