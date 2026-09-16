@@ -1,5 +1,8 @@
 import {
+  AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+  AGENT_CONTEXT_PACK_MAX_LIMIT,
   CLI_ADAPTER_PROTOCOL,
+  MAX_RENDERED_CONTEXT_BYTES,
   agentContextHistoryQuerySchema,
   entityIdSchema,
 } from "@hype-comms/contracts";
@@ -133,14 +136,28 @@ export async function runCli(argv: readonly string[], runtime: Runtime): Promise
         limit: { kind: "string" },
       });
       const [conversation] = requirePositionals(parsed, 1);
-      const id = entityIdSchema.parse(conversation);
-      const query = agentContextHistoryQuerySchema.parse({
+      const parsedId = entityIdSchema.safeParse(conversation);
+      if (!parsedId.success)
+        throw new UsageError("The conversation ID must be a UUID", "INVALID_ID");
+      const parsedQuery = agentContextHistoryQuerySchema.safeParse({
         contextPack: true,
         throughMessageId: stringOption(parsed, "through-message-id"),
-        limit: integerOption(parsed, "limit", 8, 20),
+        limit: integerOption(
+          parsed,
+          "limit",
+          AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
+          AGENT_CONTEXT_PACK_MAX_LIMIT,
+        ),
       });
-      const input: unknown = JSON.parse(await readStream(runtime.io.stdin, 1_048_576));
-      writeResult(context.runtime.io, adapterContext(input, id, query), true);
+      if (!parsedQuery.success)
+        throw new UsageError("The context-pack history options are invalid");
+      let input: unknown;
+      try {
+        input = JSON.parse(await readStream(runtime.io.stdin, MAX_RENDERED_CONTEXT_BYTES));
+      } catch (error) {
+        throw new UsageError("The context-pack response is not valid JSON", "INVALID_CONTEXT_PACK");
+      }
+      writeResult(context.runtime.io, adapterContext(input, parsedId.data, parsedQuery.data), true);
       return;
     }
     throw new UsageError("Use adapter protocol or adapter render-context CONVERSATION");

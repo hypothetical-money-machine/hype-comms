@@ -1380,7 +1380,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(valid_adapter.handled_events), 1)
 
         for author_field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
-            with self.subTest(field=field):
+            with self.subTest(field=author_field):
                 response = context_pack_result(anchor_id)
                 response["contextPack"]["messages"][0]["author"][author_field] = value
                 factory = FakeProcessFactory(
