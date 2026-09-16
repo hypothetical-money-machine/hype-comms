@@ -9,8 +9,8 @@ in `docs/architecture.md` is a hosted target, not the current topology.
   identity on each platform and the production identity on Linux. The production pass checks the
   stable package metadata and updater feed before a tag. The `CI` workflow also runs the complete
   source gate and all PostgreSQL integration tests on an isolated job-scoped PostgreSQL 16 cluster.
-- A push to `main` runs `.woodpecker.yml`: source checks plus `npm run test:postgres` against its
-  PostgreSQL 16 service, a commit-addressed server image build into
+- A push to `main` runs `.woodpecker.yml`: `npm run check` against its PostgreSQL 16 service, a
+  commit-addressed server image build into
   `registry.fastnfree.dev/homelab/hype-comms`. The build records its commit as an OCI label and
   prints the pushed tag-plus-digest reference. It does not publish `latest`, receive a GitOps token,
   or deploy the image. The tag is traceability metadata, not an immutability control; deployment
