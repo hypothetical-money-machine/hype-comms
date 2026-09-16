@@ -264,7 +264,7 @@ export class ChatSession {
     // A `401` gets exactly one credential rotation before this device pauses for login.
     if (probe.status === "expired") {
       const previousContext = await this.#loadAuthenticatedContext();
-      let rotated = false;
+      let rotated: boolean;
       try {
         rotated = await this.#rotateSession();
       } catch (error) {
