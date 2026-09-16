@@ -62,6 +62,9 @@ export async function createTestDatabase(
       connectionTimeoutMillis: 5_000,
       idleTimeoutMillis: 30_000,
     });
+    pool.on("error", (error) => {
+      console.error("Unexpected error from an idle Postgres client", error);
+    });
     pool.on("connect", (client) => {
       const closed = new Promise<void>((resolve) => client.once("end", resolve));
       connectionClosures.add(closed);

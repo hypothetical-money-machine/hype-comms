@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
@@ -41,6 +41,18 @@ describeWithPostgres("isolated database fixture", () => {
 
   it("waits for pooled connections to close and disposes idempotently", async () => {
     const disposable = await createTestDatabase();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(() =>
+        disposable.pool.emit("error", new Error("idle client test error")),
+      ).not.toThrow();
+      expect(errorSpy).toHaveBeenCalledWith(
+        "Unexpected error from an idle Postgres client",
+        expect.any(Error),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
     await disposable.pool.query("SELECT 1");
     await Promise.all([disposable.dispose(), disposable.dispose()]);
     await expect(disposable.pool.query("SELECT 1")).rejects.toThrow(/end/);
