@@ -162,12 +162,12 @@ export class HttpClient {
     const timeout = AbortSignal.timeout(this.options.timeoutMs);
     const signal =
       options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]);
-    signal.throwIfAborted();
-    const credentials =
-      options.includeCredential === false ? {} : await this.options.credentialHeaders?.();
-    signal.throwIfAborted();
     let response: Response;
     try {
+      signal.throwIfAborted();
+      const credentials =
+        options.includeCredential === false ? {} : await this.options.credentialHeaders?.();
+      signal.throwIfAborted();
       response = await this.options.fetch(url, {
         method: options.method ?? "GET",
         headers: { ...credentials, ...options.headers },

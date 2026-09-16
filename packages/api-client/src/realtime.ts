@@ -353,14 +353,17 @@ export class WorkspaceRealtimeClient {
     }
     if (compareSyncPositions(input, this.#cursor) > 0) this.#cursor = input;
     const connection = this.#connection;
+    let acknowledgedDelivery = false;
     if (connection !== null) {
       while (
         connection.pendingDelivery[0] !== undefined &&
         compareSyncPositions(connection.pendingDelivery[0].position, this.#cursor) <= 0
       ) {
         connection.pendingDeliveryBytes -= connection.pendingDelivery.shift()!.bytes;
+        acknowledgedDelivery = true;
       }
     }
+    if (acknowledgedDelivery) this.#failures = 0;
   }
 
   setPresence(state: Exclude<PresenceState, "offline">): void {

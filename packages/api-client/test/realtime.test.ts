@@ -61,6 +61,8 @@ function setup() {
   const positions: SyncPosition[] = [];
   const events: ProductRealtimeEvent[] = [];
   const failures: RealtimeFailure[] = [];
+  const reconnectFailures: number[] = [];
+  const states: string[] = [];
   const realtime = new WorkspaceRealtimeClient({
     apiOrigin: "https://chat.example",
     clientOrigin: "https://chat.example",
@@ -73,12 +75,17 @@ function setup() {
       sockets.push(socket);
       return socket;
     },
-    reconnectDelay: () => 1,
+    reconnectDelay: (failureCount) => {
+      reconnectFailures.push(failureCount);
+      return 1;
+    },
     onEvent({ event }) {
       events.push(event);
       return true;
     },
-    onState() {},
+    onState(state) {
+      states.push(state);
+    },
     onFailure(failure) {
       failures.push(failure);
       return failure.kind === "invalid_frame";
@@ -86,7 +93,7 @@ function setup() {
   });
   const scope = realtime.prepare({ after: position(0), userId, workspaceId });
   realtime.activate(scope);
-  return { realtime, scope, sockets, positions, events, failures };
+  return { realtime, scope, sockets, positions, events, failures, reconnectFailures, states };
 }
 
 describe("shared realtime delivery", () => {
@@ -133,6 +140,49 @@ describe("shared realtime delivery", () => {
       state.sockets[1]!.emit("close", 1006);
       await vi.waitFor(() => expect(state.sockets).toHaveLength(3));
       expect(state.positions[2]).toEqual(position(1));
+    } finally {
+      state.realtime.resetSession();
+    }
+  });
+
+  it("stops when a valid envelope contains an unknown canonical event", async () => {
+    const state = setup();
+    try {
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(1));
+      const socket = state.sockets[0]!;
+      socket.frame(frame(0, true));
+      const futureEvent = { ...frame(1), type: "future.event" };
+      socket.emit("message", Buffer.from(JSON.stringify(futureEvent)), false);
+      expect(state.states).toContain("live");
+      expect(socket.close).toHaveBeenCalledWith(1002, expect.any(String));
+      expect(state.states).toContain("incompatible");
+    } finally {
+      state.realtime.resetSession();
+    }
+  });
+
+  it("resets reconnect failures after a successfully delivered event", async () => {
+    const state = setup();
+    try {
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(1));
+      state.sockets[0]!.emit("open");
+      state.sockets[0]!.frame(frame(0, true));
+      state.sockets[0]!.frame(frame(1));
+      state.sockets[0]!.emit("close", 1006);
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(2));
+      state.sockets[1]!.emit("open");
+      state.sockets[1]!.frame(frame(0, true));
+      state.sockets[1]!.frame(frame(2));
+      state.sockets[1]!.emit("close", 1006);
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(3));
+      expect(state.reconnectFailures).toEqual([1, 2]);
+      state.sockets[2]!.emit("open");
+      state.sockets[2]!.frame(frame(0, true));
+      state.sockets[2]!.frame(frame(3));
+      state.realtime.acknowledge({ scope: state.scope, cursor: position(3) });
+      state.sockets[2]!.emit("close", 1006);
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(4));
+      expect(state.reconnectFailures).toEqual([1, 2, 1]);
     } finally {
       state.realtime.resetSession();
     }

@@ -73,6 +73,20 @@ describe("shared request boundaries", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it("normalizes an already-aborted request as a network failure", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetch = vi.fn<(url: URL, init: RequestInit) => Promise<Response>>();
+
+    await expect(
+      client(fetch).request({ ...request, signal: controller.signal }),
+    ).rejects.toMatchObject({
+      kind: "network",
+      cause: { name: "AbortError" },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("retries only opted-in mutations with their original idempotency key", async () => {
     const fetch = vi.fn<(url: URL, init: RequestInit) => Promise<Response>>(async () =>
       response('{"ok":true}'),
