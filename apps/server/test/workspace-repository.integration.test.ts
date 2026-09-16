@@ -2279,32 +2279,41 @@ describe("WorkspaceRepository", () => {
        VALUES ($1, $2, 'member', 'active'), ($1, $3, 'member', 'active')`,
       [workspaceId, pairActorId, pairPeerId],
     );
-    const direct = await repository.createDirectConversation(pairActor, { memberId: pairPeerId });
+    const direct = await repository.createDirectConversation(pairActor, {
+      memberId: pairPeerId.toUpperCase(),
+    });
     await expect(
-      repository.findDirectConversation(pairActor, { memberId: pairPeerId.toUpperCase() }),
+      repository.findDirectConversation(pairActor, { memberId: pairPeerId }),
     ).resolves.toMatchObject({
       conversation: { conversation: { id: direct.conversation.conversation.id } },
     });
     const groupKey = randomUUID();
     const group = await repository.createGroupDirectConversation(
       pairActor,
-      { memberIds: [pairPeerId, memberId] },
+      { memberIds: [pairPeerId.toUpperCase(), memberId.toUpperCase()] },
       groupKey,
     );
     await expect(
       repository.createGroupDirectConversation(
         pairActor,
-        { memberIds: [memberId, pairPeerId] },
+        { memberIds: [memberId.toUpperCase(), pairPeerId.toUpperCase()] },
         groupKey,
       ),
     ).resolves.toEqual(group);
     await expect(
       repository.createGroupDirectConversation(
         pairActor,
-        { memberIds: [pairPeerId, pairPeerId.toUpperCase()] },
+        { memberIds: [pairPeerId, pairActorId.toUpperCase()] },
         randomUUID(),
       ),
     ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" });
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [memberId, pairPeerId] },
+        groupKey,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
   });
 
   it.each(["event insert", "commit"] as const)(
