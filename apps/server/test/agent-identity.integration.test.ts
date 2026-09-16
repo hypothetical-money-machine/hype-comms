@@ -280,6 +280,17 @@ describe("agent identity and owner administration", () => {
         ).statusCode,
       ).toBe(400);
     }
+    for (const authorization of ["Bearer", "Bearer invalid", `Bearer ${bot.token} extra`]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/v1/members",
+            headers: { authorization, cookie: `hype_comms_session=${ownerSessionToken}` },
+          })
+        ).statusCode,
+      ).toBe(400);
+    }
     for (const authorization of [
       "Bearer",
       "Bearer invalid",
