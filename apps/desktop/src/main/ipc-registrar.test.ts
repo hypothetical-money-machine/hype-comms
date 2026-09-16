@@ -173,6 +173,25 @@ describe("desktop invoke registration", () => {
     expect(tasks).not.toHaveBeenCalled();
   });
 
+  it("rejects string message-history limits at the desktop IPC boundary", async () => {
+    const registry = new Registry();
+    const history = vi.fn<WorkspaceIpcTransport["history"]>();
+    const transport = workspaceTransport({ history });
+    registerDesktopInvokes(
+      registry,
+      authorize,
+      handlers(createWorkspaceInvokeHandlers(() => transport)),
+    );
+
+    await expect(
+      registry.invoke(DESKTOP_INVOKE_CONTRACTS.workspaceMessagesList.channel, {
+        conversationId: CONVERSATION_ID,
+        limit: "50",
+      }),
+    ).rejects.toThrow();
+    expect(history).not.toHaveBeenCalled();
+  });
+
   it("runs task reads through both boundaries and resolves the current transport for each call", async () => {
     const registry = new Registry();
     const tasks = vi.fn<WorkspaceIpcTransport["tasks"]>().mockResolvedValue(EMPTY_TASKS);

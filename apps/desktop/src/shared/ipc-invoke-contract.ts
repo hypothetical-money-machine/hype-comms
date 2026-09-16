@@ -33,6 +33,9 @@ const systemThemeState = themeState.refine((state) => state.preference === "syst
   message: "Main returned a non-system appearance for the system preview",
 });
 const historyRequest = c.messageHistoryQuerySchema
+  .extend({
+    limit: z.number().int().min(1).max(c.MESSAGE_HISTORY_MAX_LIMIT).default(50),
+  })
   .extend({ conversationId: c.entityIdSchema })
   .strict();
 const filesRequest = z
