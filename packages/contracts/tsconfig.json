@@ -5,6 +5,7 @@
     "lib": ["ES2024"],
     "rootDir": "src",
     "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
     "declarationMap": true,
     "composite": true
   },
