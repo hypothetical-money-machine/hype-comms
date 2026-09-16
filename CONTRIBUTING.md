@@ -19,7 +19,7 @@ npm run check
 `npm run check` includes the PostgreSQL integration gate and therefore requires
 `HYPE_COMMS_TEST_DATABASE_URL` pointing to a disposable test database. CI supplies an isolated
 PostgreSQL service; contributors without PostgreSQL can run the formatting, lint, typecheck, and
-unit lanes individually.
+unit lanes with `npm run check:fast`.
 
 CI repeats these checks and runs the desktop packaging lanes on hosted runners.
 
