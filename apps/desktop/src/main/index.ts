@@ -186,6 +186,7 @@ import { scopedWorkspaceSession } from "./scoped-workspace-session";
 import { openWorkspaceAttachment } from "./open-workspace-attachment";
 import { chooseAiChannelWorkspace } from "./choose-ai-channel-workspace";
 import { suspendLocalAi } from "./suspend-local-ai";
+import { replaceAuthenticationWithLocalWork } from "./replace-authentication-with-local-work";
 import { startDesktopSession } from "./start-desktop-session";
 import { WorkspaceSessionOwner, type OwnedWorkspaceSession } from "./workspace-session-owner";
 import { WorkspaceTransport } from "./workspace-transport";
@@ -643,14 +644,12 @@ function attachmentUploadScopeKey(state: ChatSessionState): string | null {
 function replaceDesktopAuthentication<T>(operation: () => Promise<T>): Promise<T> {
   const lifecycle = desktopSessionLifecycle;
   if (lifecycle === null) throw new Error("Desktop session is unavailable");
-  // Offline Claude can run without an online transport. Retire that work before changing cookies.
-  const localSuspension = workspaceSessions?.current == null ? suspendAiChannel() : undefined;
-  const replacement = lifecycle.replaceAuthentication(async (assertCurrent) => {
-    await localSuspension;
-    assertCurrent();
-    return operation();
+  const replacement = replaceAuthenticationWithLocalWork({
+    lifecycle,
+    hasWorkspaceSession: workspaceSessions?.current != null,
+    suspendLocalWork: suspendAiChannel,
+    operation,
   });
-  void localSuspension?.catch(() => undefined);
   macWindowlessRealtimeActive = false;
   notificationScope = null;
   notificationActiveGeneration = null;
@@ -1166,8 +1165,9 @@ function registerIpcHandlers(): void {
     },
     sessionRetry: async (): Promise<ChatSessionState> => {
       if (chatSession === null) throw new Error("Chat is not configured");
-      await chatSession.restore();
-      return (await desktopSessionLifecycle?.readState()) ?? chatSession.state;
+      const session = chatSession;
+      await replaceDesktopAuthentication(() => session.restore());
+      return (await desktopSessionLifecycle?.readState()) ?? session.state;
     },
     sessionAuthCapabilities: async () => {
       if (chatSession === null) {

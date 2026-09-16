@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatSessionState } from "@hype-comms/contracts";
 import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
 import { WorkspaceSessionOwner } from "./workspace-session-owner";
+import { replaceAuthenticationWithLocalWork } from "./replace-authentication-with-local-work";
 
 const SIGNED_IN: ChatSessionState = {
   status: "signed-in",
@@ -28,6 +29,79 @@ class Source {
 }
 
 describe("desktop session lifecycle", () => {
+  it("suspends offline local work before a retry clears credentials and holds state reads", async () => {
+    const source = new Source();
+    source.state = {
+      status: "session-unavailable",
+      reason: "server_unreachable",
+      message: "Offline",
+    };
+    const sessions = new WorkspaceSessionOwner(() => ({}));
+    const lifecycle = new DesktopSessionLifecycle({
+      source,
+      sessions,
+      publish: vi.fn(),
+      reportFailure: vi.fn(),
+    });
+    await lifecycle.readState();
+    expect(sessions.current).toBeNull();
+    const suspension = deferred<void>();
+    const restoring = deferred<void>();
+    const restored = deferred<void>();
+    const restore = vi.fn(async () => {
+      restoring.resolve();
+      await restored.promise;
+      source.set({ status: "signed-out" });
+      return source.state;
+    });
+    const retry = replaceAuthenticationWithLocalWork({
+      lifecycle,
+      hasWorkspaceSession: sessions.current !== null,
+      suspendLocalWork: () => suspension.promise,
+      operation: restore,
+    });
+    let readFinished = false;
+    const reading = lifecycle.readState().then((state) => {
+      readFinished = true;
+      return state;
+    });
+    await Promise.resolve();
+    expect(restore).not.toHaveBeenCalled();
+    expect(readFinished).toBe(false);
+    suspension.resolve();
+    await restoring.promise;
+    expect(readFinished).toBe(false);
+    restored.resolve();
+    await expect(retry).resolves.toEqual({ status: "signed-out" });
+    await expect(reading).resolves.toEqual({ status: "signed-out" });
+    await lifecycle.dispose();
+  });
+
+  it("does not restore stale credentials after another authentication supersedes local suspension", async () => {
+    const source = new Source();
+    const lifecycle = new DesktopSessionLifecycle({
+      source,
+      sessions: new WorkspaceSessionOwner(() => ({})),
+      publish: vi.fn(),
+      reportFailure: vi.fn(),
+    });
+    await lifecycle.readState();
+    const suspension = deferred<void>();
+    const restore = vi.fn(async () => source.state);
+    const retry = replaceAuthenticationWithLocalWork({
+      lifecycle,
+      hasWorkspaceSession: false,
+      suspendLocalWork: () => suspension.promise,
+      operation: restore,
+    });
+    const rejected = expect(retry).rejects.toMatchObject({ name: "AbortError" });
+    await lifecycle.replaceAuthentication(async () => undefined);
+    suspension.resolve();
+    await rejected;
+    expect(restore).not.toHaveBeenCalled();
+    await lifecycle.dispose();
+  });
+
   it("starts resources before publishing restored login and keeps them on renewal", async () => {
     const source = new Source();
     source.state = SIGNED_IN;
