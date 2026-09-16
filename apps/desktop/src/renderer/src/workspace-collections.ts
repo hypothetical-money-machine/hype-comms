@@ -263,10 +263,6 @@ export function replayCollectionPage(
           messages,
           applyRetractReservation(source, new Map([[reservation.messageId, reservation]])),
         );
-      else
-        threadSummaries = threadSummaries.filter(
-          (summary) => summary.latestReply.conversationId !== event.conversationId,
-        );
     } else if (event.type === "message.created") {
       const message = event.payload.message;
       // Existing rows are refreshed here. Newly created rows already reached the runtime and cache

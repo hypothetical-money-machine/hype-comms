@@ -1527,7 +1527,7 @@ export class WorkspaceRuntime {
             });
           },
         );
-        if (!this.#isProjectionCurrent(projection)) return;
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
         const next = this.collectionState(identity).nextCursor;
         if (next === null) return;
         if (seen.has(next) || next === cursor)
@@ -1609,7 +1609,7 @@ export class WorkspaceRuntime {
             this.#setState({ tasks: mergeTasks(this.#state.tasks, records.tasks) });
           },
         );
-        if (!this.#isProjectionCurrent(projection)) return;
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
         const next = this.collectionState(identity).nextCursor;
         if (next === null) return;
         if (seen.has(next) || next === cursor)
@@ -2840,8 +2840,10 @@ export class WorkspaceRuntime {
         nextCursor: thread.nextCursor,
         invalidatedAt: null,
       });
-      for (const message of threadMessages)
-        reactionPositions.set(message.id, thread.snapshotPosition);
+      for (const message of threadMessages) {
+        if (!reactionPositions.has(message.id))
+          reactionPositions.set(message.id, thread.snapshotPosition);
+      }
       threadCursors.set(openThreadRootId, thread.nextCursor);
       const retainedThreadMessages = this.#retainMessages(threadMessages);
       refreshedMessages = mergeMessages(refreshedMessages, retainedThreadMessages);
