@@ -16,14 +16,11 @@
     "url": "https://github.com/hypothetical-money-machine/hype-comms.git"
   },
   "scripts": {
-    "prebuild": "npm run build --workspace @hype-comms/contracts",
-    "predev": "npm run build --workspace @hype-comms/contracts && install-electron --no",
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "pretest": "npm run build --workspace @hype-comms/contracts",
-    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
+    "predev": "install-electron --no",
+    "dev": "npm run --prefix ../.. build:contracts && electron-vite dev",
+    "build": "npm run --prefix ../.. build:contracts && electron-vite build",
     "typecheck": "tsc --build --pretty false",
-    "test": "vitest run",
+    "test": "npm run --prefix ../.. build:contracts && vitest run",
     "test:watch": "vitest",
     "package": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --publish never",
     "package:mac": "npm run build && node ../../scripts/build-macos-notification-authorization.mjs && electron-builder --config electron-builder.config.mjs --mac --publish never",

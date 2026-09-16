@@ -1,4 +1,5 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
     "target": "ES2022",
@@ -7,15 +8,13 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "types": ["vite/client"],
-    "strict": true,
     "noEmit": true,
     "noFallthroughCasesInSwitch": true,
-    "noImplicitOverride": true,
-    "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "useUnknownInCatchVariables": true,
-    "skipLibCheck": true
+    // Deferred: exactOptionalPropertyTypes is scheduled after a renderer refactor, not this slice.
+    "exactOptionalPropertyTypes": false
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.tsx", "src/shared/**/*.ts"]
 }

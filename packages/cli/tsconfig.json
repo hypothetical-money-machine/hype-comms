@@ -5,13 +5,14 @@
     "lib": ["ES2024"],
     "rootDir": "src",
     "outDir": "dist",
-    "declaration": true,
+    // build.mjs recreates dist from scratch, so the marker lives beside tsconfig; the bundle is
+    // always regenerated and nothing consumes the tsc emit, so a stale marker cannot hide output.
+    "tsBuildInfoFile": ".tsbuildinfo",
     "declarationMap": true,
-    "sourceMap": true,
     "composite": true,
-    "rewriteRelativeImportExtensions": true,
-    "exactOptionalPropertyTypes": true
+    "rewriteRelativeImportExtensions": true
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test"]
 }
