@@ -25,6 +25,7 @@
     "test": "vitest run",
     "pretypecheck": "npm run build --workspace @hype-comms/contracts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:route-declarations": "tsc -p tsconfig.route-declarations.json --noEmit",
     "pretest:unit": "npm run build --workspace @hype-comms/contracts",
     "pretest:integration": "npm run build --workspace @hype-comms/contracts",
     "test:unit": "vitest run --project unit",
