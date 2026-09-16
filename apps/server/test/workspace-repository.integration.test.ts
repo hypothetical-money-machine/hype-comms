@@ -2287,6 +2287,11 @@ describe("WorkspaceRepository", () => {
     ).resolves.toMatchObject({
       conversation: { conversation: { id: direct.conversation.conversation.id } },
     });
+    await expect(
+      repository.findDirectConversation(pairActor, { memberId: pairPeerId.toUpperCase() }),
+    ).resolves.toMatchObject({
+      conversation: { conversation: { id: direct.conversation.conversation.id } },
+    });
     const groupKey = randomUUID();
     const group = await repository.createGroupDirectConversation(
       pairActor,
@@ -2314,6 +2319,38 @@ describe("WorkspaceRepository", () => {
         groupKey,
       ),
     ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [pairPeerId, pairPeerId.toUpperCase()] },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" });
+  });
+
+  it("replays a group request with its historical sorted lowercase fingerprint", async () => {
+    const key = randomUUID();
+    const response = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [observerId, memberId] },
+      key,
+    );
+    // Pin the pre-normalization format independently of the request-fingerprint helper.
+    const legacyFingerprint = createHash("sha256")
+      .update(JSON.stringify({ memberIds: [memberId, observerId] }))
+      .digest();
+    const stored = await pool.query<{ request_fingerprint: Buffer }>(
+      `SELECT request_fingerprint FROM api_idempotency_records WHERE idempotency_key = $1`,
+      [key],
+    );
+    expect(stored.rows).toEqual([{ request_fingerprint: legacyFingerprint }]);
+    const before = await pool.query("SELECT count(*)::int AS count FROM sync_events");
+    await expect(
+      repository.createGroupDirectConversation(owner, { memberIds: [memberId, observerId] }, key),
+    ).resolves.toEqual(response);
+    expect((await pool.query("SELECT count(*)::int AS count FROM sync_events")).rows).toEqual(
+      before.rows,
+    );
   });
 
   it.each(["event insert", "commit"] as const)(
