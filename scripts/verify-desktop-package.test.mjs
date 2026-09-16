@@ -57,7 +57,12 @@ test("requires the active Claude worker and rejects bundled Codex packages or ex
     /contains bundled official Codex packages/u,
   );
 
-  for (const executable of ["/vendor/codex", "/vendor/codex.exe"]) {
+  for (const executable of [
+    "/vendor/codex",
+    "/vendor/codex.exe",
+    "/node_modules/.bin/codex.cmd",
+    "/node_modules/.bin/codex.ps1",
+  ]) {
     const bundledExecutable = baselinePackageEntries();
     bundledExecutable.add(executable);
     assert.throws(

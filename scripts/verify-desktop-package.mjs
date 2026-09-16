@@ -174,7 +174,7 @@ export function verifyPackageEntries(asarPath, entries) {
   }
 
   const packagedCodexExecutables = [...entries].filter((entry) =>
-    /\/codex(?:\.exe)?$/iu.test(entry),
+    /\/codex(?:\.exe|\.cmd|\.ps1)?$/iu.test(entry),
   );
   if (packagedCodexExecutables.length > 0) {
     throw new Error(
