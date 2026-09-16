@@ -184,6 +184,7 @@ import { WorkspaceRealtime, createRealtimeEpochAllocator } from "./workspace-rea
 import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
 import { scopedWorkspaceSession } from "./scoped-workspace-session";
 import { openWorkspaceAttachment } from "./open-workspace-attachment";
+import { chooseAiChannelWorkspace } from "./choose-ai-channel-workspace";
 import { suspendLocalAi } from "./suspend-local-ai";
 import { startDesktopSession } from "./start-desktop-session";
 import { WorkspaceSessionOwner, type OwnedWorkspaceSession } from "./workspace-session-owner";
@@ -1128,16 +1129,12 @@ function registerIpcHandlers(): void {
         if (selection.canceled || selection.filePaths.length !== 1 || selectedPath === undefined) {
           return controller.state;
         }
-        try {
-          const workspacePath = await realpath(selectedPath);
-          if (!(await stat(workspacePath)).isDirectory()) {
-            throw new Error("Not a directory");
-          }
-          assertCurrent();
-          return await controller.chooseWorkspace(workspacePath);
-        } catch {
-          throw new Error("The selected AI Channel folder is unavailable");
-        }
+        return chooseAiChannelWorkspace(selectedPath, {
+          realpath,
+          stat,
+          assertCurrent,
+          chooseWorkspace: (workspacePath) => controller.chooseWorkspace(workspacePath),
+        });
       });
     },
     aiChannelSessionNew: async (_context, value) => {
