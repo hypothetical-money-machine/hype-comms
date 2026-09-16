@@ -160,7 +160,11 @@ import {
   type MessageRow,
   type ReadCursorRow,
 } from "./records.js";
-import { readConversationSummaries, readUnreadCounts } from "./conversation-summary-reader.js";
+import {
+  readConversationSummaries,
+  readUnreadCounts,
+  type UnreadCounts,
+} from "./conversation-summary-reader.js";
 
 interface WorkspaceRow extends QueryResultRow {
   id: string;
@@ -355,11 +359,6 @@ interface ConversationPage {
   readonly conversations: ConversationSummary[];
   readonly nextCursor: string | null;
   readonly hasMore: boolean;
-}
-
-interface UnreadCounts {
-  readonly unreadCount: number;
-  readonly mentionCount: number;
 }
 
 export interface WorkspaceRepositoryHooks {

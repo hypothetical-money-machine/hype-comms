@@ -11,7 +11,7 @@ import {
   type ReadCursorRow,
 } from "./records.js";
 
-interface UnreadCounts {
+export interface UnreadCounts {
   readonly unreadCount: number;
   readonly mentionCount: number;
 }
