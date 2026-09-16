@@ -93,7 +93,7 @@ interface CommunicationPathRow extends QueryResultRow {
  * unique index. Every DM lookup and insert derives its pair here so the two cannot drift.
  */
 function directMessagePair(actorId: string, memberId: string): { low: string; high: string } {
-  const pair = [actorId, memberId].sort();
+  const pair = [actorId, memberId].map((id) => id.toLowerCase()).sort();
   const low = pair[0];
   const high = pair[1];
   if (low === undefined || high === undefined) throw new Error("Invalid direct-message pair");
@@ -997,8 +997,12 @@ export class WorkspaceConversationOperations {
     input: GroupDirectConversationRequest,
     idempotencyKey: string,
   ): Promise<ConversationMutationResponse> {
-    const memberIds = [...input.memberIds].sort();
-    if (memberIds.includes(identity.currentUser.user.id)) {
+    const rawMemberIds = [...input.memberIds];
+    const memberIds = rawMemberIds.map((id) => id.toLowerCase()).sort();
+    if (new Set(memberIds).size !== memberIds.length) {
+      throw new ApiError(400, "BAD_REQUEST", "Group participants must be unique");
+    }
+    if (memberIds.includes(identity.currentUser.user.id.toLowerCase())) {
       throw new ApiError(400, "BAD_REQUEST", "The caller is already a group participant");
     }
     return runWorkspaceTransaction(this.pool, async (client) => {
@@ -1008,7 +1012,7 @@ export class WorkspaceConversationOperations {
           actorUserId: identity.currentUser.user.id,
           route: "/v1/group-direct-conversations",
           idempotencyKey,
-          requestFingerprint: fingerprintApiRequest({ memberIds }),
+          requestFingerprint: fingerprintApiRequest({ memberIds: rawMemberIds }),
           responseStatus: 201,
           responseSchema: conversationMutationResponseSchema,
         },
@@ -1071,7 +1075,8 @@ export class WorkspaceConversationOperations {
     return runWorkspaceTransaction(
       this.pool,
       async (client) => {
-        const { low, high } = directMessagePair(identity.currentUser.user.id, input.memberId);
+        const memberId = input.memberId.toLowerCase();
+        const { low, high } = directMessagePair(identity.currentUser.user.id, memberId);
         const existing = await client.query<ConversationRow>(
           `SELECT conversation.*
              FROM conversations AS conversation
@@ -1102,7 +1107,7 @@ export class WorkspaceConversationOperations {
             low,
             high,
             identity.currentUser.user.id,
-            input.memberId,
+            memberId,
           ],
         );
         const row = existing.rows[0];
@@ -1164,8 +1169,9 @@ export class WorkspaceConversationOperations {
     identity: AuthenticatedIdentity,
     memberIds: readonly string[],
   ): Promise<void> {
-    const actorId = identity.currentUser.user.id;
-    const participantIds = [...new Set([actorId, ...memberIds])].sort();
+    const actorId = identity.currentUser.user.id.toLowerCase();
+    const canonicalMemberIds = memberIds.map((id) => id.toLowerCase());
+    const participantIds = [...new Set([actorId, ...canonicalMemberIds])].sort();
     const result = await client.query<{ id: string } & QueryResultRow>(
       `SELECT membership.user_id AS id
          FROM workspace_memberships AS membership
@@ -1182,7 +1188,7 @@ export class WorkspaceConversationOperations {
     if (!activeIds.has(actorId)) {
       throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
     }
-    if (memberIds.some((id) => !activeIds.has(id))) {
+    if (canonicalMemberIds.some((id) => !activeIds.has(id))) {
       throw new ApiError(404, "NOT_FOUND", "One or more members were not found");
     }
     // Membership rows are locked in deterministic UUID order before the workspace row. Agent

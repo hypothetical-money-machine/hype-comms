@@ -48,6 +48,8 @@ const observerId = "10000000-0000-4000-8000-000000000003";
 const workspaceId = "10000000-0000-4000-8000-000000000004";
 const generalId = "10000000-0000-4000-8000-000000000005";
 const ownerSessionId = "10000000-0000-4000-8000-000000000006";
+const pairActorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const pairPeerId = "aaaaaaab-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const reactionEmojis = [
   "😀",
   "😃",
@@ -102,6 +104,7 @@ function identity(user: CurrentUser, sessionId = randomUUID()): AuthenticatedIde
 const owner = identity(currentUser(ownerId, "owner", "Owner", "owner"), ownerSessionId);
 const member = identity(currentUser(memberId, "member", "Member", "member"));
 const observer = identity(currentUser(observerId, "observer", "Observer", "member"));
+const pairActor = identity(currentUser(pairActorId, "pair-actor", "Pair Actor", "member"));
 
 const ownerPrincipal: RealtimePrincipal = {
   userId: ownerId,
@@ -2262,6 +2265,31 @@ describe("WorkspaceRepository", () => {
     await expect(repository.history(owner, conversationId, undefined, 50)).resolves.toMatchObject({
       messages: [expect.objectContaining({ id: sent.message.id, body: "note to self" })],
     });
+  });
+
+  it("canonicalizes mixed-case direct participants without changing idempotency inputs", async () => {
+    await pool.query(
+      `INSERT INTO users (id, email, username, display_name)
+       VALUES ($1, 'pair-actor@example.com', 'pair-actor', 'Pair Actor'),
+              ($2, 'pair-peer@example.com', 'pair-peer', 'Pair Peer')`,
+      [pairActorId, pairPeerId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active'), ($1, $3, 'member', 'active')`,
+      [workspaceId, pairActorId, pairPeerId],
+    );
+    const direct = await repository.createDirectConversation(pairActor, { memberId: pairPeerId });
+    await expect(
+      repository.findDirectConversation(pairActor, { memberId: pairPeerId.toUpperCase() }),
+    ).resolves.toMatchObject({ conversation: { conversation: { id: direct.conversation.conversation.id } } });
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [pairPeerId, pairPeerId.toUpperCase()] },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" });
   });
 
   it.each(["event insert", "commit"] as const)(
