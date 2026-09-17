@@ -2849,6 +2849,7 @@ export class WorkspaceRuntime {
     };
     const abandon = (): boolean => {
       this.#releasePartialCatalog(confirmed);
+      this.#recovery.complete(catalogRecovery);
       return false;
     };
     try {
@@ -2880,11 +2881,6 @@ export class WorkspaceRuntime {
               : firstConversation(this.#state.bootstrap);
         const selectedThreadRootId =
           selectedConversationId === oldSelection ? this.#state.selectedThreadRootId : null;
-        this.#recovery.complete(catalogRecovery);
-        if (installed) {
-          this.#recovery.complete(membersRecovery);
-          this.#recovery.complete(replicaRecovery);
-        }
         this.#catalogConfirmedIds = null;
         this.#setState({
           selectedConversationId,
@@ -2904,6 +2900,11 @@ export class WorkspaceRuntime {
           ),
           ...(installed ? { error: null } : {}),
         });
+        this.#recovery.complete(catalogRecovery);
+        if (installed) {
+          this.#recovery.complete(membersRecovery);
+          this.#recovery.complete(replicaRecovery);
+        }
         if (selectedConversationId !== null)
           this.#ensureConversationHistory(selectedConversationId);
         if (selectedThreadRootId !== null)
