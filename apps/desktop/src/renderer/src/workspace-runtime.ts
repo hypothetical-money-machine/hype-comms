@@ -3341,129 +3341,138 @@ export class WorkspaceRuntime {
       this.#catalogConfirmedIds = preview;
       this.#catalogPending = true;
     }
-    const snapshot = await this.#fetchSnapshot(
-      preview === null
-        ? undefined
-        : async (page) => {
-            if (!this.#isProjectionCurrent(projection) || this.#catalogConfirmedIds !== preview)
-              return;
-            if (
-              page.currentUser.user.id !== scope.userId ||
-              page.workspace.id !== scope.workspaceId
-            )
-              throw new Error("The workspace catalog did not match the signed-in session");
-            // A catalog ahead of the applied replica must wait for catch-up before replacing counters.
-            if (
-              this.#syncCursor === null ||
-              this.#syncCursor.epoch !== page.syncCursor.epoch ||
-              compareSyncPositions(this.#syncCursor, page.syncCursor) !== 0
-            )
-              return;
-            if (
-              !(await cache.stageMetadataPage(page, projection.signal)) ||
-              !this.#isProjectionCurrent(projection) ||
-              this.#catalogConfirmedIds !== preview
-            )
-              return;
-            this.#publishMetadataPage(page, preview, true);
-          },
-    );
-    if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
-      return false;
-    }
-    if (
-      snapshot.currentUser.user.id !== scope.userId ||
-      snapshot.workspace.id !== scope.workspaceId
-    ) {
-      throw new Error("The workspace catalog did not match the signed-in session");
-    }
-
-    const cursorBeforeMetadata = this.#syncCursor;
-    if (cursorBeforeMetadata === null) return false;
-    if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
-      return this.#refreshSnapshot(generation, undefined, snapshot);
-    }
-    if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
-      await this.#repairAndFlush(generation, false, false);
-      if (
-        generation !== this.#generation ||
-        cache !== this.#cache ||
-        this.#syncRecoveryPending ||
-        this.#membershipRepairPending
-      ) {
-        return false;
-      }
-    }
-
-    return this.#commitCacheProjection(async () => {
-      if (!this.#isProjectionCurrent(projection)) return false;
-      const loaded = await cache.load();
-      if (!this.#isProjectionCurrent(projection) || loaded.bootstrap === null) {
-        return false;
-      }
-      const durableCursor = loaded.syncCursor;
-      if (durableCursor === null) return false;
-      if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
-        throw new Error("The workspace metadata advanced beyond the repaired cursor");
-      }
-      if (requireCurrentCatalog && compareSyncPositions(snapshot.syncCursor, durableCursor) < 0) {
-        return false;
-      }
-
-      // When events landed after the metadata response, their cached catalog and member projection
-      // is newer. Keep it while still taking workspace, identity-role, and feature metadata from the
-      // response. The final catch-up closes the smaller race after this replacement.
-      const metadataAtDurableCursor =
-        compareSyncPositions(durableCursor, snapshot.syncCursor) === 0;
-      const catalog = metadataAtDurableCursor
-        ? snapshot.conversations
-        : loaded.bootstrap.conversations;
-      const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
-      const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
-      const signal = projection.signal;
-      const replaced = await cache.replaceMetadata(
-        {
-          currentUser: snapshot.currentUser,
-          workspace: snapshot.workspace,
-          members,
-          conversations: catalog,
-          syncCursor: durableCursor,
-          featureFlags: snapshot.featureFlags,
-        },
-        signal,
+    let catalogGateCompleted = preview === null;
+    try {
+      const snapshot = await this.#fetchSnapshot(
+        preview === null
+          ? undefined
+          : async (page) => {
+              if (!this.#isProjectionCurrent(projection) || this.#catalogConfirmedIds !== preview)
+                return;
+              if (
+                page.currentUser.user.id !== scope.userId ||
+                page.workspace.id !== scope.workspaceId
+              )
+                throw new Error("The workspace catalog did not match the signed-in session");
+              // A catalog ahead of the applied replica must wait for catch-up before replacing counters.
+              if (
+                this.#syncCursor === null ||
+                this.#syncCursor.epoch !== page.syncCursor.epoch ||
+                compareSyncPositions(this.#syncCursor, page.syncCursor) !== 0
+              )
+                return;
+              if (
+                !(await cache.stageMetadataPage(page, projection.signal)) ||
+                !this.#isProjectionCurrent(projection) ||
+                this.#catalogConfirmedIds !== preview
+              )
+                return;
+              this.#publishMetadataPage(page, preview, true);
+            },
       );
-      if (!this.#isProjectionCurrent(projection)) return false;
-      if (!replaced) {
-        const reloaded = await this.#reloadCache(generation, cache);
-        // Source-less retractions cannot reconcile counters from their event payload. A durable
-        // winner newer than this catalog may still have those old totals, so require a fresh server
-        // catalog before its retry state can be cleared.
-        return !requireCurrentCatalog && reloaded;
+      if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
+        return false;
       }
-      if (!(await this.#reloadCache(generation, cache))) return false;
+      if (
+        snapshot.currentUser.user.id !== scope.userId ||
+        snapshot.workspace.id !== scope.workspaceId
+      ) {
+        throw new Error("The workspace catalog did not match the signed-in session");
+      }
 
-      for (const conversationId of this.#historyCursors.keys()) {
-        if (!visibleConversationIds.has(conversationId))
-          this.#historyCursors.delete(conversationId);
+      const cursorBeforeMetadata = this.#syncCursor;
+      if (cursorBeforeMetadata === null) return false;
+      if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
+        return this.#refreshSnapshot(generation, undefined, snapshot);
       }
-      const currentSelection = this.#state.selectedConversationId;
-      if (currentSelection !== null && !visibleConversationIds.has(currentSelection)) {
-        const bootstrap = this.#state.bootstrap;
-        this.#setState({
-          selectedConversationId: bootstrap === null ? null : firstConversation(bootstrap),
-          focusedMessageId: null,
-          selectedThreadRootId: null,
-          focusedThreadMessageId: null,
-          threadLoading: false,
-          threadError: null,
-        });
+      if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
+        await this.#repairAndFlush(generation, false, false);
+        if (
+          generation !== this.#generation ||
+          cache !== this.#cache ||
+          this.#syncRecoveryPending ||
+          this.#membershipRepairPending
+        ) {
+          return false;
+        }
       }
-      if (preview !== null && this.#catalogConfirmedIds === preview) {
+
+      return this.#commitCacheProjection(async () => {
+        if (!this.#isProjectionCurrent(projection)) return false;
+        const loaded = await cache.load();
+        if (!this.#isProjectionCurrent(projection) || loaded.bootstrap === null) {
+          return false;
+        }
+        const durableCursor = loaded.syncCursor;
+        if (durableCursor === null) return false;
+        if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
+          throw new Error("The workspace metadata advanced beyond the repaired cursor");
+        }
+        if (requireCurrentCatalog && compareSyncPositions(snapshot.syncCursor, durableCursor) < 0) {
+          return false;
+        }
+
+        // When events landed after the metadata response, their cached catalog and member projection
+        // is newer. Keep it while still taking workspace, identity-role, and feature metadata from the
+        // response. The final catch-up closes the smaller race after this replacement.
+        const metadataAtDurableCursor =
+          compareSyncPositions(durableCursor, snapshot.syncCursor) === 0;
+        const catalog = metadataAtDurableCursor
+          ? snapshot.conversations
+          : loaded.bootstrap.conversations;
+        const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
+        const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
+        const signal = projection.signal;
+        const replaced = await cache.replaceMetadata(
+          {
+            currentUser: snapshot.currentUser,
+            workspace: snapshot.workspace,
+            members,
+            conversations: catalog,
+            syncCursor: durableCursor,
+            featureFlags: snapshot.featureFlags,
+          },
+          signal,
+        );
+        if (!this.#isProjectionCurrent(projection)) return false;
+        if (!replaced) {
+          const reloaded = await this.#reloadCache(generation, cache);
+          // Source-less retractions cannot reconcile counters from their event payload. A durable
+          // winner newer than this catalog may still have those old totals, so require a fresh server
+          // catalog before its retry state can be cleared.
+          return !requireCurrentCatalog && reloaded;
+        }
+        if (!(await this.#reloadCache(generation, cache))) return false;
+
+        for (const conversationId of this.#historyCursors.keys()) {
+          if (!visibleConversationIds.has(conversationId))
+            this.#historyCursors.delete(conversationId);
+        }
+        const currentSelection = this.#state.selectedConversationId;
+        if (currentSelection !== null && !visibleConversationIds.has(currentSelection)) {
+          const bootstrap = this.#state.bootstrap;
+          this.#setState({
+            selectedConversationId: bootstrap === null ? null : firstConversation(bootstrap),
+            focusedMessageId: null,
+            selectedThreadRootId: null,
+            focusedThreadMessageId: null,
+            threadLoading: false,
+            threadError: null,
+          });
+        }
+        if (preview !== null && this.#catalogConfirmedIds === preview) {
+          this.#catalogPending = false;
+          this.#catalogConfirmedIds = null;
+          catalogGateCompleted = true;
+        }
+        return true;
+      });
+    } finally {
+      if (!catalogGateCompleted && this.#catalogConfirmedIds === preview) {
         this.#catalogPending = false;
         this.#catalogConfirmedIds = null;
       }
-      return true;
-    });
+    }
   }
 
   /**
@@ -4736,6 +4745,7 @@ export class WorkspaceRuntime {
           this.#startupRealtimePending = false;
           this.#startupMetadataPending = false;
           await this.#flushOutbox(generation);
+          if (generation !== this.#generation) return;
           this.#setState({ busy: false });
           const selectedConversationId = this.#state.selectedConversationId;
           if (selectedConversationId !== null) {
