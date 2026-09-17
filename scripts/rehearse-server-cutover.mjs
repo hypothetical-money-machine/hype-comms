@@ -86,6 +86,10 @@ function fingerprint(database) {
     database,
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
   ).split("\n");
+  assert.ok(
+    tables.length > 0 && tables[0] !== "",
+    "No public tables found in database fingerprint",
+  );
   return Object.fromEntries(
     tables.map((name) => {
       const quoted = `"${name.replaceAll('"', '""')}"`;
