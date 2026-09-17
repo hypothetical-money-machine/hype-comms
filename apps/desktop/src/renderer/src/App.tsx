@@ -1618,6 +1618,7 @@ export function App({
   };
   const selectedTimelineLoaded = runtimeState.collections.some(
     (collection) =>
+      runtimeState.selectedConversationId !== null &&
       collection.loaded &&
       collection.identity.kind === "timeline" &&
       collection.identity.conversationId === runtimeState.selectedConversationId,
@@ -2218,7 +2219,7 @@ export function App({
                 )}
               {messages.length === 0 &&
                 pending.length === 0 &&
-                (selectedTimelineLoaded ? (
+                (runtimeState.selectedConversationId === null || selectedTimelineLoaded ? (
                   <ConversationEmptyState
                     conversationName={
                       selectedSummary === undefined

@@ -36,6 +36,7 @@ export function useMessagePane({
   const stickToBottom = useRef(true);
   const [atLiveTail, setAtLiveTail] = useState(false);
   const frame = useRef<number | null>(null);
+  const markVisibleReadRef = useRef<() => void>(() => undefined);
   const visibility = useRef({ observedStarts: new Set<string>(), observedEnds: new Set<string>() });
   const trackingKey = useRef<string | null>(null);
   const kind = position.kind;
@@ -69,14 +70,15 @@ export function useMessagePane({
     const messageId = lastReadEligibleMessageId(container, visibility.current, lastReadSequence);
     if (messageId !== null) markRead(conversationId, messageId);
   }, [active, conversationId, isHeadless, key, lastReadSequence, markRead]);
+  markVisibleReadRef.current = markVisibleRead;
 
   const scheduleRead = useCallback(() => {
     if (frame.current !== null) return;
     frame.current = window.requestAnimationFrame(() => {
       frame.current = null;
-      markVisibleRead();
+      markVisibleReadRef.current();
     });
-  }, [markVisibleRead]);
+  }, []);
 
   useEffect(() => {
     window.addEventListener("focus", scheduleRead);
@@ -84,10 +86,18 @@ export function useMessagePane({
     return () => {
       window.removeEventListener("focus", scheduleRead);
       document.removeEventListener("visibilitychange", scheduleRead);
-      if (frame.current !== null) window.cancelAnimationFrame(frame.current);
-      frame.current = null;
     };
   }, [scheduleRead]);
+
+  useEffect(
+    () => () => {
+      if (frame.current !== null) {
+        window.cancelAnimationFrame(frame.current);
+        frame.current = null;
+      }
+    },
+    [],
+  );
 
   const handleScroll = useCallback(() => {
     if (list.current !== null) {
@@ -150,6 +160,10 @@ export function useMessagePane({
     document
       .getElementById(`${kind === "thread" ? "thread-message" : "message"}-${focusedMessageId}`)
       ?.scrollIntoView({ block: "center" });
+  }, [active, focusedMessageId, key, kind, messages.length]);
+
+  useEffect(() => {
+    if (kind !== "thread" || !active || focusedMessageId === null) return;
     scheduleRead();
   }, [active, focusedMessageId, key, kind, messages.length, scheduleRead]);
 
