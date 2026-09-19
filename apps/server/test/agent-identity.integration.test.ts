@@ -282,7 +282,7 @@ describe("agent identity and owner administration", () => {
         (
           await app.inject({
             method: "GET",
-            url: "/v1/members",
+            url: "/v2/members",
             headers: { authorization, cookie: `hype_comms_session=${ownerSessionToken}` },
           })
         ).statusCode,
