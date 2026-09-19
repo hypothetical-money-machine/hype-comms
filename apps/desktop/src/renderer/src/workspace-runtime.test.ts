@@ -1567,7 +1567,7 @@ describe("WorkspaceRuntime", () => {
       }),
       [],
     );
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, cache);
     const starting = runtime.start(session);
     try {
@@ -2588,7 +2588,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.histories.set(CONVERSATION_ID, {
         messages: [peerMessage],
         threadSummaries: [],
