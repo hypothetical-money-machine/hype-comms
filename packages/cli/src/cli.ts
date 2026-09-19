@@ -154,7 +154,7 @@ export async function runCli(argv: readonly string[], runtime: Runtime): Promise
       let input: unknown;
       try {
         input = JSON.parse(await readStream(runtime.io.stdin, MAX_RENDERED_CONTEXT_BYTES));
-      } catch (error) {
+      } catch {
         throw new UsageError("The context-pack response is not valid JSON", "INVALID_CONTEXT_PACK");
       }
       writeResult(context.runtime.io, adapterContext(input, parsedId.data, parsedQuery.data), true);

@@ -27,4 +27,40 @@ describe("CLI adapter protocol", () => {
     });
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      name: "invalid conversation UUID",
+      args: ["adapter", "render-context", "not-a-uuid", "--json"],
+      stdin: "{}",
+      code: "INVALID_ID",
+    },
+    {
+      name: "invalid history limit",
+      args: [
+        "adapter",
+        "render-context",
+        "00000000-0000-4000-8000-000000000000",
+        "--limit",
+        "nope",
+        "--json",
+      ],
+      stdin: "{}",
+      code: "USAGE",
+    },
+    {
+      name: "malformed context JSON",
+      args: ["adapter", "render-context", "00000000-0000-4000-8000-000000000000", "--json"],
+      stdin: "{",
+      code: "INVALID_CONTEXT_PACK",
+    },
+  ])("classifies $name as a non-retryable adapter usage error", async ({ args, stdin, code }) => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const runtime = testRuntime({ fetch, homeDirectory: "/unused", stdin });
+    expect(await executeCli(args, runtime)).toBe(2);
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: { code, retryable: false },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
