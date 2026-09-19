@@ -350,7 +350,7 @@ describe("TasksView", () => {
     fireEvent.click(screen.getByRole("button", { name: /Write launch brief/ }));
     const boardInput = screen.getByRole("textbox", { name: "Task title" });
     boardInput.focus();
-    fireEvent.keyDown(boardInput, { key: "Escape" });
+    expect(fireEvent.keyDown(boardInput, { key: "Escape" })).toBe(true);
     expect(screen.getByRole("dialog", { name: "Task details" })).toBeTruthy();
   });
 

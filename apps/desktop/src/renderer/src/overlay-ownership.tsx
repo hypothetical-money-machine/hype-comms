@@ -133,6 +133,7 @@ interface OverlayOptions {
   readonly returnFocus?: () => HTMLElement | null;
   readonly onEscape: () => void;
   readonly trapFocus?: boolean;
+  readonly escapeWithinContainer?: boolean;
 }
 
 /** Selection closes opt out of restoration; cancellation restores the captured opener. */
@@ -157,7 +158,10 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!lease.isTop() || event.defaultPrevented) return;
       if (event.key === "Escape") {
-        if (latest.current.trapFocus === false && !container.contains(document.activeElement))
+        if (
+          latest.current.escapeWithinContainer === true &&
+          !container.contains(document.activeElement)
+        )
           return;
         event.preventDefault();
         event.stopImmediatePropagation();

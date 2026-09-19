@@ -700,8 +700,8 @@ function TaskDetail({
     initialFocus: () => (disabled ? closeButton.current : titleInput.current),
     focusKey: `${task.id}:${disabled ? "disabled" : "enabled"}`,
     trapFocus: false,
+    escapeWithinContainer: true,
     onEscape: () => {
-      if (!dialog.current?.contains(document.activeElement)) return;
       if (!savingRef.current) onClose();
     },
   });

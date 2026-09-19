@@ -79,6 +79,7 @@ export function ChannelCreatePopover({
   useOwnedOverlay(open, {
     container: popover,
     initialFocus: () => input.current,
+    focusKey: position !== null,
     returnFocus: () => trigger.current,
     onEscape: dismiss,
     trapFocus: false,
