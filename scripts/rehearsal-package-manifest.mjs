@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const directory = path.resolve("apps/desktop/release");
+const output = path.resolve(".dev-data/rehearsal/package-manifest.json");
+await rm(output, { force: true });
 const revision = process.env.GITHUB_SHA;
 if (!/^[a-f0-9]{40}$/u.test(revision ?? ""))
   throw new Error("A complete candidate revision is required");
@@ -26,7 +28,6 @@ for (const name of files) {
   }
   artifacts.push({ name, size, sha256: hash.digest("hex") });
 }
-const output = path.resolve(".dev-data/rehearsal/package-manifest.json");
 await mkdir(path.dirname(output), { recursive: true });
 await writeFile(
   output,

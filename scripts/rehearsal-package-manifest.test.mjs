@@ -45,3 +45,24 @@ test("the candidate manifest describes uploaded packages and feeds, excluding bu
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a failed rehearsal removes stale candidate evidence", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-manifest-stale-test-"));
+  try {
+    const output = path.join(directory, ".dev-data/rehearsal/package-manifest.json");
+    await mkdir(path.dirname(output), { recursive: true });
+    await writeFile(output, '{"revision":"stale"}\n');
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [fileURLToPath(new URL("./rehearsal-package-manifest.mjs", import.meta.url))],
+          { cwd: directory, env: { ...process.env, GITHUB_SHA: "" }, stdio: "pipe" },
+        ),
+      /A complete candidate revision is required/u,
+    );
+    await assert.rejects(readFile(output, "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
