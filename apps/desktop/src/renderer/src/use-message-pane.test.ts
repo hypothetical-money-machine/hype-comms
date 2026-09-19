@@ -46,7 +46,7 @@ function Pane(options: Parameters<typeof useMessagePane>[0]) {
     });
     for (const row of list.querySelectorAll<HTMLElement>("[data-message-id]")) {
       row.getBoundingClientRect = () => new DOMRect(0, 10, 100, 100);
-      row.scrollIntoView = vi.fn();
+      if (!vi.isMockFunction(row.scrollIntoView)) row.scrollIntoView = vi.fn();
     }
     const divider = list.querySelector("[data-divider]");
     if (divider !== null) Object.defineProperty(divider, "offsetTop", { value: 600 });
@@ -113,6 +113,29 @@ describe("pane scrolling and read ownership", () => {
     expect(list.scrollTop).toBe(100);
     view.rerender(createElement(Pane, { ...incoming, pendingCount: 1 }));
     expect(list.scrollTop).toBe(1000);
+  });
+
+  it("keeps a queued read across callback changes and uses the current callback", () => {
+    const initial = options();
+    const view = render(createElement(Pane, initial));
+    flushFrames();
+    vi.mocked(initial.markRead).mockClear();
+    fireEvent.scroll(screen.getByTestId("pane"));
+    const currentMarkRead = vi.fn();
+    view.rerender(createElement(Pane, { ...initial, markRead: currentMarkRead }));
+    flushFrames();
+    expect(initial.markRead).not.toHaveBeenCalled();
+    expect(currentMarkRead).toHaveBeenCalledExactlyOnceWith("conversation-a", "message-a");
+  });
+
+  it("does not recenter the selected message when its read cursor advances", () => {
+    const initial = options({ focusedMessageId: "message-a" });
+    const view = render(createElement(Pane, initial));
+    const message = document.getElementById("message-message-a")!;
+    expect(message.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    vi.mocked(message.scrollIntoView).mockClear();
+    view.rerender(createElement(Pane, { ...initial, lastReadSequence: "1" }));
+    expect(message.scrollIntoView).not.toHaveBeenCalled();
   });
 
   it("retires scheduled reads when the conversation changes and cancels them on disposal", () => {
