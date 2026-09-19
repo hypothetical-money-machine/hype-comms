@@ -151,4 +151,28 @@ describe("overlay ownership", () => {
       container.remove();
     }
   });
+
+  it("does not cancel a sibling overlay close notification", async () => {
+    const owner = new OverlayOwnership();
+    const firstContainer = document.createElement("section");
+    const secondContainer = document.createElement("section");
+    const firstOpener = document.createElement("button");
+    const secondOpener = document.createElement("button");
+    document.body.append(firstContainer, secondContainer, firstOpener, secondOpener);
+    const closed = vi.fn();
+    owner.onClosed(closed);
+    try {
+      const first = owner.acquire(firstContainer, firstOpener);
+      first.release(true);
+      const second = owner.acquire(secondContainer, secondOpener);
+      second.release(true);
+      await act(async () => undefined);
+      expect(closed).toHaveBeenCalledTimes(2);
+    } finally {
+      firstContainer.remove();
+      secondContainer.remove();
+      firstOpener.remove();
+      secondOpener.remove();
+    }
+  });
 });

@@ -697,8 +697,10 @@ function TaskDetail({
   useOwnedOverlay(true, {
     container: dialog,
     initialFocus: () => (disabled ? closeButton.current : titleInput.current),
-    focusKey: disabled,
+    focusKey: `${task.id}:${disabled ? "disabled" : "enabled"}`,
+    trapFocus: false,
     onEscape: () => {
+      if (!dialog.current?.contains(document.activeElement)) return;
       if (!savingRef.current) onClose();
     },
   });
@@ -743,7 +745,6 @@ function TaskDetail({
       ref={dialog}
       className="task-detail"
       role="dialog"
-      aria-modal="true"
       aria-labelledby={titleId}
       aria-busy={saving}
     >

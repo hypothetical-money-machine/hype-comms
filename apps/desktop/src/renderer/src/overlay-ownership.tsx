@@ -46,6 +46,8 @@ function controls(container: HTMLElement): HTMLElement[] {
 
 interface OverlayEntry {
   readonly container: HTMLElement;
+  readonly revision: number;
+  readonly modal: boolean;
   returnTarget: HTMLElement | null;
 }
 
@@ -58,9 +60,11 @@ export interface OverlayLease {
 export class OverlayOwnership {
   readonly #entries: OverlayEntry[] = [];
   readonly #closed = new Set<(restored: boolean) => void>();
-  #revision = 0;
+  readonly #containerRevisions = new WeakMap<HTMLElement, number>();
 
   hasOpen = (): boolean => this.#entries.length > 0;
+
+  hasModalOpen = (): boolean => this.#entries.some((entry) => entry.modal);
 
   /** Listeners receive whether focus actually landed on the opener, not whether it was asked for. */
   onClosed = (listener: (restored: boolean) => void): (() => void) => {
@@ -68,10 +72,11 @@ export class OverlayOwnership {
     return () => this.#closed.delete(listener);
   };
 
-  acquire(container: HTMLElement, returnTarget: HTMLElement | null): OverlayLease {
-    const entry = { container, returnTarget };
+  acquire(container: HTMLElement, returnTarget: HTMLElement | null, modal = true): OverlayLease {
+    const revision = (this.#containerRevisions.get(container) ?? 0) + 1;
+    this.#containerRevisions.set(container, revision);
+    const entry = { container, returnTarget, revision, modal };
     this.#entries.push(entry);
-    this.#revision += 1;
     return {
       isTop: () => this.#entries.at(-1) === entry,
       release: (restoreFocus) => {
@@ -85,11 +90,10 @@ export class OverlayOwnership {
             remaining.returnTarget = entry.returnTarget;
           }
         }
-        const revision = ++this.#revision;
         if (!wasTop) return;
         // Cleanup can run before React removes the focused portal. Restore after that commit.
         queueMicrotask(() => {
-          if (revision !== this.#revision) return;
+          if (this.#containerRevisions.get(entry.container) !== entry.revision) return;
           const top = this.#entries.at(-1);
           const focused = document.activeElement;
           const stillOwned = focused === document.body || entry.container.contains(focused);
@@ -148,7 +152,7 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
     const previous =
       current.returnFocus?.() ??
       (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    const lease = ownership.acquire(container, previous);
+    const lease = ownership.acquire(container, previous, current.trapFocus !== false);
     activeLease.current = lease;
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!lease.isTop() || event.defaultPrevented) return;

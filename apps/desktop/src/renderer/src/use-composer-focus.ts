@@ -95,7 +95,7 @@ export function useComposerFocus(context: ComposerFocusContext) {
       state.current.intent = null;
       return;
     }
-    if (!active || overlays.hasOpen()) return;
+    if (!active || overlays.hasModalOpen()) return;
     if (intent.kind === "conversation" ? !conversationReady || threadRootId !== null : !threadReady)
       return;
     const input = intent.kind === "conversation" ? composerInput.current : threadComposer.current;
@@ -159,7 +159,7 @@ export function useComposerFocus(context: ComposerFocusContext) {
         state.current.intent = null;
         return;
       }
-      if (overlays.hasOpen() || !active || document.activeElement !== document.body) return;
+      if (overlays.hasModalOpen() || !active || document.activeElement !== document.body) return;
       const target = threadRootId ?? conversationId;
       if (target === null) return;
       state.current.intent ??= {

@@ -73,6 +73,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const previousView = useRef<"preferences" | "designer">("preferences");
     const leaveResolver = useRef<((confirmed: boolean) => void) | null>(null);
     const leaveDiscardValidation = useRef<(() => boolean) | null>(null);
+    const discardReturnTarget = useRef<HTMLElement | null>(null);
     const [view, setView] = useState<"preferences" | "designer">("preferences");
     const [designerDirty, setDesignerDirty] = useState(false);
     const [designerSaving, setDesignerSaving] = useState(false);
@@ -88,8 +89,15 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const leaveDiscardForNavigation = useOwnedOverlay(active && discardAction !== null, {
       container: discardDialogRef,
       initialFocus: () => discardKeepEditingRef.current,
+      returnFocus: () => discardReturnTarget.current,
       onEscape: () => cancelDiscard(),
     });
+
+    const openDiscard = useCallback((action: "preferences" | "leave"): void => {
+      discardReturnTarget.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      setDiscardAction(action);
+    }, []);
 
     const cancelDiscard = useCallback((): void => {
       const action = discardAction;
@@ -100,11 +108,11 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
     const returnToPreferences = useCallback((): void => {
       if (designerSaving) return;
       if (designerDirty) {
-        setDiscardAction("preferences");
+        openDiscard("preferences");
         return;
       }
       setView("preferences");
-    }, [designerDirty, designerSaving]);
+    }, [designerDirty, designerSaving, openDiscard]);
 
     const finishDesigner = useCallback((): void => {
       setDesignerDirty(false);
@@ -124,10 +132,10 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
         return new Promise<boolean>((resolve) => {
           leaveResolver.current = resolve;
           leaveDiscardValidation.current = validateDiscard ?? null;
-          setDiscardAction("leave");
+          openDiscard("leave");
         });
       },
-      [designerDirty, designerSaving, discardAction, view],
+      [designerDirty, designerSaving, discardAction, openDiscard, view],
     );
 
     const discardChanges = useCallback((): void => {
