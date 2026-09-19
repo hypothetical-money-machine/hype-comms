@@ -2139,6 +2139,69 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
+  it("marks an unselected conversation as read using its last message and clears unreads", async () => {
+    const secondConversationId = "20000000-0000-4000-8000-000000000002";
+    const secondMessageId = "20000000-0000-4000-8000-000000000003";
+    const initialBootstrap = bootstrapAt("10");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: secondMessageId,
+      conversationId: secondConversationId,
+      conversationSequence: "5",
+    };
+    const secondSummary: ConversationSummary = {
+      ...channel(secondConversationId, "second-channel"),
+      lastMessage: secondMessage,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const bootstrapWithTwo: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [...initialBootstrap.conversations, secondSummary],
+    };
+    const api = new FakeDesktopApi(bootstrapWithTwo);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+
+    runtime.markConversationAsRead(secondConversationId);
+
+    const updatedSummary = runtime.state.bootstrap?.conversations.find(
+      (c) => c.conversation.id === secondConversationId,
+    );
+    expect(updatedSummary?.unreadCount).toBe(0);
+    expect(updatedSummary?.mentionCount).toBe(0);
+
+    await settle(
+      () => api.readCursorRequests.length === 1,
+      "read cursor request for second conversation",
+    );
+    expect(api.readCursorRequests[0]).toEqual({
+      conversationId: secondConversationId,
+      lastReadMessageId: secondMessageId,
+    });
+  });
+
+  it("does nothing when marking a conversation as read that has 0 unreads", async () => {
+    const initialBootstrap = bootstrapAt("10");
+    const zeroUnreadsSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const bootstrap: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [zeroUnreadsSummary],
+    };
+    const api = new FakeDesktopApi(bootstrap);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    runtime.markConversationAsRead(CONVERSATION_ID);
+    expect(api.readCursorRequests).toHaveLength(0);
+  });
+
   it("retries a visible read target after a transient cursor failure", async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);

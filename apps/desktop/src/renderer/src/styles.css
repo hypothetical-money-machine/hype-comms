@@ -669,6 +669,44 @@ html[data-sidebar-position="right"] .sidebar {
   background: var(--theme-action-primary-hover);
 }
 
+.conversation-context-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 8px;
+  background: var(--theme-surface-elevated);
+  box-shadow: var(--theme-shadow-popover);
+}
+
+.conversation-context-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--theme-text-primary);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  line-height: 1.4;
+}
+
+.conversation-context-menu-item:hover:not(:disabled),
+.conversation-context-menu-item:focus-visible:not(:disabled) {
+  background: var(--theme-surface-hover);
+  color: var(--theme-text-strong);
+  outline: none;
+}
+
+.conversation-context-menu-item:disabled {
+  color: var(--theme-text-subtle);
+  cursor: not-allowed;
+}
+
 .conversation {
   display: flex;
   width: 100%;
