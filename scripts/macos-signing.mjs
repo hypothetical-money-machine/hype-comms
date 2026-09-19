@@ -56,8 +56,7 @@ function decodeSecret(value, name) {
     throw new Error(`${name} must contain bounded base64 data`);
   // Wrapped base64 is binary input, never an exported GITHUB_ENV value.
   const encoded = value.replace(/^base64:/u, "").replace(/[ \t\r\n]/gu, "");
-  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded))
-    throw new Error(`${name} must contain base64 data`);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) throw new Error(`${name} must contain base64 data`);
   const bytes = Buffer.from(encoded, "base64");
   if (
     bytes.length === 0 ||
