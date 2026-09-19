@@ -74,6 +74,7 @@ import type {
 import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import type { CachedWorkspaceState, WorkspaceCache } from "./workspace-cache";
 import { MemoryWorkspaceCache } from "./workspace-cache";
+import { replayCollectionPage } from "./workspace-collections";
 import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
 type MessageHistoryResponse = Omit<WireMessageHistoryResponse, "snapshotPosition" | "reactions"> & {
@@ -1609,6 +1610,29 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it.each([
+    ["20000000-0000-4000-8000-000000000099", 1],
+    [THREAD_REPLY_ID, 0],
+  ] as const)(
+    "replays retraction %s without dropping unrelated summaries",
+    (messageId, remaining) => {
+      const summary = { threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply };
+      const result = replayCollectionPage(
+        { messages: [], reactions: [], tasks: [], attachments: [], threadSummaries: [summary] },
+        [
+          {
+            ...peerEvent,
+            type: "message.retracted",
+            entityVersion: 2,
+            payload: { messageId, deletedAt: NOW },
+          },
+        ],
+      );
+      expect(result.threadSummaries).toHaveLength(remaining);
+      if (remaining === 1) expect(result.threadSummaries).toEqual([summary]);
+    },
+  );
+
   it.each([
     ["local send", "fetch"],
     ["realtime hydration", "fetch"],

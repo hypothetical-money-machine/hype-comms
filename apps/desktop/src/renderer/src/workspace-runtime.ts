@@ -2840,10 +2840,8 @@ export class WorkspaceRuntime {
         nextCursor: thread.nextCursor,
         invalidatedAt: null,
       });
-      for (const message of threadMessages) {
-        if (!reactionPositions.has(message.id))
-          reactionPositions.set(message.id, thread.snapshotPosition);
-      }
+      for (const message of threadMessages)
+        reactionPositions.set(message.id, thread.snapshotPosition);
       threadCursors.set(openThreadRootId, thread.nextCursor);
       const retainedThreadMessages = this.#retainMessages(threadMessages);
       refreshedMessages = mergeMessages(refreshedMessages, retainedThreadMessages);
