@@ -182,7 +182,7 @@ describe("desktop invoke registration", () => {
     registerDesktopInvokes(
       registry,
       authorize,
-      handlers(createWorkspaceInvokeHandlers(() => transport)),
+      handlers(createWorkspaceInvokeHandlers(async (operation) => operation(transport))),
     );
 
     await expect(
