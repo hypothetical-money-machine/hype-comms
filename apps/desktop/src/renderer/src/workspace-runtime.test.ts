@@ -1689,6 +1689,43 @@ describe("WorkspaceRuntime", () => {
     },
   );
 
+  it("keeps unconfirmed history blocked until catalog replacement commits", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    class PausedMetadataCache extends FakeWorkspaceCache {
+      override async replaceMetadata(
+        ...args: Parameters<WorkspaceCache["replaceMetadata"]>
+      ): Promise<boolean> {
+        entered.resolve();
+        await release.promise;
+        return super.replaceMetadata(...args);
+      }
+    }
+    const cache = new PausedMetadataCache();
+    await cache.replaceSnapshot(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "removed"),
+        ],
+      }),
+      [],
+    );
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, cache);
+    const starting = runtime.start(session);
+    try {
+      await entered.promise;
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      await drain();
+      expect(api.historyRequests).not.toContain(SECOND_CONVERSATION_ID);
+    } finally {
+      release.resolve();
+      await starting;
+      await runtime.stop();
+    }
+  });
+
   it("retains selected history when a cached metadata reload captured an older view", async () => {
     const captured = deferred<void>();
     const release = deferred<void>();

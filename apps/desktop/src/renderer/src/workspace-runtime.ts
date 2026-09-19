@@ -3397,7 +3397,7 @@ export class WorkspaceRuntime {
         }
       }
 
-      return this.#commitCacheProjection(async () => {
+      return await this.#commitCacheProjection(async () => {
         if (!this.#isProjectionCurrent(projection)) return false;
         const loaded = await cache.load();
         if (!this.#isProjectionCurrent(projection) || loaded.bootstrap === null) {
