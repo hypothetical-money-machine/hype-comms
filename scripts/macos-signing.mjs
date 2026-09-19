@@ -52,8 +52,11 @@ export function parseKeychainList(source) {
 }
 
 function decodeSecret(value, name) {
-  const encoded = value.replace(/^base64:/u, "");
-  if (encoded.length > 12 * 1024 * 1024 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded))
+  if (typeof value !== "string" || value.length > 12 * 1024 * 1024)
+    throw new Error(`${name} must contain bounded base64 data`);
+  // Wrapped base64 is binary input, never an exported GITHUB_ENV value.
+  const encoded = value.replace(/^base64:/u, "").replace(/[ \t\r\n]/gu, "");
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded))
     throw new Error(`${name} must contain base64 data`);
   const bytes = Buffer.from(encoded, "base64");
   if (
@@ -88,13 +91,10 @@ export async function configureMacosSigning({
 } = {}) {
   if (platform !== "darwin") throw new Error("macOS signing requires a macOS runner");
   const files = signingPaths(environment);
-  const certificate = decodeSecret(
-    required(environment, "HYPE_COMMS_MACOS_CSC_LINK"),
-    "Signing certificate",
-  );
+  const certificate = decodeSecret(environment.HYPE_COMMS_MACOS_CSC_LINK, "Signing certificate");
   const certificatePassword = required(environment, "HYPE_COMMS_MACOS_CSC_KEY_PASSWORD");
   const apiKey = decodeSecret(
-    required(environment, "HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64"),
+    environment.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64,
     "Notarization API key",
   );
   const apiKeyId = required(environment, "HYPE_COMMS_MACOS_APPLE_API_KEY_ID");

@@ -157,3 +157,49 @@ test("retains recovery when the native restoration command is missing", async (t
   );
   await cleanupMacosSigning(f);
 });
+
+test("accepts wrapped base64 secrets while preserving exported-value validation", async (t) => {
+  const f = await fixture(t);
+  f.environment.HYPE_COMMS_MACOS_CSC_LINK =
+    "base64:" +
+    Buffer.from("test certificate")
+      .toString("base64")
+      .match(/.{1,8}/gu)
+      .join("\n") +
+    "\n";
+  f.environment.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 =
+    Buffer.from("test notary key")
+      .toString("base64")
+      .match(/.{1,8}/gu)
+      .join("\r\n") + "\r\n";
+  await configureMacosSigning(f);
+  assert.equal(
+    await readFile(path.join(f.directory, "hype-comms-signing-certificate.p12"), "utf8"),
+    "test certificate",
+  );
+  assert.equal(
+    await readFile(path.join(f.directory, "hype-comms-notary-api-key.p8"), "utf8"),
+    "test notary key",
+  );
+  await cleanupMacosSigning(f);
+  f.environment.HYPE_COMMS_MACOS_APPLE_API_KEY_ID = "TESTKEY\nINJECTED=value";
+  f.calls.length = 0;
+  await assert.rejects(configureMacosSigning(f), /must be a single line/u);
+  assert.deepEqual(f.calls, []);
+});
+
+test("rejects invalid or oversized base64 before changing keychains", async (t) => {
+  const f = await fixture(t);
+  for (const value of [
+    undefined,
+    "",
+    " \n",
+    "dGVzdA==\0",
+    "dGVzdA==!",
+    " ".repeat(12 * 1024 * 1024 + 1),
+  ]) {
+    f.environment.HYPE_COMMS_MACOS_CSC_LINK = value;
+    await assert.rejects(configureMacosSigning(f), /Signing certificate/u);
+    assert.deepEqual(f.calls, []);
+  }
+});
