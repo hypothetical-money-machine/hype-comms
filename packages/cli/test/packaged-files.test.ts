@@ -18,8 +18,9 @@ it(
   "the built CLI downloads through its adjacent private-file worker",
   { timeout: 30_000 },
   async () => {
-    // npm test builds once before parallel suites start. Rebuilding here removes the
-    // shared dist directory while build-artifact and watch tests are reading it.
+    // The workspace pretest builds the CLI once before parallel suites start. Rebuilding
+    // here would remove the shared dist directory while build-artifact and watch tests read
+    // it. Running this file on its own first needs `npm run build --workspace @hype-comms/cli`.
     const bytes = Buffer.from("packaged attachment bytes");
     const contentSha256 = createHash("sha256").update(bytes).digest("hex");
     let authenticatedDownloadSeen = false;
