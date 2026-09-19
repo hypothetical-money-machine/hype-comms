@@ -644,6 +644,7 @@ export function TasksView({
 
       {selectedTask !== null && (
         <TaskDetail
+          key={selectedTask.id}
           task={selectedTask}
           assignableMembers={assignableMembers(selectedTask.conversationId)}
           disabled={archived || isConversationArchived(selectedTask.conversationId)}

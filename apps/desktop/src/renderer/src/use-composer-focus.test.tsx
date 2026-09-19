@@ -16,10 +16,18 @@ const initial: Context = {
   deepLinkedReplyId: null,
 };
 
-function ComposerScene({ context, overlay = false }: { context: Context; overlay?: boolean }) {
+function ComposerScene({
+  context,
+  overlay = false,
+  modal = true,
+}: {
+  context: Context;
+  overlay?: boolean;
+  modal?: boolean;
+}) {
   const focus = useComposerFocus(context);
   const dialog = useRef<HTMLElement>(null);
-  useOwnedOverlay(overlay, { container: dialog, onEscape: () => undefined });
+  useOwnedOverlay(overlay, { container: dialog, trapFocus: modal, onEscape: () => undefined });
   return (
     <>
       <input aria-label="Other input" />
@@ -45,10 +53,10 @@ function ComposerScene({ context, overlay = false }: { context: Context; overlay
   );
 }
 
-function scene(context: Context, overlay = false) {
+function scene(context: Context, overlay = false, modal = true) {
   return (
     <OverlayProvider>
-      <ComposerScene context={context} overlay={overlay} />
+      <ComposerScene context={context} overlay={overlay} modal={modal} />
     </OverlayProvider>
   );
 }
@@ -108,6 +116,13 @@ describe("composer focus intents", () => {
     expect(document.activeElement).toBe(document.body);
     rerender(scene({ ...initial, conversationId: "b" }, true));
     expect(document.activeElement).toBe(document.body);
+  });
+
+  it("does not block composer focus behind a non-modal overlay", () => {
+    const { rerender } = render(scene(initial, true, false));
+    screen.getByRole("button", { name: "Overlay action" }).blur();
+    rerender(scene({ ...initial, conversationId: "b" }, true, false));
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Conversation" }));
   });
 
   it("does not publish a deferred focus after the scene is disposed", async () => {

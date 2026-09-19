@@ -157,6 +157,8 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!lease.isTop() || event.defaultPrevented) return;
       if (event.key === "Escape") {
+        if (latest.current.trapFocus === false && !container.contains(document.activeElement))
+          return;
         event.preventDefault();
         event.stopImmediatePropagation();
         latest.current.onEscape();

@@ -344,6 +344,27 @@ describe("TasksView", () => {
     await waitFor(() => expect(document.activeElement).toBe(row));
   });
 
+  it("does not close task details when Escape comes from the board", () => {
+    renderTasks();
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    fireEvent.click(screen.getByRole("button", { name: /Write launch brief/ }));
+    const boardInput = screen.getByRole("textbox", { name: "Task title" });
+    boardInput.focus();
+    fireEvent.keyDown(boardInput, { key: "Escape" });
+    expect(screen.getByRole("dialog", { name: "Task details" })).toBeTruthy();
+  });
+
+  it("reapplies initial focus when switching between open tasks", () => {
+    renderTasks();
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    fireEvent.click(screen.getByRole("button", { name: /Write launch brief/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Review rollout/ }));
+    expect(screen.getByRole("textbox", { name: "Title" }).getAttribute("value")).toBe(
+      "Review rollout",
+    );
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Title" }));
+  });
+
   it("moves focus when an open task becomes read-only and editable again", () => {
     const { rerender, props } = renderTasks();
     fireEvent.click(screen.getByRole("button", { name: "List" }));
