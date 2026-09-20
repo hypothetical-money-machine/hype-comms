@@ -199,6 +199,17 @@ entities and the committed sync cursor where applicable. Errors use
 `{ error: { code, message, requestId, details? } }`; production messages are safe for users
 and never include stack traces, SQL, tokens, email-existence hints, or object keys.
 
+Server route modules use `routeModule` from `apps/server/src/http/route-registrar.ts`.
+Every declaration names an authentication policy, static scopes, and schemas for the inputs it
+consumes. Ordinary routes authenticate and check static scopes before parsing application inputs;
+conditional and resource permissions remain in the handler or its explicit validation hook.
+Handlers receive parsed inputs rather than raw body, query, or path values. Public entry points
+select `publicPolicy` explicitly. Credential exchanges and WebSocket upgrades declare validation
+before credential consumption through `registerCredential` and `websocket`; they preserve
+single-use credentials and the existing error order. The registrar also owns raw attachment and
+signed-webhook body parsing. Type checks and ESLint prevent route modules from using unrestricted
+Fastify registration.
+
 Collection pagination uses opaque `before`/`after` cursors, defaults to 50 items, and caps at 100. Mutation requests carry `Idempotency-Key`; create-message additionally carries the same
 UUID as `clientMessageId`. A replay with the same authenticated actor, route, key, and body
 returns the original result. Reuse with a different fingerprint returns `409 CONFLICT`.
