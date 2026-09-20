@@ -10,7 +10,10 @@ export function captureTimelineScrollAnchor(container: HTMLElement): TimelineScr
   let partial: TimelineScrollAnchor | null = null;
   for (const row of container.querySelectorAll<HTMLElement>("article[data-message-id]")) {
     const bounds = row.getBoundingClientRect();
-    if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom) continue;
+    if (bounds.bottom <= viewport.top) continue;
+    // Rows are laid out in document order down one column, so the first row past the viewport
+    // means every later row is too.
+    if (bounds.top >= viewport.bottom) break;
     const messageId = row.dataset.messageId;
     if (messageId === undefined) continue;
     const anchor = { messageId, offset: bounds.top - viewport.top };
@@ -24,10 +27,10 @@ export function restoreTimelineScrollAnchor(
   container: HTMLElement,
   anchor: TimelineScrollAnchor,
 ): void {
-  const row = [...container.querySelectorAll<HTMLElement>("article[data-message-id]")].find(
-    (candidate) => candidate.dataset.messageId === anchor.messageId,
+  const row = container.querySelector<HTMLElement>(
+    `article[data-message-id="${CSS.escape(anchor.messageId)}"]`,
   );
-  if (row === undefined) return;
+  if (row === null) return;
   const viewport = container.getBoundingClientRect();
   const offset = row.getBoundingClientRect().top - viewport.top;
   container.scrollTop += offset - anchor.offset;

@@ -2483,13 +2483,23 @@ export class WorkspaceRuntime {
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const retainedMessages = this.#retainMessages(history.messages);
-      const knownIds = new Set(this.#state.messages.map((message) => message.id));
-      const addedMessages = retainedMessages.some(
-        (message) =>
-          !knownIds.has(message.id) &&
-          message.deletedAt === null &&
-          (!history.threadsSupported || message.threadRootId === null),
+      // Index the page, not the store: each "load older" click walks up to
+      // MAX_OVERLAPPING_HISTORY_PAGES pages, and the incoming page is at most 50 messages while
+      // the store can hold thousands.
+      const unseenVisibleIds = new Set(
+        retainedMessages
+          .filter(
+            (message) =>
+              message.deletedAt === null &&
+              (!history.threadsSupported || message.threadRootId === null),
+          )
+          .map((message) => message.id),
       );
+      for (const message of this.#state.messages) {
+        unseenVisibleIds.delete(message.id);
+        if (unseenVisibleIds.size === 0) break;
+      }
+      const addedMessages = unseenVisibleIds.size > 0;
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#setState({
         messages: mergeMessages(this.#state.messages, retainedMessages),

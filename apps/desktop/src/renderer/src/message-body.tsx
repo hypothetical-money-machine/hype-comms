@@ -2,6 +2,7 @@ import type { User } from "@hype-comms/contracts";
 import {
   Children,
   createContext,
+  createElement,
   Fragment,
   isValidElement,
   memo,
@@ -162,59 +163,35 @@ interface MarkdownBodyProps {
 
 const MARKDOWN_PLUGINS = [remarkGfm, remarkLiteralHtml];
 
+/** Tags whose only job is to run their text children through the mention/channel renderer. */
+const TEXT_ONLY_TAGS = [
+  "p",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "li",
+  "strong",
+  "em",
+  "del",
+  "th",
+  "td",
+] as const;
+
+const TEXT_ONLY_COMPONENTS = Object.fromEntries(
+  TEXT_ONLY_TAGS.map((tag) => [
+    tag,
+    ({ children, node, ...props }: { children?: ReactNode; node?: unknown }) => {
+      void node;
+      return createElement(tag, props, renderText(children));
+    },
+  ]),
+) as Components;
+
 const MARKDOWN_COMPONENTS: Components = {
-  p: ({ children, node, ...props }) => {
-    void node;
-    return <p {...props}>{renderText(children)}</p>;
-  },
-  h1: ({ children, node, ...props }) => {
-    void node;
-    return <h1 {...props}>{renderText(children)}</h1>;
-  },
-  h2: ({ children, node, ...props }) => {
-    void node;
-    return <h2 {...props}>{renderText(children)}</h2>;
-  },
-  h3: ({ children, node, ...props }) => {
-    void node;
-    return <h3 {...props}>{renderText(children)}</h3>;
-  },
-  h4: ({ children, node, ...props }) => {
-    void node;
-    return <h4 {...props}>{renderText(children)}</h4>;
-  },
-  h5: ({ children, node, ...props }) => {
-    void node;
-    return <h5 {...props}>{renderText(children)}</h5>;
-  },
-  h6: ({ children, node, ...props }) => {
-    void node;
-    return <h6 {...props}>{renderText(children)}</h6>;
-  },
-  li: ({ children, node, ...props }) => {
-    void node;
-    return <li {...props}>{renderText(children)}</li>;
-  },
-  strong: ({ children, node, ...props }) => {
-    void node;
-    return <strong {...props}>{renderText(children)}</strong>;
-  },
-  em: ({ children, node, ...props }) => {
-    void node;
-    return <em {...props}>{renderText(children)}</em>;
-  },
-  del: ({ children, node, ...props }) => {
-    void node;
-    return <del {...props}>{renderText(children)}</del>;
-  },
-  th: ({ children, node, ...props }) => {
-    void node;
-    return <th {...props}>{renderText(children)}</th>;
-  },
-  td: ({ children, node, ...props }) => {
-    void node;
-    return <td {...props}>{renderText(children)}</td>;
-  },
+  ...TEXT_ONLY_COMPONENTS,
   a: ({ children, href, node, ...props }) => {
     void node;
     const linkChildren = (

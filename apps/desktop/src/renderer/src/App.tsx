@@ -69,7 +69,7 @@ import {
 } from "./timeline-scroll-anchor";
 import { MessageComposer } from "./message-composer";
 import { mentionedMemberIds } from "./mentions";
-import { isMessageContinuation } from "./message-grouping";
+import { isMessageContinuation, messageGroupFlags } from "./message-grouping";
 import {
   isReadTrackingEligible,
   isTimelineAtBottom,
@@ -1216,6 +1216,10 @@ export function App({
       ),
     [runtimeState.messages, runtimeState.selectedConversationId, runtimeState.threadsSupported],
   );
+  const timelineGrouping = useMemo(
+    () => messageGroupFlags(messages, preferences.groupConsecutiveMessages),
+    [messages, preferences.groupConsecutiveMessages],
+  );
   const unreadDividerMessageId = useUnreadDividerMessageId(
     runtimeState.selectedConversationId,
     messages,
@@ -1245,6 +1249,7 @@ export function App({
       item.operation.conversationId === runtimeState.selectedConversationId &&
       (!runtimeState.threadsSupported || item.operation.message.threadRootId === null),
   );
+  const timelineEmpty = messages.length === 0 && pending.length === 0;
   const selectedThreadRootId = runtimeState.threadsSupported
     ? runtimeState.selectedThreadRootId
     : null;
@@ -2851,15 +2856,16 @@ export function App({
                       if (conversationId === null) return;
                       const list = messageList.current;
                       const anchor = list === null ? null : captureTimelineScrollAnchor(list);
-                      historyAnchor.current =
-                        anchor === null
-                          ? null
-                          : {
-                              conversationId,
-                              focusRequest: runtimeState.focusedMessageRequest,
-                              anchor,
-                            };
-                      if (anchor !== null) stickToTimelineBottom.current = false;
+                      if (anchor === null) {
+                        historyAnchor.current = null;
+                      } else {
+                        historyAnchor.current = {
+                          conversationId,
+                          focusRequest: runtimeState.focusedMessageRequest,
+                          anchor,
+                        };
+                        stickToTimelineBottom.current = false;
+                      }
                       void runtime.loadOlder(conversationId);
                     }}
                   >
@@ -2873,11 +2879,9 @@ export function App({
                   </button>
                 )}
               {selectedHistoryError !== undefined && <p role="alert">{selectedHistoryError}</p>}
-              {messages.length === 0 && pending.length === 0 && selectedHistoryLoading ? (
+              {timelineEmpty && selectedHistoryLoading ? (
                 <p role="status">Loading conversation history…</p>
-              ) : messages.length === 0 &&
-                pending.length === 0 &&
-                selectedHistoryError === undefined ? (
+              ) : timelineEmpty && selectedHistoryError === undefined ? (
                 <ConversationEmptyState
                   conversationName={
                     selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
@@ -2890,10 +2894,9 @@ export function App({
               ) : (
                 messages.map((message, index) => (
                   <Fragment key={message.id}>
-                    {shouldShowDateSeparator(
-                      message.createdAt,
-                      messages[index - 1]?.createdAt ?? null,
-                    ) && <MessageDateSeparator value={message.createdAt} />}
+                    {timelineGrouping[index]?.showDateSeparator === true && (
+                      <MessageDateSeparator value={message.createdAt} />
+                    )}
                     {message.id === unreadDividerMessageId &&
                       runtimeState.selectedConversationId !== null && (
                         <UnreadDivider conversationId={runtimeState.selectedConversationId} />
@@ -2908,10 +2911,7 @@ export function App({
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
                       onCreateTask={tasksAvailable ? createTaskFromMessage : undefined}
                       highlighted={message.id === runtimeState.focusedMessageId}
-                      continuation={
-                        preferences.groupConsecutiveMessages &&
-                        isMessageContinuation(message, messages[index - 1] ?? null)
-                      }
+                      continuation={timelineGrouping[index]?.continuation === true}
                       timestampFormat={preferences.timestampFormat}
                       channelReferences={channelReferences}
                       onOpenChannel={selectConversation}

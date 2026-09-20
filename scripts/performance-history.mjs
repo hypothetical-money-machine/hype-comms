@@ -1,7 +1,12 @@
 /* global document, requestAnimationFrame */
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import { timelineCount, scrollTimelineEdge, inspectTimeline } from "./performance-timeline.mjs";
+import {
+  clickConversation,
+  timelineCount,
+  scrollTimelineEdge,
+  inspectTimeline,
+} from "./performance-timeline.mjs";
 
 // Run after all timing cycles. Measure the user actions needed to get beyond restored pages;
 // a control may require several clicks, while every request must retain the server cursor chain.
@@ -11,11 +16,7 @@ export async function measureOlderHistory(
   directory,
   { cdp, captureProfile, getRequests },
 ) {
-  await page.evaluate((name) => {
-    [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-      .find((button) => button.querySelector(".conversation-label-text")?.textContent === name)
-      .click();
-  }, channel.name);
+  await clickConversation(page, { name: channel.name });
   await scrollTimelineEdge(page, "start");
   const before = await timelineCount(page);
   const initialIds = (await inspectTimeline(page)).renderedIds;
@@ -65,7 +66,8 @@ export async function measureOlderHistory(
   const traversal = await inspectTimeline(page);
   const retained = new Set(traversal.renderedIds);
   if (initialIds.some((id) => !retained.has(id))) throw new Error("Older history lost loaded rows");
-  const newIds = traversal.renderedIds.filter((id) => !initialIds.includes(id));
+  const initial = new Set(initialIds);
+  const newIds = traversal.renderedIds.filter((id) => !initial.has(id));
   await scrollTimelineEdge(page, "start");
   await page.screenshot({ path: path.join(directory, "older-history.png") });
   return {

@@ -1167,6 +1167,19 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     // A process may have stopped after staging the fail-closed marker but before the event's purge
     // transaction began. Finish that transaction before decrypting or returning any cached state.
     await this.#finishStagedMembershipEvent();
+    // One statement of the load scope: the whole table when unscoped, nothing when the caller
+    // asked for no conversation, and the conversation index otherwise.
+    const scopedRows = <Row extends { conversationId: string }>(
+      table: Table<Row, string>,
+    ): Promise<Row[]> => {
+      if (options === undefined) {
+        return table.toArray();
+      }
+      if (options.conversationId === null) {
+        return Promise.resolve([]);
+      }
+      return table.where("conversationId").equals(options.conversationId).toArray();
+    };
     const [
       metadata,
       workspaceRows,
@@ -1181,27 +1194,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       this.#database.workspaces.toArray(),
       this.#database.members.toArray(),
       this.#database.conversations.toArray(),
-      options === undefined
-        ? this.#database.messages.toArray()
-        : options.conversationId === null
-          ? Promise.resolve([] as MessageRow[])
-          : this.#database.messages
-              .where("conversationId")
-              .equals(options.conversationId)
-              .toArray(),
-      options === undefined
-        ? this.#database.reactions.toArray()
-        : options.conversationId === null
-          ? Promise.resolve([] as ReactionRow[])
-          : this.#database.reactions
-              .where("conversationId")
-              .equals(options.conversationId)
-              .toArray(),
-      options === undefined
-        ? this.#database.tasks.toArray()
-        : options.conversationId === null
-          ? Promise.resolve([] as TaskRow[])
-          : this.#database.tasks.where("conversationId").equals(options.conversationId).toArray(),
+      scopedRows(this.#database.messages),
+      scopedRows(this.#database.reactions),
+      scopedRows(this.#database.tasks),
       this.#database.outbox.orderBy("createdAt").toArray(),
     ]);
     const [workspacePayloads, members, conversations, messages, reactions, tasks, operations] =
@@ -2677,11 +2672,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
 
   async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
     this.#finishStagedMembershipEvent();
+    const inScope = (conversationId: string | null | undefined): boolean =>
+      options === undefined || conversationId === options.conversationId;
     const reservations = retractReservationMap(this.#retractReservations);
     const retainedMessages = applyRetractReservationsToMessages(
-      [...this.#messages.values()].filter(
-        (message) => options === undefined || message.conversationId === options.conversationId,
-      ),
+      [...this.#messages.values()].filter((message) => inScope(message.conversationId)),
       reservations,
     );
     const retractedIds = retractedMessageIds(retainedMessages, reservations);
@@ -2711,13 +2706,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       reactions: [...this.#reactions.values()]
         .filter(
           (reaction) =>
-            options === undefined ||
-            this.#reactionConversationIds.get(reaction.id) === options.conversationId,
+            inScope(this.#reactionConversationIds.get(reaction.id)) &&
+            !retractedIds.has(reaction.messageId),
         )
-        .filter((reaction) => !retractedIds.has(reaction.messageId))
         .sort(compareReactions),
       tasks: [...this.#tasks.values()]
-        .filter((task) => options === undefined || task.conversationId === options.conversationId)
+        .filter((task) => inScope(task.conversationId))
         .sort(compareTasks),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),

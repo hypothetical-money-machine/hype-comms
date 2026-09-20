@@ -6,6 +6,7 @@ import { measureOlderHistory } from "./performance-history.mjs";
 import { writeFile } from "node:fs/promises";
 import { summarize } from "./performance-statistics.mjs";
 import {
+  clickConversation,
   inspectTimeline,
   scrollTimelineEdge,
   scrollTimelineToMessage,
@@ -93,11 +94,7 @@ export async function readPerformanceCache(page, expectedIds = []) {
 export async function verifyPerformanceTimelineLayout(page, channels, directory) {
   const observations = [];
   for (const channel of channels) {
-    await page.evaluate((name) => {
-      [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-        .find((button) => button.querySelector(".conversation-label-text")?.textContent === name)
-        .click();
-    }, channel.name);
+    await clickConversation(page, { name: channel.name });
     const history = await inspectTimeline(page);
     await scrollTimelineEdge(page, "end");
     const tail = await page.locator(".message-list").evaluate((list) => {
@@ -520,11 +517,7 @@ export async function measureOfflineBacklog({
         captureProfile: captureProfiles,
         getRequests,
       });
-      await receiver.page.evaluate((name) => {
-        [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-          .find((button) => button.querySelector(".conversation-label-text")?.textContent === name)
-          .click();
-      }, channels.at(-1).name);
+      await clickConversation(receiver.page, { name: channels.at(-1).name });
       result.tallLayout = await verifyTallMessageLayout(
         receiver.page,
         channels.at(-1).id,

@@ -20,7 +20,12 @@ import {
   watchVisibleWindow,
 } from "./performance-visible.mjs";
 import { summarize } from "./performance-statistics.mjs";
-import { timelineCount, scrollTimelineEdge, inspectTimeline } from "./performance-timeline.mjs";
+import {
+  clickConversation,
+  timelineCount,
+  scrollTimelineEdge,
+  inspectTimeline,
+} from "./performance-timeline.mjs";
 import { measureOfflineBacklog, readPerformanceCache } from "./performance-backlog.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -696,15 +701,7 @@ async function main() {
     // A separate signed-in Electron client sends via the real preload/HTTP path. Observe the
     // receiver's canonical message row to include WebSocket, encrypted cache and React work.
     const receiver = await launch("woots", path.join(directory, "callbacks/woots.callback"));
-    const receiverGeneral = general;
-    await page.evaluate(() => {
-      [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-        .find(
-          (b) =>
-            b.querySelector(".conversation-label-text")?.textContent.toLowerCase() === "general",
-        )
-        .click();
-    });
+    await clickConversation(page, { slug: "general" });
     await paint(page);
     await scrollTimelineEdge(page, "end");
     await scrollTimelineEdge(receiver.page, "end");
@@ -727,7 +724,7 @@ async function main() {
             },
           });
         },
-        { conversationId: receiverGeneral, body },
+        { conversationId: general, body },
       );
       if (response.status !== "accepted")
         throw new Error(`Send failed: ${JSON.stringify(response)}`);
@@ -883,17 +880,9 @@ async function main() {
     result.longTasks = await page.evaluate(() => globalThis.performanceLongTasks);
     result.rendererAfterHistory = (await cdp.send("Performance.getMetrics")).metrics;
     result.afterInteractions = processUsage(active.child.pid);
-    result.metrics = timings;
     await page.screenshot({ path: path.join(directory, "workspace.png") });
     if (options.delay > 0 && options.restoreCache === "opening") {
-      await page.evaluate(() => {
-        [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-          .find(
-            (button) =>
-              button.querySelector(".conversation-label-text")?.textContent === "Launch Planning",
-          )
-          .click();
-      });
+      await clickConversation(page, { name: "Launch Planning" });
       await page.screenshot({ path: path.join(directory, "first-visit.png") });
       await page.waitForFunction(() => document.querySelector(".load-older")?.disabled === false);
     }
