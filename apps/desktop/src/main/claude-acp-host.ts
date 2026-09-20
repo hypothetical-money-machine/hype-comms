@@ -206,7 +206,7 @@ function timeoutOrDefault(value: number | undefined, fallback: number): number {
 interface BoundedOperationOptions {
   readonly deadline: number;
   readonly errorCode: ClaudeAcpHostErrorCode;
-  readonly externalSignal?: AbortSignal;
+  readonly externalSignal?: AbortSignal | undefined;
   readonly onAbort?: () => void;
 }
 
