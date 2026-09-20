@@ -793,13 +793,18 @@ export class ChatSession {
       cache: "no-store",
       credentials: "include",
       redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal:
+        init.signal == null
+          ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          : AbortSignal.any([init.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     });
   }
 
   /** Marks the session as ended after the server rejects an authenticated request. */
-  markSignedOut(): Promise<void> {
+  markSignedOut(isCurrent: () => boolean = () => true): Promise<void> {
     return this.#runMutation(async () => {
+      // A 401 can wait behind a successful replacement login in the mutation queue.
+      if (!isCurrent()) return;
       this.#stopRenewal();
       this.#revokeCacheAuthorization();
       await this.#clearCookie(IDENTITY_COOKIE_NAME);

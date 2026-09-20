@@ -9,6 +9,7 @@ import {
   WORKSPACE_REALTIME_PENDING_REPLAY_BYTE_LIMIT,
   WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT,
   WorkspaceRealtime,
+  createRealtimeEpochAllocator,
   type RealtimeConnectionState,
   type RealtimeDropReason,
   type WorkspaceRealtimeScope,
@@ -176,6 +177,7 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 function createHarness(options?: {
+  readonly nextSessionEpoch?: () => number;
   readonly ticket?: () => Promise<{ ticket: string; expiresAt: string }>;
   readonly onEvent?: (event: ProductRealtimeEvent) => boolean;
   readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
@@ -220,6 +222,7 @@ function createHarness(options?: {
       options?.onDrop?.(reason);
     },
     createSocket,
+    nextSessionEpoch: options?.nextSessionEpoch,
   });
   return {
     realtime,
@@ -976,4 +979,20 @@ describe("WorkspaceRealtime", () => {
 
     harness.realtime.stop();
   });
+});
+
+it("rejects activation and acknowledgement from a previous realtime instance of the same account", async () => {
+  const nextSessionEpoch = createRealtimeEpochAllocator();
+  const first = createHarness({ nextSessionEpoch });
+  const oldScope = first.realtime.prepare({ ...SCOPE_A, after: "5" });
+  first.realtime.resetSession();
+  const second = createHarness({ nextSessionEpoch });
+  const newScope = second.realtime.prepare({ ...SCOPE_A, after: "10" });
+  expect(newScope.epoch).toBeGreaterThan(oldScope.epoch);
+  expect(second.realtime.activate(oldScope)).toBe(false);
+  second.realtime.acknowledge({ scope: oldScope, cursor: "999" });
+  expect(second.drops).toContain("stale-control");
+  second.realtime.stop(oldScope);
+  expect(second.realtime.activeScope).toEqual(newScope);
+  second.realtime.resetSession();
 });
