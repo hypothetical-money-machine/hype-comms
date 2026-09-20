@@ -1,17 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  AGENT_CONTEXT_PACK_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
   ATTACHMENT_CONTENT_SHA256_HEADER,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  THREADS_CAPABILITY,
   type AgentCurrentPrincipal,
   type AgentScope,
   type BotScope,
@@ -23,7 +13,6 @@ import { buildApp } from "../src/app.js";
 import type { AuthenticatedBotIdentity, BotService } from "../src/modules/bots/service.js";
 import type { IdentityService } from "../src/modules/identity/service.js";
 import type { RealtimeEventHub } from "../src/modules/realtime/hub.js";
-import { GroupDirectClientUpgradeRequiredError } from "../src/modules/workspace/group-direct-capability.js";
 import type { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 
 const now = "2026-07-27T18:00:00.000Z";
@@ -480,57 +469,17 @@ async function appWithRole(
   return app;
 }
 
-describe("event capability routes", () => {
+describe("canonical workspace routes", () => {
   it("does not expose the retired Wake bootstrap", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const response = await app.inject({
       method: "GET",
-      url: "/v1/agent-wake/bootstrap",
+      url: "/v2/agent-wake/bootstrap",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
     expect(response.statusCode).toBe(404);
     expect(repository.bootstrap).not.toHaveBeenCalled();
-  });
-
-  it("rejects legacy group attachment reads before loading bytes and serves capable clients", async () => {
-    const repository = new FakeWorkspaceRepository();
-    repository.readFileContent.mockRejectedValueOnce(new GroupDirectClientUpgradeRequiredError());
-    const app = await reactionApp(repository);
-
-    const response = await app.inject({
-      method: "GET",
-      url: `/v1/files/${messageId}/content`,
-      headers: { cookie: `hype_comms_session=${sessionToken}` },
-    });
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json().error).toMatchObject({ code: "CONFLICT" });
-    expect(repository.requireGroupDirectMessagesForAttachments).not.toHaveBeenCalled();
-    expect(repository.readFileContent).toHaveBeenCalledWith(
-      expect.objectContaining({ currentUser }),
-      messageId,
-      false,
-    );
-
-    const capable = await app.inject({
-      method: "GET",
-      url: `/v1/files/${messageId}/content`,
-      headers: {
-        cookie: `hype_comms_session=${sessionToken}`,
-        "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
-      },
-    });
-
-    expect(capable.statusCode).toBe(200);
-    expect(capable.body).toBe("payload");
-    expect(repository.requireGroupDirectMessagesForAttachments).not.toHaveBeenCalled();
-    expect(repository.readFileContent).toHaveBeenLastCalledWith(
-      expect.objectContaining({ currentUser }),
-      messageId,
-      true,
-    );
-    expect(repository.readFileContent).toHaveBeenCalledTimes(2);
   });
 
   it("serves authoritative length and SHA-256 headers with attachment bytes", async () => {
@@ -538,7 +487,7 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const response = await app.inject({
       method: "GET",
-      url: `/v1/files/${messageId}/content`,
+      url: `/v2/files/${messageId}/content`,
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -551,21 +500,20 @@ describe("event capability routes", () => {
     expect(repository.readFileContent).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
       messageId,
-      false,
     );
   });
 
-  it("projects announcement bootstrap fields only for capable clients", async () => {
+  it("returns canonical announcement fields regardless of obsolete headers", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const legacy = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
     const capable = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: {
         cookie: `hype_comms_session=${sessionToken}`,
         "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
@@ -573,14 +521,14 @@ describe("event capability routes", () => {
     });
 
     expect(legacy.statusCode).toBe(200);
-    expect(legacy.json().featureFlags).not.toHaveProperty("announcementChannels");
-    expect(legacy.json().conversations[0].conversation).not.toHaveProperty("channelMode");
+    expect(legacy.json().featureFlags.announcementChannels).toBe(true);
+    expect(legacy.json().conversations[0].conversation.channelMode).toBe("announcement");
     expect(capable.statusCode).toBe(200);
     expect(capable.json().featureFlags.announcementChannels).toBe(true);
     expect(capable.json().conversations[0].conversation.channelMode).toBe("announcement");
   });
 
-  it("fails closed if a repository violates the no-group projection contract", async () => {
+  it("includes authorized group conversations without negotiation", async () => {
     const repository = new FakeWorkspaceRepository();
     const bootstrap = await repository.bootstrap();
     const base = bootstrap.conversations[0]!;
@@ -607,16 +555,16 @@ describe("event capability routes", () => {
     const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
     const capableHeaders = {
       ...legacyHeaders,
-      "x-hype-comms-capabilities": GROUP_DIRECT_MESSAGES_CAPABILITY,
+      "x-hype-comms-capabilities": "group-direct-messages-v1",
     };
 
-    for (const url of ["/v1/bootstrap", "/v1/conversations?limit=50"]) {
+    for (const url of ["/v2/bootstrap", "/v2/conversations?limit=50"]) {
       const legacy = await app.inject({ method: "GET", url, headers: legacyHeaders });
       const capable = await app.inject({ method: "GET", url, headers: capableHeaders });
 
-      expect(legacy.statusCode).toBe(409);
+      expect(legacy.statusCode).toBe(200);
       expect(capable.statusCode).toBe(200);
-      expect(legacy.json().error).toMatchObject({ code: "CONFLICT" });
+      expect(legacy.json()).toEqual(capable.json());
       expect(capable.json().conversations[0]).toMatchObject({
         conversation: { kind: "group_direct_message" },
         participantIds: [userId, messageId, reactionId],
@@ -624,23 +572,23 @@ describe("event capability routes", () => {
     }
   });
 
-  it("projects titles only to member-profile-capable clients on every user response surface", async () => {
+  it("includes titles on every user response", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
     const capableHeaders = {
       ...legacyHeaders,
-      "x-hype-comms-capabilities": MEMBER_PROFILES_CAPABILITY,
+      "x-hype-comms-capabilities": "member-profiles-v1",
     };
     const requests = [
-      { url: "/v1/bootstrap", user: (body: Record<string, unknown>) => body.members?.[0] },
-      { url: "/v1/members", user: (body: Record<string, unknown>) => body.members?.[0] },
+      { url: "/v2/bootstrap", user: (body: Record<string, unknown>) => body.members?.[0] },
+      { url: "/v2/members", user: (body: Record<string, unknown>) => body.members?.[0] },
       {
-        url: "/v1/channels/10000000-0000-4000-8000-000000000007/members",
+        url: "/v2/channels/10000000-0000-4000-8000-000000000007/members",
         user: (body: Record<string, unknown>) => (body.members as { user: unknown }[])?.[0]?.user,
       },
       {
-        url: "/v1/admin/communication-paths",
+        url: "/v2/admin/communication-paths",
         user: (body: Record<string, unknown>) => body.members?.[0],
       },
     ] as const;
@@ -654,27 +602,29 @@ describe("event capability routes", () => {
       });
       expect(legacy.statusCode).toBe(200);
       expect(capable.statusCode).toBe(200);
-      expect(request.user(legacy.json())).not.toHaveProperty("title");
+      expect(request.user(legacy.json())).toMatchObject({ title: "Chief Mischief Officer" });
       expect(request.user(capable.json())).toMatchObject({ title: "Chief Mischief Officer" });
     }
 
     const legacySync = await app.inject({
       method: "GET",
-      url: "/v1/sync?after=0&limit=100",
+      url: "/v2/sync?after=0&limit=100",
       headers: legacyHeaders,
     });
     const capableSync = await app.inject({
       method: "GET",
-      url: "/v1/sync?after=0&limit=100",
+      url: "/v2/sync?after=0&limit=100",
       headers: capableHeaders,
     });
-    expect(legacySync.json().events[0].payload.member).not.toHaveProperty("title");
+    expect(legacySync.json().events[0].payload.member).toMatchObject({
+      title: "Chief Mischief Officer",
+    });
     expect(capableSync.json().events[0].payload.member).toMatchObject({
       title: "Chief Mischief Officer",
     });
   });
 
-  it("strips channel mode from every legacy conversation response surface", async () => {
+  it("includes channel mode on every conversation response", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
@@ -683,10 +633,10 @@ describe("event capability routes", () => {
       "x-hype-comms-capabilities": "announcement-channels-v1,threads-v1",
     };
     const requests = [
-      { method: "GET", url: "/v1/conversations?limit=50" },
+      { method: "GET", url: "/v2/conversations?limit=50" },
       {
         method: "POST",
-        url: "/v1/channels",
+        url: "/v2/channels",
         payload: {
           name: "Company News",
           slug: "company-news",
@@ -697,12 +647,12 @@ describe("event capability routes", () => {
       },
       {
         method: "PATCH",
-        url: `/v1/channels/${conversationId}`,
+        url: `/v2/channels/${conversationId}`,
         payload: { isArchived: true },
       },
       {
         method: "POST",
-        url: "/v1/direct-conversations",
+        url: "/v2/direct-conversations",
         payload: { memberId: userId },
       },
     ] as const;
@@ -716,12 +666,12 @@ describe("event capability routes", () => {
         request.method === "GET" ? legacy.json().conversations[0] : legacy.json().conversation;
       const capableSummary =
         request.method === "GET" ? capable.json().conversations[0] : capable.json().conversation;
-      expect(legacySummary.conversation).not.toHaveProperty("channelMode");
+      expect(legacySummary.conversation.channelMode).toBe("announcement");
       expect(capableSummary.conversation.channelMode).toBe("announcement");
     }
   });
 
-  it("projects humans-only access for capable clients and rejects legacy creation", async () => {
+  it("retains humans-only access on reads and creation without negotiation", async () => {
     const repository = new FakeWorkspaceRepository();
     const bootstrap = await repository.bootstrap();
     const humansOnlySummary = {
@@ -748,13 +698,13 @@ describe("event capability routes", () => {
     const legacyHeaders = { cookie: `hype_comms_session=${sessionToken}` };
     const capableHeaders = {
       ...legacyHeaders,
-      "x-hype-comms-capabilities": HUMANS_ONLY_CHANNELS_CAPABILITY,
+      "x-hype-comms-capabilities": "humans-only-channels-v1",
     };
 
     for (const request of [
-      { method: "GET", url: "/v1/bootstrap" },
-      { method: "GET", url: "/v1/conversations?limit=50" },
-      { method: "PATCH", url: `/v1/channels/${conversationId}`, payload: { isArchived: true } },
+      { method: "GET", url: "/v2/bootstrap" },
+      { method: "GET", url: "/v2/conversations?limit=50" },
+      { method: "PATCH", url: `/v2/channels/${conversationId}`, payload: { isArchived: true } },
     ] as const) {
       const legacy = await app.inject({ ...request, headers: legacyHeaders });
       const capable = await app.inject({ ...request, headers: capableHeaders });
@@ -764,71 +714,71 @@ describe("event capability routes", () => {
         request.method === "GET" ? legacy.json().conversations[0] : legacy.json().conversation;
       const capableSummary =
         request.method === "GET" ? capable.json().conversations[0] : capable.json().conversation;
-      expect(legacySummary.conversation.access).toBe("members");
+      expect(legacySummary.conversation.access).toBe("humans");
       expect(capableSummary.conversation.access).toBe("humans");
     }
 
     const legacyBootstrap = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: legacyHeaders,
     });
     const capableBootstrap = await app.inject({
       method: "GET",
-      url: "/v1/bootstrap",
+      url: "/v2/bootstrap",
       headers: capableHeaders,
     });
-    expect(legacyBootstrap.json().featureFlags).not.toHaveProperty("humansOnlyChannels");
+    expect(legacyBootstrap.json().featureFlags.humansOnlyChannels).toBe(true);
     expect(capableBootstrap.json().featureFlags.humansOnlyChannels).toBe(true);
 
     const legacyMembers = await app.inject({
       method: "GET",
-      url: `/v1/channels/${conversationId}/members`,
+      url: `/v2/channels/${conversationId}/members`,
       headers: legacyHeaders,
     });
     const capableMembers = await app.inject({
       method: "GET",
-      url: `/v1/channels/${conversationId}/members`,
+      url: `/v2/channels/${conversationId}/members`,
       headers: capableHeaders,
     });
-    expect(legacyMembers.json()).toMatchObject({ access: "members", canManage: false });
+    expect(legacyMembers.json()).toMatchObject({ access: "humans", canManage: false });
     expect(capableMembers.json()).toMatchObject({ access: "humans", canManage: false });
 
     const input = { name: "People", slug: "people", topic: null, access: "humans" };
     const legacyCreate = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: legacyHeaders,
       payload: input,
     });
     const capableCreate = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: capableHeaders,
       payload: input,
     });
-    expect(legacyCreate.statusCode).toBe(400);
+    expect(legacyCreate.statusCode).toBe(201);
     expect(capableCreate.statusCode).toBe(201);
     expect(capableCreate.json().conversation.conversation.access).toBe("humans");
-    expect(repository.createChannel).toHaveBeenCalledTimes(1);
+    expect(repository.createChannel).toHaveBeenCalledTimes(2);
   });
 
-  it("negotiates event payloads independently for sync and realtime", async () => {
+  it("issues sync and realtime results without capability arguments", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hype_comms_session=${sessionToken}`,
       "x-hype-comms-capabilities":
         `reaction-events-v1, read-state-events-v1, task-events-v1, ` +
-        `${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ` +
-        `${EPHEMERAL_ACTIVITY_CAPABILITY}, ${GROUP_DIRECT_MESSAGES_CAPABILITY}, ` +
-        `${HUMANS_ONLY_CHANNELS_CAPABILITY}, ${SYSTEM_CHANNELS_CAPABILITY}`,
+        `${"participated-thread-notifications-v1"}, ${"message-retract-v1"}, ` +
+        `${"ephemeral-activity-v1"}, ${"group-direct-messages-v1"}, ` +
+        `${"humans-only-channels-v1"}, ${"system-channels-v1"}`,
     };
 
-    const sync = await app.inject({ method: "GET", url: "/v1/sync?after=0&limit=100", headers });
+    const sync = await app.inject({ method: "GET", url: "/v2/sync?after=0&limit=100", headers });
     const ticketResponse = await app.inject({
       method: "POST",
-      url: "/v1/realtime/tickets",
+      url: "/v2/realtime/tickets",
       headers,
     });
 
@@ -838,51 +788,25 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
-      {
-        reactionEvents: true,
-        readStateEvents: true,
-        taskEvents: true,
-        announcementChannels: false,
-        participatedThreadNotifications: true,
-        messageRetractEvents: true,
-        memberProfiles: false,
-        ephemeralActivity: true,
-        groupDirectMessages: true,
-        humansOnlyChannels: true,
-        systemChannels: true,
-      },
     );
     expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
       expect.objectContaining({ currentUser }),
-      {
-        reactionEvents: true,
-        readStateEvents: true,
-        taskEvents: true,
-        announcementChannels: false,
-        participatedThreadNotifications: true,
-        messageRetractEvents: true,
-        memberProfiles: false,
-        ephemeralActivity: true,
-        groupDirectMessages: true,
-        humansOnlyChannels: true,
-        systemChannels: true,
-      },
     );
   });
 
-  it("keeps legacy clients opted out and rejects malformed capability headers", async () => {
+  it("ignores obsolete capability headers", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const legacy = await app.inject({
       method: "GET",
-      url: "/v1/sync?after=0&limit=100",
+      url: "/v2/sync?after=0&limit=100",
       headers,
     });
     const malformed = await app.inject({
       method: "POST",
-      url: "/v1/realtime/tickets",
+      url: "/v2/realtime/tickets",
       headers: { ...headers, "x-hype-comms-capabilities": "reaction events" },
     });
 
@@ -891,22 +815,11 @@ describe("event capability routes", () => {
       expect.objectContaining({ currentUser }),
       "0",
       100,
-      {
-        reactionEvents: false,
-        readStateEvents: false,
-        taskEvents: false,
-        announcementChannels: false,
-        participatedThreadNotifications: false,
-        messageRetractEvents: false,
-        memberProfiles: false,
-        ephemeralActivity: false,
-        groupDirectMessages: false,
-        humansOnlyChannels: false,
-        systemChannels: false,
-      },
     );
-    expect(malformed.statusCode).toBe(400);
-    expect(repository.issueRealtimeTicket).not.toHaveBeenCalled();
+    expect(malformed.statusCode).toBe(200);
+    expect(repository.issueRealtimeTicket).toHaveBeenCalledWith(
+      expect.objectContaining({ currentUser }),
+    );
   });
 
   it("validates and forwards an authorized batch hydration query", async () => {
@@ -914,7 +827,7 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const response = await app.inject({
       method: "POST",
-      url: "/v1/reactions/query",
+      url: "/v2/reactions/query",
       headers: {
         cookie: `hype_comms_session=${sessionToken}`,
         "content-type": "application/json",
@@ -933,7 +846,7 @@ describe("event capability routes", () => {
   it("decodes and forwards one Unicode emoji for idempotent add and remove", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
-    const path = `/v1/messages/${messageId}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
+    const path = `/v2/messages/${messageId}/reactions/${encodeURIComponent("👩🏽‍💻")}`;
     const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const added = await app.inject({ method: "PUT", url: path, headers });
@@ -963,7 +876,7 @@ describe("event capability routes", () => {
     for (const emoji of ["shipit", "👍 🎉"]) {
       const response = await app.inject({
         method: "PUT",
-        url: `/v1/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`,
+        url: `/v2/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`,
         headers,
       });
       expect(response.statusCode).toBe(400);
@@ -977,7 +890,7 @@ describe("event capability routes", () => {
     const app = await reactionApp(repository);
     const response = await app.inject({
       method: "POST",
-      url: "/v1/reactions/query",
+      url: "/v2/reactions/query",
       headers: {
         cookie: `hype_comms_session=${sessionToken}`,
         "content-type": "application/json",
@@ -998,19 +911,19 @@ describe("task routes", () => {
 
     const listed = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${messageId}/tasks?after=cursor&limit=25`,
+      url: `/v2/conversations/${messageId}/tasks?after=cursor&limit=25`,
       headers,
     });
-    const mine = await app.inject({ method: "GET", url: "/v1/tasks/mine", headers });
+    const mine = await app.inject({ method: "GET", url: "/v2/tasks/mine", headers });
     const missingKey = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: { ...headers, "content-type": "application/json" },
       payload: { title: "Build the board" },
     });
     const created = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: {
         ...headers,
         "content-type": "application/json",
@@ -1020,7 +933,7 @@ describe("task routes", () => {
     });
     const updated = await app.inject({
       method: "PATCH",
-      url: `/v1/tasks/${taskId}`,
+      url: `/v2/tasks/${taskId}`,
       headers: {
         ...headers,
         "content-type": "application/json",
@@ -1037,7 +950,7 @@ describe("task routes", () => {
     });
     const moved = await app.inject({
       method: "POST",
-      url: `/v1/tasks/${taskId}/move`,
+      url: `/v2/tasks/${taskId}/move`,
       headers: {
         ...headers,
         "content-type": "application/json",
@@ -1047,7 +960,7 @@ describe("task routes", () => {
     });
     const oversizedVersion = await app.inject({
       method: "PATCH",
-      url: `/v1/tasks/${taskId}`,
+      url: `/v2/tasks/${taskId}`,
       headers: {
         ...headers,
         "content-type": "application/json",
@@ -1119,12 +1032,12 @@ describe("task routes", () => {
 
     const listed = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: authorization,
     });
     const writeWithoutScope = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: {
         ...authorization,
         "content-type": "application/json",
@@ -1134,7 +1047,7 @@ describe("task routes", () => {
     });
     const nonTaskRoute = await app.inject({
       method: "GET",
-      url: "/v1/members",
+      url: "/v2/members",
       headers: authorization,
     });
 
@@ -1159,7 +1072,7 @@ describe("task routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: {
         cookie: `hype_comms_session=${sessionToken}`,
         authorization: "Bearer malformed",
@@ -1183,13 +1096,13 @@ describe("task routes", () => {
 
     const created = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers,
       payload: { title: "Bot-created task" },
     });
     const listed = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${messageId}/tasks`,
+      url: `/v2/conversations/${messageId}/tasks`,
       headers: { authorization: headers.authorization },
     });
 
@@ -1209,7 +1122,7 @@ describe("task routes", () => {
     const botService = new FakeBotService(["tasks:read", "tasks:write"]);
     const app = await reactionApp(repository, botService.asService());
     const headers = { authorization: `Bearer ${botToken}` };
-    const filteredUrl = new URL("http://localhost/v1/channels/general/tasks");
+    const filteredUrl = new URL("http://localhost/v2/channels/general/tasks");
     filteredUrl.searchParams.set("status", "in_progress");
     filteredUrl.searchParams.set("priority", "urgent");
     filteredUrl.searchParams.set("assignee", "me");
@@ -1225,13 +1138,13 @@ describe("task routes", () => {
     });
     const byNumber = await app.inject({
       method: "GET",
-      url: "/v1/channels/general/tasks/12",
+      url: "/v2/channels/general/tasks/12",
       headers,
     });
-    const byId = await app.inject({ method: "GET", url: `/v1/tasks/${taskId}`, headers });
+    const byId = await app.inject({ method: "GET", url: `/v2/tasks/${taskId}`, headers });
     const created = await app.inject({
       method: "POST",
-      url: "/v1/channels/general/tasks",
+      url: "/v2/channels/general/tasks",
       headers: {
         ...headers,
         "content-type": "application/json",
@@ -1241,17 +1154,17 @@ describe("task routes", () => {
     });
     const invalidRange = await app.inject({
       method: "GET",
-      url: "/v1/channels/general/tasks?dueAfter=2026-09-01&dueBefore=2026-08-01",
+      url: "/v2/channels/general/tasks?dueAfter=2026-09-01&dueBefore=2026-08-01",
       headers,
     });
     const invalidNumber = await app.inject({
       method: "GET",
-      url: "/v1/channels/general/tasks/0",
+      url: "/v2/channels/general/tasks/0",
       headers,
     });
     const oversizedNumber = await app.inject({
       method: "GET",
-      url: "/v1/channels/general/tasks/9223372036854775808",
+      url: "/v2/channels/general/tasks/9223372036854775808",
       headers,
     });
 
@@ -1304,7 +1217,7 @@ describe("message thread routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: `/v1/messages/${messageId}`,
+      url: `/v2/messages/${messageId}`,
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1324,7 +1237,7 @@ describe("message thread routes", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/messages/not-a-uuid",
+      url: "/v2/messages/not-a-uuid",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1339,12 +1252,12 @@ describe("message thread routes", () => {
 
     const retracted = await app.inject({
       method: "DELETE",
-      url: `/v1/messages/${messageId}`,
+      url: `/v2/messages/${messageId}`,
       headers,
     });
     const malformed = await app.inject({
       method: "DELETE",
-      url: "/v1/messages/not-a-uuid",
+      url: "/v2/messages/not-a-uuid",
       headers,
     });
 
@@ -1361,29 +1274,29 @@ describe("message thread routes", () => {
     expect(repository.retractMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("gates thread summaries while accepting legacy and capable history clients", async () => {
+  it("always includes thread summaries in history", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const headers = { cookie: `hype_comms_session=${sessionToken}` };
 
     const legacy = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers,
     });
     const capable = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${conversationId}/messages`,
-      headers: { ...headers, "x-hype-comms-capabilities": THREADS_CAPABILITY },
+      url: `/v2/conversations/${conversationId}/messages`,
+      headers: { ...headers, "x-hype-comms-capabilities": "threads-v1" },
     });
 
     expect(legacy.statusCode).toBe(200);
     expect(legacy.json()).toEqual({
       messages: expect.any(Array),
+      threadSummaries: [expect.objectContaining({ threadRootId: messageId, replyCount: 1 })],
+      threadsSupported: true,
       nextCursor: null,
     });
-    expect(legacy.json()).not.toHaveProperty("threadSummaries");
-    expect(legacy.json()).not.toHaveProperty("threadsSupported");
     expect(capable.statusCode).toBe(200);
     expect(capable.json()).toMatchObject({
       messages: expect.any(Array),
@@ -1398,7 +1311,6 @@ describe("message thread routes", () => {
       conversationId,
       undefined,
       50,
-      true,
     );
     expect(repository.history).toHaveBeenNthCalledWith(
       2,
@@ -1406,11 +1318,10 @@ describe("message thread routes", () => {
       conversationId,
       undefined,
       50,
-      false,
     );
   });
 
-  it("serves context history only to clients that negotiated the context-pack capability", async () => {
+  it("serves bounded context history without capability negotiation", async () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
     const sessionHeaders = { cookie: `hype_comms_session=${sessionToken}` };
@@ -1418,28 +1329,22 @@ describe("message thread routes", () => {
     const missingCapability = await app.inject({
       method: "GET",
       url:
-        `/v1/conversations/${conversationId}/messages?contextPack=true` +
+        `/v2/conversations/${conversationId}/messages?contextPack=true` +
         `&throughMessageId=${messageId}&limit=4`,
       headers: sessionHeaders,
     });
-    expect(missingCapability.statusCode).toBe(400);
-    expect(missingCapability.json()).toMatchObject({
-      error: {
-        code: "BAD_REQUEST",
-        message: "Context pack capability is required",
-      },
-    });
+    expect(missingCapability.statusCode).toBe(200);
     expect(repository.history).not.toHaveBeenCalled();
-    expect(repository.contextHistory).not.toHaveBeenCalled();
+    expect(repository.contextHistory).toHaveBeenCalledOnce();
 
     const capable = await app.inject({
       method: "GET",
       url:
-        `/v1/conversations/${conversationId}/messages?contextPack=true` +
+        `/v2/conversations/${conversationId}/messages?contextPack=true` +
         `&throughMessageId=${messageId}&limit=4`,
       headers: {
         ...sessionHeaders,
-        "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+        "x-hype-comms-capabilities": "agent-context-pack-v1",
       },
     });
     expect(capable.statusCode).toBe(200);
@@ -1459,7 +1364,7 @@ describe("message thread routes", () => {
     const app = await reactionApp(repository);
     const headers = {
       cookie: `hype_comms_session=${sessionToken}`,
-      "x-hype-comms-capabilities": AGENT_CONTEXT_PACK_CAPABILITY,
+      "x-hype-comms-capabilities": "agent-context-pack-v1",
     };
 
     for (const query of [
@@ -1470,7 +1375,7 @@ describe("message thread routes", () => {
     ]) {
       const response = await app.inject({
         method: "GET",
-        url: `/v1/conversations/${conversationId}/messages?${query}`,
+        url: `/v2/conversations/${conversationId}/messages?${query}`,
         headers,
       });
       expect(response.statusCode).toBe(400);
@@ -1483,7 +1388,7 @@ describe("message thread routes", () => {
 
     const page = await app.inject({
       method: "GET",
-      url: `/v1/conversations/${conversationId}/messages?contextPack=true&before=cursor`,
+      url: `/v2/conversations/${conversationId}/messages?contextPack=true&before=cursor`,
       headers,
     });
     expect(page.statusCode).toBe(200);
@@ -1503,17 +1408,17 @@ describe("message thread routes", () => {
       cookie: `hype_comms_session=${sessionToken}`,
       "content-type": "application/json",
       "idempotency-key": replyId,
-      "x-hype-comms-capabilities": `${THREADS_CAPABILITY},${ANNOUNCEMENT_CHANNELS_CAPABILITY}`,
+      "x-hype-comms-capabilities": `${"threads-v1"},${"announcement-channels-v1"}`,
     };
 
     const thread = await app.inject({
       method: "GET",
-      url: `/v1/messages/${messageId}/thread?before=cursor&limit=25`,
+      url: `/v2/messages/${messageId}/thread?before=cursor&limit=25`,
       headers,
     });
     const reply = await app.inject({
       method: "POST",
-      url: `/v1/conversations/${conversationId}/messages`,
+      url: `/v2/conversations/${conversationId}/messages`,
       headers,
       payload: {
         threadRootId: messageId,
@@ -1538,7 +1443,6 @@ describe("message thread routes", () => {
       conversationId,
       expect.objectContaining({ clientMessageId: replyId, threadRootId: messageId }),
       "req-2",
-      true,
     );
   });
 
@@ -1547,7 +1451,7 @@ describe("message thread routes", () => {
     const app = await reactionApp(repository);
     const response = await app.inject({
       method: "GET",
-      url: `/v1/messages/${messageId}/thread?limit=101`,
+      url: `/v2/messages/${messageId}/thread?limit=101`,
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1572,16 +1476,16 @@ describe("channel mutation routes", () => {
       "idempotency-key": messageId,
     };
 
-    const accepted = await app.inject({ method: "POST", url: "/v1/channels", headers, payload });
+    const accepted = await app.inject({ method: "POST", url: "/v2/channels", headers, payload });
     const legacy = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { cookie: headers.cookie, "content-type": headers["content-type"] },
       payload: { ...payload, slug: "legacy-channel" },
     });
     const malformed = await app.inject({
       method: "POST",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { ...headers, "idempotency-key": "bad key" },
       payload,
     });
@@ -1592,7 +1496,6 @@ describe("channel mutation routes", () => {
       expect.objectContaining({ currentUser }),
       payload,
       messageId,
-      false,
       "req-1",
       true,
     );
@@ -1602,7 +1505,6 @@ describe("channel mutation routes", () => {
       expect.objectContaining({ currentUser }),
       { ...payload, slug: "legacy-channel" },
       undefined,
-      false,
       "req-2",
       true,
     );
@@ -1622,15 +1524,15 @@ describe("default agent agency rollout gate", () => {
     });
     apps.push(app);
 
-    const anonymous = await app.inject({ method: "GET", url: "/v1/channels" });
+    const anonymous = await app.inject({ method: "GET", url: "/v2/channels" });
     const invalidCredential = await app.inject({
       method: "GET",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { authorization: "Bearer invalid" },
     });
     const authenticated = await app.inject({
       method: "GET",
-      url: "/v1/channels",
+      url: "/v2/channels",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1649,7 +1551,7 @@ describe("default agent agency rollout gate", () => {
       },
     });
     apps.push(app);
-    const url = `/v1/channels/${conversationId}/membership`;
+    const url = `/v2/channels/${conversationId}/membership`;
 
     const anonymous = await app.inject({ method: "PUT", url });
     const invalidCredential = await app.inject({
@@ -1680,7 +1582,7 @@ describe("default agent agency rollout gate", () => {
     apps.push(app);
     const request = {
       method: "POST" as const,
-      url: "/v1/group-direct-conversations",
+      url: "/v2/group-direct-conversations",
       payload: { memberIds: [messageId, replyId] },
     };
 
@@ -1707,7 +1609,7 @@ describe("admin communication paths route", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/admin/communication-paths",
+      url: "/v2/admin/communication-paths",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1723,6 +1625,7 @@ describe("admin communication paths route", () => {
           kind: "human",
           username: "owner",
           displayName: "Owner",
+          title: "Chief Mischief Officer",
           avatarUrl: null,
           createdAt: now,
           updatedAt: now,
@@ -1738,7 +1641,7 @@ describe("admin communication paths route", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/v1/admin/communication-paths",
+      url: "/v2/admin/communication-paths",
       headers: { cookie: `hype_comms_session=${sessionToken}` },
     });
 
@@ -1750,7 +1653,7 @@ describe("admin communication paths route", () => {
     const repository = new FakeWorkspaceRepository();
     const app = await reactionApp(repository);
 
-    const response = await app.inject({ method: "GET", url: "/v1/admin/communication-paths" });
+    const response = await app.inject({ method: "GET", url: "/v2/admin/communication-paths" });
 
     expect(response.statusCode).toBe(401);
     expect(repository.communicationPaths).not.toHaveBeenCalled();

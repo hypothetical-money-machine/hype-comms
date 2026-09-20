@@ -1,12 +1,12 @@
 import { z } from "zod";
 
+import { channelSlugSchema } from "./channel-slug.js";
 import {
   entityIdSchema,
   idempotencyKeySchema,
   isoDateTimeSchema,
   sequenceSchema,
 } from "./common.js";
-import { channelSlugSchema } from "./channel-slug.js";
 import {
   attachmentSchema,
   channelAccessSchema,
@@ -37,31 +37,6 @@ export const paginationCursorSchema = z
   .min(1)
   .max(512)
   .regex(/^[A-Za-z0-9_-]+$/);
-
-export const REACTION_EVENTS_CAPABILITY = "reaction-events-v1";
-export const READ_STATE_EVENTS_CAPABILITY = "read-state-events-v1";
-export const TASK_EVENTS_CAPABILITY = "task-events-v1";
-export const THREADS_CAPABILITY = "threads-v1";
-export const ANNOUNCEMENT_CHANNELS_CAPABILITY = "announcement-channels-v1";
-export const PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY = "participated-thread-notifications-v1";
-export const MESSAGE_RETRACT_EVENTS_CAPABILITY = "message-retract-v1";
-export const MEMBER_PROFILES_CAPABILITY = "member-profiles-v1";
-export const AGENT_CONTEXT_PACK_CAPABILITY = "agent-context-pack-v1";
-export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
-export const GROUP_DIRECT_MESSAGES_CAPABILITY = "group-direct-messages-v1";
-export const HUMANS_ONLY_CHANNELS_CAPABILITY = "humans-only-channels-v1";
-export const SYSTEM_CHANNELS_CAPABILITY = "system-channels-v1";
-export { ATTACHMENTS_CAPABILITY } from "./files.js";
-const clientCapabilitySchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z][a-z0-9-]*$/);
-export const clientCapabilitiesHeaderSchema = z
-  .string()
-  .max(512)
-  .transform((value) => value.split(",").map((capability) => capability.trim()))
-  .pipe(z.array(clientCapabilitySchema).max(32));
 
 /**
  * Conversation listing is cursor-paginated so a workspace can never outgrow the wire contract.
@@ -165,7 +140,7 @@ export const workspaceBootstrapResponseSchema = z
   .strict();
 
 /**
- * `/v1/bootstrap` for a human session. Clients that can only ever be signed-in people -- the
+ * `/v2/bootstrap` for a human session. Clients that can only ever be signed-in people -- the
  * desktop app -- validate against this instead of the principal union, so an agent-shaped or
  * email-less principal is rejected at their boundary rather than parsed and carried inward.
  */
@@ -902,15 +877,14 @@ export const sendMessageResponseSchema = z
   .strict();
 
 /**
- * `DELETE /v1/messages/:id` — author-only delete-in-window retract.
+ * `DELETE /v2/messages/:id` — author-only delete-in-window retract.
  *
  * No request body. Scope `messages:write`. Server clock vs `createdAt`; UI may use
  * `MESSAGE_RETRACT_WINDOW_MS` only to show the control. Other author → 403.
  * After five minutes → 409; the row stays immutable. Success keeps the row, sets
  * `deletedAt`, bumps version, and leaves `body` intact. Attachments disappear with
  * this tombstone. Already retracted → idempotent 200 with the same tombstone (not 409).
- * Live fanout is `message.retracted` to clients that send
- * {@link MESSAGE_RETRACT_EVENTS_CAPABILITY}.
+ * Live fanout is `message.retracted` to each authorized protocol-2 client.
  */
 export const retractMessageResponseSchema = z
   .object({
@@ -949,7 +923,7 @@ const workspaceEventBaseSchema = realtimeEventEnvelopeSchema.extend({
  * Announces THAT the workspace member directory changed -- not what it now is.
  *
  * This event is an invalidation signal, not a state delta. Consumers MUST re-read the
- * authoritative directory (`GET /v1/members`, or a fresh bootstrap) and REPLACE their member
+ * authoritative directory (`GET /v2/members`, or a fresh bootstrap) and REPLACE their member
  * list. They MUST NOT upsert `payload.member` into a cached list.
  *
  * The reason is structural, not stylistic: `userSchema` is `.strict()` and carries no status or
@@ -1070,8 +1044,7 @@ export const channelMembershipChangedEventSchema = workspaceEventBaseSchema.exte
 /**
  * Tombstone for delete-in-window retract. Payload identifies the message and when it
  * disappeared. It does not carry a body: retract is not an edit, and the message body schema
- * forbids a blank body. Clients that omit {@link MESSAGE_RETRACT_EVENTS_CAPABILITY} never
- * receive it; older desktops ignore unknown types.
+ * forbids a blank body. Authorized protocol-2 clients receive this canonical tombstone.
  */
 export const messageRetractedEventSchema = workspaceEventBaseSchema.extend({
   type: z.literal("message.retracted"),
@@ -1094,8 +1067,7 @@ export const messageCreatedEventSchema = workspaceEventBaseSchema
       .object({
         message: messageSchema,
         mentionedUserIds: z.array(entityIdSchema).max(50),
-        // Recipient-specific and capability-gated by the server. Its absence is the complete
-        // legacy shape, so old servers may omit it and new servers must omit it for old clients.
+        // The server includes this only for the authorized recipient with recorded participation.
         recipientNotificationReason: z.literal("participated_thread_reply").optional(),
       })
       .strict(),
@@ -1163,8 +1135,7 @@ export const readCursorUpdatedEventSchema = workspaceEventBaseSchema
     payload: z
       .object({
         readCursor: readCursorSchema,
-        // Optional for retained events and clients predating capability negotiation. New capable
-        // clients receive both fields; the refinement prevents half-populated canonical state.
+        // Retained local records may omit these. New events include both canonical counts.
         unreadCount: z.number().int().nonnegative().optional(),
         mentionCount: z.number().int().nonnegative().optional(),
       })

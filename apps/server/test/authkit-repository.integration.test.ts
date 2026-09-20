@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   AuthKitAdmissionDeniedError,
@@ -524,9 +524,7 @@ describe("AuthKitRepository", () => {
     const member = await identityRepository.findUserByEmail("new-human@example.com");
     if (member === null) throw new Error("Invited member was not created");
 
-    const sync = await workspaceRepository.sync(currentOwner, bootstrap.syncCursor, 100, {
-      humansOnlyChannels: true,
-    });
+    const sync = await workspaceRepository.sync(currentOwner, bootstrap.syncCursor, 100);
     expect(sync.events.filter((event) => event.type === "member.updated")).toEqual([
       expect.objectContaining({
         conversationId: null,
@@ -648,9 +646,7 @@ describe("AuthKitRepository", () => {
       ),
     ).resolves.toMatchObject({ rows: [{ role: "member" }] });
     await expect(
-      workspaceRepository.sync(currentOwner, bootstrap.syncCursor, 100, {
-        humansOnlyChannels: true,
-      }),
+      workspaceRepository.sync(currentOwner, bootstrap.syncCursor, 100),
     ).resolves.toMatchObject({ events: [], highWaterCursor: bootstrap.syncCursor });
   });
 
