@@ -79,3 +79,51 @@ test("runs headless demo smokes on disposable Ubuntu x64 and keeps diagnostics",
   assert.equal(job.environment, undefined);
   assert.doesNotMatch(JSON.stringify(job), /self-hosted|secrets\./u);
 });
+
+test("native release rehearsal is manual, uses production package checks and cannot publish", async () => {
+  const workflow = await readWorkflow("desktop-package-smoke.yml");
+  assert.equal(workflow.on.workflow_dispatch.inputs.release_rehearsal.default, false);
+  const job = workflowJob(workflow, "release-rehearsal");
+  assert.equal(job.if, "github.event_name == 'workflow_dispatch' && inputs.release_rehearsal");
+  assert.deepEqual(job.permissions, { contents: "read" });
+  assert.equal(job.env.HYPE_COMMS_BUILD_FLAVOR, "production");
+  assert.equal(job.env.HYPE_COMMS_API_ORIGIN, "https://chat-api.hypemm.com");
+  const release = workflowJob(await readWorkflow("desktop-release.yml"), "package");
+  assert.deepEqual(job.strategy.matrix, release.strategy.matrix);
+  for (const name of [
+    "Configure Windows Authenticode signing",
+    "Configure macOS signing and notarization",
+    "Package desktop application",
+    "Package desktop application on Windows",
+    "Verify packaged application contents, updater, and fuses",
+    "Verify packaged application contents, updater, and fuses on Windows",
+    "Verify Windows release signing",
+    "Verify macOS release signing and notarization",
+    "Remove temporary macOS signing keychain",
+  ]) {
+    assert.deepEqual(workflowStep(job, name), workflowStep(release, name));
+  }
+  assert.doesNotMatch(
+    JSON.stringify(job),
+    /contents.*write|GARAGE|AWS_|gh release|self-hosted|upload-artifacts|publish-github/u,
+  );
+  for (const platform of ["macOS", "Windows", "Linux"]) {
+    assert.ok(workflowStep(job, `Rehearse native cache migration on ${platform}`));
+  }
+  stepBefore(
+    job,
+    "Verify macOS release signing and notarization",
+    "Record candidate artifact checksums",
+  );
+  stepBefore(
+    job,
+    "Record candidate artifact checksums",
+    "Upload candidate packages and native preservation evidence",
+  );
+  assert.equal(
+    workflowStep(job, "Upload candidate packages and native preservation evidence").with[
+      "retention-days"
+    ],
+    7,
+  );
+});
