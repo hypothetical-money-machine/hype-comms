@@ -48,6 +48,8 @@ const observerId = "10000000-0000-4000-8000-000000000003";
 const workspaceId = "10000000-0000-4000-8000-000000000004";
 const generalId = "10000000-0000-4000-8000-000000000005";
 const ownerSessionId = "10000000-0000-4000-8000-000000000006";
+const pairActorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const pairPeerId = "aaaaaaab-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const reactionEmojis = [
   "😀",
   "😃",
@@ -102,6 +104,7 @@ function identity(user: CurrentUser, sessionId = randomUUID()): AuthenticatedIde
 const owner = identity(currentUser(ownerId, "owner", "Owner", "owner"), ownerSessionId);
 const member = identity(currentUser(memberId, "member", "Member", "member"));
 const observer = identity(currentUser(observerId, "observer", "Observer", "member"));
+const pairActor = identity(currentUser(pairActorId, "pair-actor", "Pair Actor", "member"));
 
 const ownerPrincipal: RealtimePrincipal = {
   userId: ownerId,
@@ -2264,6 +2267,92 @@ describe("WorkspaceRepository", () => {
     });
   });
 
+  it("canonicalizes mixed-case direct participants without changing idempotency inputs", async () => {
+    await pool.query(
+      `INSERT INTO users (id, email, username, display_name)
+       VALUES ($1, 'pair-actor@example.com', 'pair-actor', 'Pair Actor'),
+              ($2, 'pair-peer@example.com', 'pair-peer', 'Pair Peer')`,
+      [pairActorId, pairPeerId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active'), ($1, $3, 'member', 'active')`,
+      [workspaceId, pairActorId, pairPeerId],
+    );
+    const direct = await repository.createDirectConversation(pairActor, {
+      memberId: pairPeerId.toUpperCase(),
+    });
+    await expect(
+      repository.findDirectConversation(pairActor, { memberId: pairPeerId }),
+    ).resolves.toMatchObject({
+      conversation: { conversation: { id: direct.conversation.conversation.id } },
+    });
+    await expect(
+      repository.findDirectConversation(pairActor, { memberId: pairPeerId.toUpperCase() }),
+    ).resolves.toMatchObject({
+      conversation: { conversation: { id: direct.conversation.conversation.id } },
+    });
+    const groupKey = randomUUID();
+    const group = await repository.createGroupDirectConversation(
+      pairActor,
+      { memberIds: [pairPeerId.toUpperCase(), memberId.toUpperCase()] },
+      groupKey,
+    );
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [memberId.toUpperCase(), pairPeerId.toUpperCase()] },
+        groupKey,
+      ),
+    ).resolves.toEqual(group);
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [pairPeerId, pairActorId.toUpperCase()] },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" });
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [memberId, pairPeerId] },
+        groupKey,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
+    await expect(
+      repository.createGroupDirectConversation(
+        pairActor,
+        { memberIds: [pairPeerId, pairPeerId.toUpperCase()] },
+        randomUUID(),
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "BAD_REQUEST" });
+  });
+
+  it("replays a group request with its historical sorted lowercase fingerprint", async () => {
+    const key = randomUUID();
+    const response = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [observerId, memberId] },
+      key,
+    );
+    // Pin the pre-normalization format independently of the request-fingerprint helper.
+    const legacyFingerprint = createHash("sha256")
+      .update(JSON.stringify({ memberIds: [memberId, observerId] }))
+      .digest();
+    const stored = await pool.query<{ request_fingerprint: Buffer }>(
+      `SELECT request_fingerprint FROM api_idempotency_records WHERE idempotency_key = $1`,
+      [key],
+    );
+    expect(stored.rows).toEqual([{ request_fingerprint: legacyFingerprint }]);
+    const before = await pool.query("SELECT count(*)::int AS count FROM sync_events");
+    await expect(
+      repository.createGroupDirectConversation(owner, { memberIds: [memberId, observerId] }, key),
+    ).resolves.toEqual(response);
+    expect((await pool.query("SELECT count(*)::int AS count FROM sync_events")).rows).toEqual(
+      before.rows,
+    );
+  });
+
   it.each(["event insert", "commit"] as const)(
     "rolls task creation back on %s failure and safely retries the same key",
     async (failurePoint) => {
@@ -2580,35 +2669,85 @@ describe("WorkspaceRepository", () => {
     );
   });
 
-  it("unassigns tasks before removing a member from a private channel", async () => {
-    const channel = await repository.createChannel(owner, {
-      name: "Task Crew",
-      slug: "task-crew",
-      topic: null,
-      access: "members",
-    });
-    const conversationId = channel.conversation.conversation.id;
-    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
-    const created = await repository.createTask(
-      owner,
-      conversationId,
-      taskInput("Member-owned work", { assigneeId: memberId }),
-      randomUUID(),
-    );
+  it.each(["event insert", "commit"] as const)(
+    "keeps task unassignment and member removal atomic on %s failure",
+    async (failurePoint) => {
+      const channel = await repository.createChannel(owner, {
+        name: "Task Crew",
+        slug: "task-crew",
+        topic: null,
+        access: "members",
+      });
+      const conversationId = channel.conversation.conversation.id;
+      await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+      const created = await repository.createTask(
+        owner,
+        conversationId,
+        taskInput("Member-owned work", { assigneeId: memberId }),
+        randomUUID(),
+      );
 
-    await repository.removeChannelMember(owner, conversationId, memberId);
+      const beforeMembers = await repository.listChannelMembers(owner, conversationId);
+      const beforeTasks = await repository.listConversationTasks(
+        member,
+        conversationId,
+        undefined,
+        10,
+      );
+      const beforeSync = await repository.sync(owner, "0", 100, { taskEvents: true });
+      await pool.query(`CREATE FUNCTION reject_test_membership_write() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'Injected membership transaction failure';
+      END;
+      $$`);
+      try {
+        await pool.query(
+          failurePoint === "commit"
+            ? `CREATE CONSTRAINT TRIGGER reject_test_membership_write
+               AFTER INSERT ON sync_events DEFERRABLE INITIALLY DEFERRED
+               FOR EACH ROW WHEN (
+                 NEW.event_type = 'channel.membership_changed' AND NEW.payload->>'action' = 'removed'
+               ) EXECUTE FUNCTION reject_test_membership_write()`
+            : `CREATE TRIGGER reject_test_membership_write
+               BEFORE INSERT ON sync_events FOR EACH ROW WHEN (
+                 NEW.event_type = 'channel.membership_changed' AND NEW.payload->>'action' = 'removed'
+               ) EXECUTE FUNCTION reject_test_membership_write()`,
+        );
+        await expect(
+          repository.removeChannelMember(owner, conversationId, memberId),
+        ).rejects.toThrow("Injected membership transaction failure");
+        await expect(repository.listChannelMembers(owner, conversationId)).resolves.toEqual(
+          beforeMembers,
+        );
+        await expect(
+          repository.listConversationTasks(member, conversationId, undefined, 10),
+        ).resolves.toEqual(beforeTasks);
+        await expect(repository.sync(owner, "0", 100, { taskEvents: true })).resolves.toEqual(
+          beforeSync,
+        );
+      } finally {
+        await pool.query("DROP TRIGGER IF EXISTS reject_test_membership_write ON sync_events");
+        await pool.query("DROP FUNCTION reject_test_membership_write()");
+      }
 
-    const [task] = (await repository.listConversationTasks(owner, conversationId, undefined, 10))
-      .tasks;
-    expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
-    await expect(
-      repository.listConversationTasks(member, conversationId, undefined, 10),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
-    const memberSync = await repository.sync(member, created.syncCursor, 100, {
-      taskEvents: true,
-    });
-    expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
-  });
+      const removed = await repository.removeChannelMember(owner, conversationId, memberId);
+      await expect(
+        repository.removeChannelMember(owner, conversationId, memberId),
+      ).resolves.toEqual(removed);
+
+      const [task] = (await repository.listConversationTasks(owner, conversationId, undefined, 10))
+        .tasks;
+      expect(task).toMatchObject({ id: created.task.id, assigneeId: null, version: 2 });
+      await expect(
+        repository.listConversationTasks(member, conversationId, undefined, 10),
+      ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+      const memberSync = await repository.sync(member, created.syncCursor, 100, {
+        taskEvents: true,
+      });
+      expect(memberSync.events.some((event) => event.type === "task.updated")).toBe(false);
+    },
+  );
 
   it("expires a nonzero cursor behind high-water when no sync events remain", async () => {
     const [staleCursor] = await seedMessageEvents(2);
