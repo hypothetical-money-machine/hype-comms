@@ -695,14 +695,15 @@ html[data-sidebar-position="right"] .sidebar {
   line-height: 1.4;
 }
 
-.conversation-context-menu-item:hover:not(:disabled),
-.conversation-context-menu-item:focus-visible:not(:disabled) {
+.conversation-context-menu-item:hover:not([aria-disabled="true"]):not(:disabled),
+.conversation-context-menu-item:focus-visible:not([aria-disabled="true"]):not(:disabled) {
   background: var(--theme-surface-hover);
   color: var(--theme-text-strong);
   outline: none;
 }
 
-.conversation-context-menu-item:disabled {
+.conversation-context-menu-item:disabled,
+.conversation-context-menu-item[aria-disabled="true"] {
   color: var(--theme-text-subtle);
   cursor: not-allowed;
 }
