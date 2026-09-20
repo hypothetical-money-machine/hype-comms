@@ -1,6 +1,6 @@
 import type { WorkspaceEvent } from "@hype-comms/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { ConversationRow } from "./records.js";
 import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 import { insertSyncEvent, insertSyncEventWithSequence } from "./sync-events.js";
@@ -85,7 +85,7 @@ export class ConversationEventWriter {
       [workspaceId],
     );
     const workspace = result.rows[0];
-    if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    if (workspace === undefined) throw new DomainError("access_denied", "Workspace unavailable");
     return workspace.announcement_channels_available;
   }
 }
