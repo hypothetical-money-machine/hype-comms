@@ -54,7 +54,3 @@ optional_env:
     description: "Thread channel replies under their canonical root (true/false)"
     prompt: "Thread channel replies?"
     password: false
-  - name: HYPE_COMMS_THREAD_FOLLOWUPS
-    description: "Wake for unmentioned replies in participated threads (true/false)"
-    prompt: "Wake for participated-thread follow-ups?"
-    password: false
