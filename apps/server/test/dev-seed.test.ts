@@ -1,52 +1,34 @@
-import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import type { Pool } from "pg";
 
 import { loadConfig } from "../src/config.js";
 import { seedDevelopmentDemo, writeDevelopmentDemoCallbacks } from "../src/dev-seed.js";
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
-
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 describeWithPostgres("development demo seed", () => {
-  const schemaName = `dev_seed_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let database: TestDatabase;
   let pool: Pool;
   let callbackDirectory: string;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     callbackDirectory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-callbacks-"));
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
     await rm(callbackDirectory, { recursive: true, force: true });
   });
 
   it("seeds two sign-in-ready clients and stable conversation data", async () => {
     const config = loadConfig({
       NODE_ENV: "test",
-      HYPE_COMMS_DATABASE_URL: schemaScopedUrl(testDatabaseUrl ?? "", schemaName),
+      HYPE_COMMS_DATABASE_URL: database.url,
       HYPE_COMMS_PUBLIC_API_URL: "http://127.0.0.1:3000",
     });
 

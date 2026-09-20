@@ -32,14 +32,12 @@ import {
   userSchema,
   workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { type Pool, type QueryResultRow } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { z } from "zod";
 
 import { buildApp } from "../src/app.js";
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -48,9 +46,8 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
 const workspaceId = "10000000-0000-4000-8000-000000000003";
@@ -77,17 +74,10 @@ class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
 describeWithPostgres("agent identity and owner administration", () => {
-  const schemaName = `agents_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
   const openSockets: WebSocket[] = [];
-  let adminPool: Pool;
+  let database: TestDatabase;
   let pool: Pool;
   let identityRepository: IdentityRepository;
   let identityService: IdentityService;
@@ -95,11 +85,8 @@ describeWithPostgres("agent identity and owner administration", () => {
   let attachmentRoot: string;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 10 });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 10 });
+    pool = database.pool;
     identityRepository = new IdentityRepository(pool);
     identityService = new IdentityService(
       identityRepository,
@@ -115,13 +102,7 @@ describeWithPostgres("agent identity and owner administration", () => {
   });
 
   beforeEach(async () => {
-    await pool.query(`
-      TRUNCATE agent_tokens, agents, realtime_tickets, api_idempotency_records,
-               sync_event_audiences, sync_events, conversation_read_cursors, message_mentions,
-               attachments, messages, conversations, device_sessions, magic_link_tokens, invitations,
-               workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.test', 'owner', 'Owner'),
@@ -167,10 +148,7 @@ describeWithPostgres("agent identity and owner administration", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
     await rm(attachmentRoot, { recursive: true, force: true });
   });
 

@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 import {
   appImageDesktopFileName,
@@ -574,7 +575,7 @@ describe("parseDesktopEntryExecPath", () => {
 
 describe("AppImage protocol install against a real applications directory", () => {
   it("writes the desktop file and claims xdg-mime default with Exec launching this AppImage", async () => {
-    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "hype-protocol-install-"));
+    const scratch = await createTemporaryDirectory("hype-protocol-install-");
     const applicationsDirectory = path.join(scratch, "applications");
     const commands: Array<{ command: string; args: readonly string[] }> = [];
     const real = createLinuxProtocolRegistrationTarget();
@@ -592,76 +593,62 @@ describe("AppImage protocol install against a real applications directory", () =
       },
     };
 
-    try {
-      const appImagePath = path.join(scratch, "Hype Comms.AppImage");
-      await fs.writeFile(appImagePath, "#!/bin/sh\n", { mode: 0o755 });
+    const appImagePath = path.join(scratch, "Hype Comms.AppImage");
+    await fs.writeFile(appImagePath, "#!/bin/sh\n", { mode: 0o755 });
 
-      const result = await installAndQueryLinuxProtocolHandler(
-        {
-          scheme: "hype-comms",
-          installedDesktopName: "com.hypemm.hypecomms.desktop",
-          productName: "Hype Comms",
-          appImagePath,
-          packagedExecutablePath: path.join(scratch, ".mount_fake", "hype-comms"),
-          appDir: path.join(scratch, ".mount_fake"),
-          homeDirectory: scratch,
-          xdgDataHome: scratch,
-        },
-        target,
-      );
+    const result = await installAndQueryLinuxProtocolHandler(
+      {
+        scheme: "hype-comms",
+        installedDesktopName: "com.hypemm.hypecomms.desktop",
+        productName: "Hype Comms",
+        appImagePath,
+        packagedExecutablePath: path.join(scratch, ".mount_fake", "hype-comms"),
+        appDir: path.join(scratch, ".mount_fake"),
+        homeDirectory: scratch,
+        xdgDataHome: scratch,
+      },
+      target,
+    );
 
-      const desktopFilePath = path.join(
-        applicationsDirectory,
-        "com.hypemm.hypecomms.appimage.desktop",
-      );
-      const contents = await fs.readFile(desktopFilePath, "utf8");
-      expect(result.install).toBe("written");
-      expect(result.binding).toBe("bound");
-      expect(contents).toContain("[Desktop Entry]");
-      expect(contents).toContain("MimeType=x-scheme-handler/hype-comms;");
-      expect(contents).toContain(`Exec=${quoteExecArgument(appImagePath)} %u`);
-      expect(commands).toContainEqual({
-        command: "xdg-mime",
-        args: ["default", "com.hypemm.hypecomms.appimage.desktop", "x-scheme-handler/hype-comms"],
-      });
-    } finally {
-      await fs.rm(scratch, { recursive: true, force: true });
-    }
+    const desktopFilePath = path.join(
+      applicationsDirectory,
+      "com.hypemm.hypecomms.appimage.desktop",
+    );
+    const contents = await fs.readFile(desktopFilePath, "utf8");
+    expect(result.install).toBe("written");
+    expect(result.binding).toBe("bound");
+    expect(contents).toContain("[Desktop Entry]");
+    expect(contents).toContain("MimeType=x-scheme-handler/hype-comms;");
+    expect(contents).toContain(`Exec=${quoteExecArgument(appImagePath)} %u`);
+    expect(commands).toContainEqual({
+      command: "xdg-mime",
+      args: ["default", "com.hypemm.hypecomms.appimage.desktop", "x-scheme-handler/hype-comms"],
+    });
   });
 });
 
 describe("createLinuxProtocolRegistrationTarget", () => {
   it("treats only a regular file with the execute bit as launchable", async () => {
     const target = createLinuxProtocolRegistrationTarget();
-    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "hype-protocol-target-"));
-    try {
-      const executable = path.join(scratch, "app.AppImage");
-      const plain = path.join(scratch, "plain.AppImage");
-      await fs.writeFile(executable, "#!/bin/sh\n", { mode: 0o755 });
-      await fs.writeFile(plain, "#!/bin/sh\n", { mode: 0o644 });
+    const scratch = await createTemporaryDirectory("hype-protocol-target-");
+    const executable = path.join(scratch, "app.AppImage");
+    const plain = path.join(scratch, "plain.AppImage");
+    await fs.writeFile(executable, "#!/bin/sh\n", { mode: 0o755 });
+    await fs.writeFile(plain, "#!/bin/sh\n", { mode: 0o644 });
 
-      await expect(target.fileIsExecutable(executable)).resolves.toBe(true);
-      await expect(target.fileIsExecutable(plain)).resolves.toBe(false);
-      await expect(target.fileIsExecutable(scratch)).resolves.toBe(false);
-      await expect(target.fileIsExecutable(path.join(scratch, "gone.AppImage"))).resolves.toBe(
-        false,
-      );
-    } finally {
-      await fs.rm(scratch, { recursive: true, force: true });
-    }
+    await expect(target.fileIsExecutable(executable)).resolves.toBe(true);
+    await expect(target.fileIsExecutable(plain)).resolves.toBe(false);
+    await expect(target.fileIsExecutable(scratch)).resolves.toBe(false);
+    await expect(target.fileIsExecutable(path.join(scratch, "gone.AppImage"))).resolves.toBe(false);
   });
 
   it("reads files leniently and never rejects on a missing path", async () => {
     const target = createLinuxProtocolRegistrationTarget();
-    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "hype-protocol-target-"));
-    try {
-      const entry = path.join(scratch, "entry.desktop");
-      await fs.writeFile(entry, "[Desktop Entry]\n", "utf8");
-      await expect(target.readFile(entry)).resolves.toBe("[Desktop Entry]\n");
-      await expect(target.readFile(path.join(scratch, "missing.desktop"))).resolves.toBeNull();
-    } finally {
-      await fs.rm(scratch, { recursive: true, force: true });
-    }
+    const scratch = await createTemporaryDirectory("hype-protocol-target-");
+    const entry = path.join(scratch, "entry.desktop");
+    await fs.writeFile(entry, "[Desktop Entry]\n", "utf8");
+    await expect(target.readFile(entry)).resolves.toBe("[Desktop Entry]\n");
+    await expect(target.readFile(path.join(scratch, "missing.desktop"))).resolves.toBeNull();
   });
 
   it("maps a spawn failure to a null exit code instead of rejecting", async () => {
