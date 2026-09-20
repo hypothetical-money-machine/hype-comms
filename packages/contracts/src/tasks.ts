@@ -105,6 +105,7 @@ export const taskListQuerySchema = taskListFiltersSchema
 
 export const taskListResponseSchema = z
   .object({
+    snapshotPosition: syncPositionSchema,
     tasks: z.array(taskSchema).max(TASK_PAGE_MAX_LIMIT),
     nextCursor: taskPageCursorSchema.nullable(),
     hasMore: z.boolean(),
@@ -113,6 +114,7 @@ export const taskListResponseSchema = z
 
 export const taskRecordListResponseSchema = z
   .object({
+    snapshotPosition: syncPositionSchema,
     tasks: z.array(taskRecordSchema).max(TASK_PAGE_MAX_LIMIT),
     nextCursor: taskPageCursorSchema.nullable(),
     hasMore: z.boolean(),

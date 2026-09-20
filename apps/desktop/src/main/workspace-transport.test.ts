@@ -362,6 +362,8 @@ describe("WorkspaceTransport threads", () => {
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
       return jsonResponse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [THREAD_ROOT],
         threadSummaries: [
           { threadRootId: THREAD_ROOT.id, replyCount: 1, latestReply: THREAD_REPLY },
@@ -383,7 +385,12 @@ describe("WorkspaceTransport threads", () => {
 
   it("detects the immediately previous server from an absent thread-support signal", async () => {
     const transport = transportAnswering(() =>
-      jsonResponse({ messages: [THREAD_ROOT, THREAD_REPLY], nextCursor: null }),
+      jsonResponse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [THREAD_ROOT, THREAD_REPLY],
+        nextCursor: null,
+      }),
     );
 
     await expect(
@@ -397,7 +404,13 @@ describe("WorkspaceTransport threads", () => {
 
   it("fetches and strictly parses a paginated thread", async () => {
     const requests: { readonly url: string; readonly init: RequestInit }[] = [];
-    const response = { root: THREAD_ROOT, replies: [THREAD_REPLY], nextCursor: "cursor-1" };
+    const response = {
+      reactions: [],
+      snapshotPosition: testPosition("0"),
+      root: THREAD_ROOT,
+      replies: [THREAD_REPLY],
+      nextCursor: "cursor-1",
+    };
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
       return jsonResponse(response);
@@ -417,6 +430,8 @@ describe("WorkspaceTransport threads", () => {
   it("rejects a thread response whose reply points at another root", async () => {
     const transport = transportAnswering(() =>
       jsonResponse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         root: THREAD_ROOT,
         replies: [{ ...THREAD_REPLY, threadRootId: CONVERSATION_ID }],
         nextCursor: null,
@@ -816,7 +831,12 @@ describe("WorkspaceTransport tasks", () => {
     const { transport } = createTransport(async (url, init) => {
       requests.push({ url, init });
       if (init.method === "GET") {
-        return jsonResponse({ tasks: [TASK], nextCursor: null, hasMore: false });
+        return jsonResponse({
+          snapshotPosition: testPosition("0"),
+          tasks: [TASK],
+          nextCursor: null,
+          hasMore: false,
+        });
       }
       return jsonResponse({ task: TASK, syncCursor: testPosition("43") });
     });
@@ -833,7 +853,12 @@ describe("WorkspaceTransport tasks", () => {
         updatedAfter: NOW,
         updatedBy: "me",
       }),
-    ).resolves.toEqual({ tasks: [TASK], nextCursor: null, hasMore: false });
+    ).resolves.toEqual({
+      snapshotPosition: testPosition("0"),
+      tasks: [TASK],
+      nextCursor: null,
+      hasMore: false,
+    });
     await transport.myTasks({ limit: 10 });
     await transport.createTask({
       conversationId: CONVERSATION_ID,
@@ -891,7 +916,12 @@ describe("WorkspaceTransport tasks", () => {
 
   it("rejects malformed successful task payloads", async () => {
     const transport = transportAnswering(() =>
-      jsonResponse({ tasks: [{ ...TASK, rank: "0" }], nextCursor: null, hasMore: false }),
+      jsonResponse({
+        snapshotPosition: testPosition("0"),
+        tasks: [{ ...TASK, rank: "0" }],
+        nextCursor: null,
+        hasMore: false,
+      }),
     );
     await expect(transport.tasks(CONVERSATION_ID)).rejects.toThrow();
   });
