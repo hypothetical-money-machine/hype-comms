@@ -285,7 +285,7 @@ export async function watchCommand(
     );
   }
   const bootstrap = await client.request({ ...endpoints.bootstrap() });
-  const writer = new EventWriter(context.runtime.io.stdout);
+  const writer = new EventWriter(context.runtime.io.stdout, context.options.adapterProtocol);
   try {
     const { cursor } = await watchProductRealtime({
       client,
