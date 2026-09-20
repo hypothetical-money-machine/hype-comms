@@ -1,3 +1,4 @@
+import { databasePoolSizeSchema, databaseUrlSchema } from "./db/config.js";
 import { isIP } from "node:net";
 
 import { z } from "zod";
@@ -25,8 +26,8 @@ const rawConfigSchema = z
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
     webRoot: optionalString(z.string().min(1)),
-    databaseUrl: optionalString(z.string().min(1)),
-    databasePoolSize: z.coerce.number().int().min(1).max(100).default(10),
+    databaseUrl: optionalString(databaseUrlSchema),
+    databasePoolSize: databasePoolSizeSchema,
     smtpUrl: optionalString(z.url()),
     emailFrom: optionalString(z.string().min(1)),
     emailDelivery: z.enum(["smtp", "console", "manual"]).optional(),

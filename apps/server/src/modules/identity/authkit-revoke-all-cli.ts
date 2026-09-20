@@ -1,7 +1,8 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { z } from "zod";
+import { loadDatabaseConfig } from "../../db/config.js";
+import { parseAdminArguments } from "../../cli/arguments.js";
 
 import { createPool } from "../../db/pool.js";
 import { prepareAuthKitRollback } from "./authkit-repository.js";
@@ -22,38 +23,16 @@ export interface AuthKitRevokeAllCliDependencies {
   readonly now?: () => Date;
 }
 
-function databaseConfig(env: Readonly<Record<string, string | undefined>>) {
-  const databaseUrl = env.HYPE_COMMS_DATABASE_URL;
-  if (databaseUrl === undefined || databaseUrl.trim() === "") {
-    throw new Error("HYPE_COMMS_DATABASE_URL is required");
-  }
-  let parsedDatabaseUrl: URL;
-  try {
-    parsedDatabaseUrl = new URL(databaseUrl);
-  } catch {
-    throw new Error("HYPE_COMMS_DATABASE_URL must be a PostgreSQL URL");
-  }
-  if (parsedDatabaseUrl.protocol !== "postgres:" && parsedDatabaseUrl.protocol !== "postgresql:") {
-    throw new Error("HYPE_COMMS_DATABASE_URL must be a PostgreSQL URL");
-  }
-  const poolSizeResult = z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .safeParse(env.HYPE_COMMS_DATABASE_POOL_SIZE ?? 10);
-  if (!poolSizeResult.success) {
-    throw new Error("HYPE_COMMS_DATABASE_POOL_SIZE must be an integer from 1 through 100");
-  }
-  return { url: databaseUrl, poolSize: poolSizeResult.data };
-}
-
 function requireConfirmation(argv: readonly string[]): void {
-  if (argv.length !== 2 || argv[0] !== "--confirm" || argv[1] !== AUTHKIT_REVOKE_ALL_CONFIRMATION) {
-    throw new Error(
-      `Exact confirmation is required before revoking local AuthKit sessions.\n${USAGE}`,
-    );
+  try {
+    const { values } = parseAdminArguments(argv, { confirm: { type: "string" } }, USAGE);
+    if (values.confirm === AUTHKIT_REVOKE_ALL_CONFIRMATION) return;
+  } catch {
+    // Invalid syntax must still explain the required destructive-action confirmation.
   }
+  throw new Error(
+    `Exact confirmation is required before revoking local AuthKit sessions.\n${USAGE}`,
+  );
 }
 
 export async function runAuthKitRevokeAllCli(
@@ -66,7 +45,7 @@ export async function runAuthKitRevokeAllCli(
   try {
     // Parse the destructive-action confirmation before configuration or database access.
     requireConfirmation(argv);
-    pool = (dependencies.createDatabasePool ?? createPool)(databaseConfig(env));
+    pool = (dependencies.createDatabasePool ?? createPool)(loadDatabaseConfig(env));
     const result = await prepareAuthKitRollback(pool, (dependencies.now ?? (() => new Date()))());
     output.stdout.write(`Active AuthKit-created local sessions found: ${String(result.active)}\n`);
     output.stdout.write(`Local AuthKit sessions revoked now: ${String(result.revoked)}\n`);
