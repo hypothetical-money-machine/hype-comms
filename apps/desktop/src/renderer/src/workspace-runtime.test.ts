@@ -1,13 +1,12 @@
 import { type SyncPosition } from "@hype-comms/contracts";
-import { createWorkspaceSelection } from "./workspace-selection";
-import { testPosition } from "../../shared/test-support/sync-position";
 import { describe, expect, it, vi } from "vitest";
+import { testPosition } from "../../shared/test-support/sync-position";
+import type { WorkspaceClient } from "./workspace-client";
+import { createWorkspaceSelection } from "./workspace-selection";
 
 import type {
   AddReactionResponse,
   AdvanceReadCursorResponse,
-  AgentEnrollmentResponse,
-  AiChannelState,
   Attachment,
   CacheCryptoStatus,
   CacheDecryptBatchResponse,
@@ -16,29 +15,22 @@ import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
   ChatSessionState,
-  CommunicationPathsResponse,
-  ConversationFilesResponse as WireConversationFilesResponse,
   ConversationMutationResponse,
   ConversationSummary,
   CreateChannelOperation,
   CreateTaskOperation,
-  DevicePreferences,
   DirectConversationRequest,
   NotificationAction as ExactNotificationAction,
   HumanWorkspaceBootstrapResponse,
-  ListAgentEnrollmentsResponse,
   ListConversationsQuery,
   ListConversationsResponse,
   ListMembersResponse,
   ListMessageAttachmentsResponse,
   ListMessageReactionsResponse,
-  MagicLinkDeliveryState,
   Message,
   MessageByIdResponse,
-  MessageHistoryResponse as WireMessageHistoryResponse,
   MessageSearchQuery,
   MessageSearchResponse,
-  MessageThreadResponse as WireMessageThreadResponse,
   MoveTaskOperation,
   NotificationContext,
   OpenAttachmentResponse,
@@ -56,23 +48,17 @@ import type {
   SyncAttemptResult,
   Task,
   TaskListQuery,
-  TaskListResponse as WireTaskListResponse,
   TaskMutationResponse,
-  ThemeState,
-  UpdateState,
   UpdateTaskOperation,
   User,
+  ConversationFilesResponse as WireConversationFilesResponse,
+  MessageHistoryResponse as WireMessageHistoryResponse,
+  MessageThreadResponse as WireMessageThreadResponse,
+  TaskListResponse as WireTaskListResponse,
   WorkspaceEvent,
 } from "@hype-comms/contracts";
 
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
-import type {
-  DesktopApi,
-  DesktopPlatform,
-  NotificationAction,
-  ServerStatus,
-} from "../../shared/desktop-api";
-import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import type { CachedWorkspaceState, WorkspaceCache } from "./workspace-cache";
 import { MemoryWorkspaceCache } from "./workspace-cache";
 import { replayCollectionPage } from "./workspace-collections";
@@ -715,7 +701,7 @@ class FakeWorkspaceCache extends MemoryWorkspaceCache {
   }
 }
 
-class FakeDesktopApi implements DesktopApi {
+class FakeWorkspaceClient implements WorkspaceClient {
   readPosition = testPosition("0");
   observePosition(position: SyncPosition): void {
     if (
@@ -724,14 +710,6 @@ class FakeDesktopApi implements DesktopApi {
     )
       this.readPosition = position;
   }
-  readonly platform: DesktopPlatform = "darwin";
-  readonly initialThemeState: ThemeState = {
-    preference: "system",
-    resolvedThemeId: "dark",
-    resolvedColorScheme: "dark",
-  };
-  readonly initialCompactMode = false;
-  readonly initialDevicePreferences = DEFAULT_DEVICE_PREFERENCES;
   bootstrap: HumanWorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -862,8 +840,6 @@ class FakeDesktopApi implements DesktopApi {
   }[] = [];
   readonly #eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
   readonly #connectionListeners = new Set<(state: RealtimeConnectionState) => void>();
-  readonly #sessionListeners = new Set<(state: ChatSessionState) => void>();
-  readonly #notificationListeners = new Set<(action: NotificationAction) => void>();
   #preparedRealtimeScope: RealtimeSessionScope | null = null;
   #preparedRealtimeCursor: SyncPosition | null = null;
   #activeRealtimeScope: RealtimeSessionScope | null = null;
@@ -882,142 +858,6 @@ class FakeDesktopApi implements DesktopApi {
 
   emitRealtimeState(state: RealtimeConnectionState): void {
     for (const listener of this.#connectionListeners) listener(state);
-  }
-
-  emitSessionState(state: ChatSessionState): void {
-    for (const listener of this.#sessionListeners) listener(state);
-  }
-
-  emitNotificationAction(action: NotificationAction): void {
-    for (const listener of this.#notificationListeners) listener(action);
-  }
-
-  async getServerStatus(): Promise<ServerStatus> {
-    return "reachable";
-  }
-
-  async getSessionState(): Promise<ChatSessionState> {
-    return session;
-  }
-
-  async retrySession(): Promise<ChatSessionState> {
-    return session;
-  }
-
-  async requestMagicLink(): Promise<MagicLinkDeliveryState> {
-    return { status: "email-sent" };
-  }
-
-  async signOut(): Promise<ChatSessionState> {
-    return { status: "signed-out" };
-  }
-
-  onSessionChanged(listener: (state: ChatSessionState) => void): () => void {
-    this.#sessionListeners.add(listener);
-    return () => this.#sessionListeners.delete(listener);
-  }
-
-  async getAppVersion(): Promise<string> {
-    return "0.0.0-test";
-  }
-
-  // The updater belongs to the app shell, not the workspace runtime. These throw so that a runtime
-  // that starts reaching for them fails loudly here instead of silently observing a no-op updater.
-  async getUpdateState(): Promise<UpdateState> {
-    throw new Error("The runtime test does not report update state");
-  }
-
-  async checkForUpdates(): Promise<void> {
-    throw new Error("The runtime test does not check for updates");
-  }
-
-  async restartToInstallUpdate(): Promise<void> {
-    throw new Error("The runtime test does not install updates");
-  }
-
-  onUpdateStateChanged(): () => void {
-    throw new Error("The runtime test does not observe update state");
-  }
-
-  async getThemeState(): Promise<ThemeState> {
-    throw new Error("The runtime test does not report theme state");
-  }
-
-  async getSystemThemeState(): Promise<ThemeState> {
-    throw new Error("The runtime test does not resolve system theme state");
-  }
-
-  async setThemePreference(): Promise<ThemeState> {
-    throw new Error("The runtime test does not set a theme");
-  }
-
-  async setThemeDesign(): Promise<ThemeState> {
-    throw new Error("The runtime test does not design a theme");
-  }
-
-  onThemeStateChanged(): () => void {
-    throw new Error("The runtime test does not observe theme state");
-  }
-
-  async getCompactMode(): Promise<boolean> {
-    throw new Error("The runtime test does not report compact mode");
-  }
-
-  async setCompactMode(): Promise<boolean> {
-    throw new Error("The runtime test does not set compact mode");
-  }
-
-  onCompactModeChanged(): () => void {
-    throw new Error("The runtime test does not observe compact mode");
-  }
-
-  async getDevicePreferences(): Promise<DevicePreferences> {
-    throw new Error("The runtime test does not report device preferences");
-  }
-
-  async updateDevicePreferences(): Promise<DevicePreferences> {
-    throw new Error("The runtime test does not update device preferences");
-  }
-
-  onDevicePreferencesChanged(): () => void {
-    throw new Error("The runtime test does not observe device preferences");
-  }
-
-  async getAiChannelState(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not read AI Channel state");
-  }
-
-  async startAiChannel(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not start AI Channel");
-  }
-
-  async chooseAiChannelWorkspace(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not choose an AI Channel folder");
-  }
-
-  async newAiChannelSession(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not create an AI Channel session");
-  }
-
-  async sendAiChannelPrompt(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not send AI Channel prompts");
-  }
-
-  async cancelAiChannelPrompt(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not cancel AI Channel prompts");
-  }
-
-  async respondAiChannelPermission(): Promise<AiChannelState> {
-    throw new Error("The workspace runtime test does not answer AI Channel permissions");
-  }
-
-  onAiChannelStateChanged(): () => void {
-    throw new Error("The workspace runtime test does not observe AI Channel state");
-  }
-
-  onNotificationAction(listener: (action: NotificationAction) => void): () => void {
-    this.#notificationListeners.add(listener);
-    return () => this.#notificationListeners.delete(listener);
   }
 
   async initializeCacheCrypto(): Promise<CacheCryptoStatus> {
@@ -1066,22 +906,6 @@ class FakeDesktopApi implements DesktopApi {
     const queued = this.memberResults.shift();
     if (queued !== undefined) return await queued;
     return { members: [...this.members] };
-  }
-
-  async getCommunicationPaths(): Promise<CommunicationPathsResponse> {
-    return { generatedAt: "2026-01-01T00:00:00.000Z", members: [...this.members], paths: [] };
-  }
-
-  async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
-    return { enrollments: [] };
-  }
-
-  async reviewAgentEnrollment(): Promise<AgentEnrollmentResponse> {
-    throw new Error("Agent enrollment review is not used by WorkspaceRuntime");
-  }
-
-  async cancelAgentEnrollment(): Promise<AgentEnrollmentResponse> {
-    throw new Error("Agent enrollment cancellation is not used by WorkspaceRuntime");
   }
 
   async listConversations(
@@ -1421,10 +1245,6 @@ class FakeDesktopApi implements DesktopApi {
     this.acknowledged.push(input.cursor.sequence);
   }
 
-  async getRealtimeState(): Promise<RealtimeConnectionState> {
-    return "offline";
-  }
-
   onRealtimeStateChanged(listener: (state: RealtimeConnectionState) => void): () => void {
     this.#connectionListeners.add(listener);
     return () => this.#connectionListeners.delete(listener);
@@ -1488,7 +1308,7 @@ class DeterministicMessageServer {
   }
 }
 
-class DeterministicDeliveryApi extends FakeDesktopApi {
+class DeterministicDeliveryApi extends FakeWorkspaceClient {
   constructor(
     bootstrap: HumanWorkspaceBootstrapResponse,
     private readonly server: DeterministicMessageServer,
@@ -1526,7 +1346,7 @@ function deferred<T>(): {
   return { promise, resolve };
 }
 
-function runtimeWith(api: FakeDesktopApi, cache: WorkspaceCache): WorkspaceRuntime {
+function runtimeWith(api: FakeWorkspaceClient, cache: WorkspaceCache): WorkspaceRuntime {
   return new WorkspaceRuntime(api, { createCache: () => cache });
 }
 
@@ -1555,7 +1375,7 @@ async function cacheWithDurableMembershipMarker(
   return cache;
 }
 
-function addConversationCatalogPages(api: FakeDesktopApi, conversationCount: number): void {
+function addConversationCatalogPages(api: FakeWorkspaceClient, conversationCount: number): void {
   let remaining = conversationCount;
   let conversation = 0;
   let page = 1;
@@ -1571,7 +1391,7 @@ function addConversationCatalogPages(api: FakeDesktopApi, conversationCount: num
   }
 }
 
-function addTaskCatalogPages(api: FakeDesktopApi, taskCount: number): void {
+function addTaskCatalogPages(api: FakeWorkspaceClient, taskCount: number): void {
   let taskIndex = 0;
   let remaining = taskCount;
   let page = 1;
@@ -1625,7 +1445,7 @@ async function enqueuePermanentFailure(
 
 describe("WorkspaceRuntime", () => {
   it("keeps selected snapshots stable and notifies even when another subscriber reads first", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           channel(CONVERSATION_ID, "general"),
@@ -1669,7 +1489,7 @@ describe("WorkspaceRuntime", () => {
           channel(`20000000-0000-4000-8001-${String(index).padStart(12, "0")}`, `channel-${index}`),
         ),
       ];
-      const api = new FakeDesktopApi(
+      const api = new FakeWorkspaceClient(
         bootstrapAt("10", {
           conversations: [summaries[0]!],
           conversationsHasMore: true,
@@ -1747,7 +1567,7 @@ describe("WorkspaceRuntime", () => {
       }),
       [],
     );
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, cache);
     const starting = runtime.start(session);
     try {
@@ -1785,7 +1605,7 @@ describe("WorkspaceRuntime", () => {
       }
     }
     const cache = new CapturedMetadataCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     await cache.replaceSnapshot(api.bootstrap, []);
     const page = deferred<MessageHistoryResponse>();
     api.historyResults.set(CONVERSATION_ID, [page.promise]);
@@ -1825,7 +1645,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("retires a cached metadata read when membership changes before its write", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const captured = deferred<void>();
     const release = deferred<void>();
     class RetiredMetadataCache extends FakeWorkspaceCache {
@@ -1862,7 +1682,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("exposes a catalog retry when refresh fails after an archive mutation", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     api.channelResults.push({
@@ -1887,7 +1707,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("keeps chat usable when an on-demand task service fails", async () => {
-    class UnavailableTasks extends FakeDesktopApi {
+    class UnavailableTasks extends FakeWorkspaceClient {
       override async listConversationTasks(conversationId: string): Promise<WireTaskListResponse> {
         this.conversationTaskRequests.push(conversationId);
         throw new Error("Task service unavailable");
@@ -1934,7 +1754,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("keeps a failed timeline warning with its conversation through navigation and retry", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           channel(CONVERSATION_ID, "general"),
@@ -1991,7 +1811,7 @@ describe("WorkspaceRuntime", () => {
     );
     await cache.enqueue(pending);
     await cache.clearServerStatePreservingOutbox();
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsHasMore: true, conversationsNextCursor: NEXT_PAGE_CURSOR }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -2019,7 +1839,7 @@ describe("WorkspaceRuntime", () => {
 
   it("serves history and outbox work from the last good catalog while a refresh is blocked", async () => {
     const second = channel(SECOND_CONVERSATION_ID, "second");
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversations: [channel(CONVERSATION_ID, "general"), second] }),
     );
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
@@ -2077,7 +1897,7 @@ describe("WorkspaceRuntime", () => {
       "Queued before the window reopened",
     );
     await cache.enqueue(pending);
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.sendResults.push({ status: "permanent", reason: "validation" });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -2115,7 +1935,7 @@ describe("WorkspaceRuntime", () => {
     ["local send", "metadata read"],
     ["realtime hydration", "metadata read"],
   ] as const)("retains a new file after %s during a stale page's %s", async (delivery, phase) => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -2201,7 +2021,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("replays a reaction removal that commits while an older collection page is in flight", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2244,7 +2064,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("discards an overflowing collection fetch and retries without pausing realtime acknowledgement", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2300,7 +2120,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("publishes the cache's committed summaries without repeating event accounting", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -2339,7 +2159,7 @@ describe("WorkspaceRuntime", () => {
       members: [user, peer, agent],
       conversations: [group],
     });
-    const api = new FakeDesktopApi(snapshot);
+    const api = new FakeWorkspaceClient(snapshot);
     api.members = snapshot.members;
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
@@ -2366,7 +2186,7 @@ describe("WorkspaceRuntime", () => {
       id: "20000000-0000-4000-8000-0000000000ab",
       fileName: "two.png",
     };
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.chooseAndUploadResult = { status: "completed", attachments: [first, second] };
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
@@ -2380,7 +2200,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("retains the real memory cache and its unsent work during a same-account offline transition", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = new WorkspaceRuntime(api);
     await runtime.start(session);
     api.sendResults.push({ status: "upgrade_required" });
@@ -2396,7 +2216,7 @@ describe("WorkspaceRuntime", () => {
 
   it("retains a rejected IPC send and retries the same operation", async () => {
     vi.useFakeTimers();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = new WorkspaceRuntime(api);
     const send = vi.spyOn(api, "sendConversationMessage");
     send.mockRejectedValueOnce(new Error("IPC session was replaced"));
@@ -2419,7 +2239,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("preserves a sending memory outbox when session retirement precedes IPC rejection", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = new WorkspaceRuntime(api);
     let rejectSend: (error: Error) => void = () => undefined;
     const send = vi.spyOn(api, "sendConversationMessage");
@@ -2455,7 +2275,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps an incompatible send pending and preserves new local work without retries", async () => {
     vi.useFakeTimers();
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.sendResults.push({ status: "upgrade_required" });
     const runtime = runtimeWith(api, cache);
     try {
@@ -2488,7 +2308,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage]);
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.syncResults.push({ status: "upgrade_required" });
     const runtime = runtimeWith(api, cache);
     try {
@@ -2507,7 +2327,7 @@ describe("WorkspaceRuntime", () => {
   it("cold-opens the authorized cached workspace offline and queues composition without I/O", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("10"), [ownMessage], [ownReaction], [task]);
-    const api = new FakeDesktopApi(bootstrapAt("99"));
+    const api = new FakeWorkspaceClient(bootstrapAt("99"));
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session, { offline: true });
@@ -2541,7 +2361,7 @@ describe("WorkspaceRuntime", () => {
       const initial = bootstrapAt("10");
       const senderCache = new FakeWorkspaceCache();
       await senderCache.replaceSnapshot(initial, []);
-      const offlineSender = runtimeWith(new FakeDesktopApi(bootstrapAt("99")), senderCache);
+      const offlineSender = runtimeWith(new FakeWorkspaceClient(bootstrapAt("99")), senderCache);
       await offlineSender.start(session, { offline: true });
       await offlineSender.sendMessage(CONVERSATION_ID, "One durable offline message", []);
       const clientMessageId = offlineSender.state.outbox[0]?.operation.message.clientMessageId;
@@ -2581,7 +2401,7 @@ describe("WorkspaceRuntime", () => {
           },
         ],
       });
-      const observerApi = new FakeDesktopApi(observerBootstrap);
+      const observerApi = new FakeWorkspaceClient(observerBootstrap);
       observerApi.syncResults.push({
         status: "accepted",
         response: {
@@ -2633,7 +2453,7 @@ describe("WorkspaceRuntime", () => {
     });
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(snapshot, [peerMessage, secondMessage], [ownReaction], [task]);
-    const api = new FakeDesktopApi(snapshot);
+    const api = new FakeWorkspaceClient(snapshot);
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
@@ -2670,7 +2490,7 @@ describe("WorkspaceRuntime", () => {
     });
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(cached, []);
-    const api = new FakeDesktopApi(capable);
+    const api = new FakeWorkspaceClient(capable);
     api.syncResults.push({
       status: "accepted",
       response: {
@@ -2693,7 +2513,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("advances read state only when the renderer exposes a visible message", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [peerMessage, ownMessage],
       threadSummaries: [],
@@ -2734,7 +2554,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.histories.set(CONVERSATION_ID, {
         messages: [peerMessage],
         threadSummaries: [],
@@ -2768,7 +2588,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.histories.set(CONVERSATION_ID, {
         messages: [peerMessage],
         threadSummaries: [],
@@ -2796,7 +2616,7 @@ describe("WorkspaceRuntime", () => {
 
   it("hydrates reactions with initial history and restores them from the cache", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2815,7 +2635,7 @@ describe("WorkspaceRuntime", () => {
 
   it("durably queues and sends a reply with its thread root", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.sendResults.push({ status: "permanent", reason: "validation" });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -2833,7 +2653,7 @@ describe("WorkspaceRuntime", () => {
 
   it("hydrates a thread without reading it until the renderer reports visibility", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
@@ -2866,7 +2686,7 @@ describe("WorkspaceRuntime", () => {
 
   it("preserves an open thread and its reactions across a membership refresh", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
@@ -2913,7 +2733,7 @@ describe("WorkspaceRuntime", () => {
 
   it("opens and focuses a reply search hit inside its thread", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -2931,7 +2751,7 @@ describe("WorkspaceRuntime", () => {
 
   it("keeps legacy replies inline and focuses them without a thread endpoint", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage, threadReply],
       threadSummaries: [],
@@ -2952,7 +2772,7 @@ describe("WorkspaceRuntime", () => {
 
   it("downgrades a live client to inline replies when the server rolls back", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -2983,7 +2803,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps cached replies inline when history negotiation fails during startup", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage, threadReply]);
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.bootstrapFailures = 1;
     const runtime = runtimeWith(api, cache);
 
@@ -2997,7 +2817,7 @@ describe("WorkspaceRuntime", () => {
   it("catches up from the encrypted replica before snapshot replacement and realtime", async () => {
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
-    const api = new FakeDesktopApi(bootstrapAt("12"));
+    const api = new FakeWorkspaceClient(bootstrapAt("12"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage, peerMessage],
       threadSummaries: [],
@@ -3046,7 +2866,7 @@ describe("WorkspaceRuntime", () => {
       }),
       [],
     );
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("11", {
         conversations: [joinedSummary],
       }),
@@ -3113,7 +2933,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "4",
       body: "Later main-timeline message",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         members: [user, peer],
         conversations: [
@@ -3243,7 +3063,7 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     api.histories.set(CONVERSATION_ID, {
@@ -3365,7 +3185,7 @@ describe("WorkspaceRuntime", () => {
     });
     const cache = new MemoryWorkspaceCache();
     await cache.replaceSnapshot(snapshot, [ownMessage, retractedReply]);
-    const api = new FakeDesktopApi(snapshot);
+    const api = new FakeWorkspaceClient(snapshot);
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 3, latestReply: liveReply }],
@@ -3393,7 +3213,7 @@ describe("WorkspaceRuntime", () => {
     try {
       const cache = new FakeWorkspaceCache();
       await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.syncResults.push(
         { status: "retryable", reason: "server", retryAfterMs: 1_000 },
         {
@@ -3465,7 +3285,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "3",
       payload: { message: secondGapMessage, mentionedUserIds: [] },
     };
-    const api = new FakeDesktopApi(bootstrapAt("14"));
+    const api = new FakeWorkspaceClient(bootstrapAt("14"));
     api.histories.set(CONVERSATION_ID, {
       // The bounded snapshot hydrates only the newest page. The older gap event remains reachable
       // through this authoritative history cursor instead of being mistaken for UI progress.
@@ -3541,7 +3361,7 @@ describe("WorkspaceRuntime", () => {
 
   it("keeps a durable marker when the drained high-water outruns the snapshot", async () => {
     const cache = await cacheWithDurableMembershipMarker();
-    const api = new FakeDesktopApi(bootstrapAt("13"));
+    const api = new FakeWorkspaceClient(bootstrapAt("13"));
     api.syncResults.push({
       status: "accepted",
       response: {
@@ -3582,7 +3402,7 @@ describe("WorkspaceRuntime", () => {
     },
   ])("keeps a durable marker when its preflight is $name", async ({ result, error }) => {
     const cache = await cacheWithDurableMembershipMarker();
-    const api = new FakeDesktopApi(bootstrapAt("14"));
+    const api = new FakeWorkspaceClient(bootstrapAt("14"));
     api.syncResults.push(result);
 
     const runtime = runtimeWith(api, cache);
@@ -3603,7 +3423,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     try {
       const cache = await cacheWithDurableMembershipMarker();
-      const api = new FakeDesktopApi(bootstrapAt("14"));
+      const api = new FakeWorkspaceClient(bootstrapAt("14"));
       api.syncResults.push(
         { status: "retryable", reason: "server", retryAfterMs: 1_000 },
         {
@@ -3641,7 +3461,7 @@ describe("WorkspaceRuntime", () => {
 
   it("bounds an expired marker cursor to one preflight before snapshot recovery", async () => {
     const cache = await cacheWithDurableMembershipMarker();
-    const api = new FakeDesktopApi(bootstrapAt("14"));
+    const api = new FakeWorkspaceClient(bootstrapAt("14"));
     api.syncResults.push({ status: "reset_required", reason: "cursor_expired" });
 
     const runtime = runtimeWith(api, cache);
@@ -3674,7 +3494,7 @@ describe("WorkspaceRuntime", () => {
       nextAttemptAt: null,
       failureReason: "validation",
     });
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [peerMessage],
       threadSummaries: [],
@@ -3714,7 +3534,7 @@ describe("WorkspaceRuntime", () => {
       createdAt: NOW,
     };
     const leaked = { ...ownMessage, body: "bot token leaked in comms" };
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [leaked],
       threadSummaries: [],
@@ -3766,7 +3586,7 @@ describe("WorkspaceRuntime", () => {
       createdAt: NOW,
     };
     const attachmentHydration = deferred<ListMessageAttachmentsResponse>();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.attachmentResults.push(attachmentHydration.promise);
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
@@ -3807,7 +3627,7 @@ describe("WorkspaceRuntime", () => {
       ...channel(CONVERSATION_ID, "general"),
       participantIds: [USER_ID, PEER_ID],
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRefresh] }),
     );
     const cache = new FakeWorkspaceCache();
@@ -3896,7 +3716,7 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 1,
       mentionCount: 1,
     };
-    const liveApi = new FakeDesktopApi(
+    const liveApi = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     liveApi.histories.set(CONVERSATION_ID, {
@@ -3943,7 +3763,7 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 0,
       mentionCount: 0,
     };
-    const freshApi = new FakeDesktopApi(
+    const freshApi = new FakeWorkspaceClient(
       bootstrapAt("12", { members: [user, peer], conversations: [afterRetract] }),
     );
     freshApi.histories.set(CONVERSATION_ID, {
@@ -3988,7 +3808,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "5",
       body: "Latest reply",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [{ ...channel(CONVERSATION_ID, "general"), lastMessage: latestReply }],
       }),
@@ -4036,7 +3856,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "4",
       body: "My thread reply",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -4112,7 +3932,7 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 1,
       mentionCount: 1,
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     api.histories.set(CONVERSATION_ID, {
@@ -4166,7 +3986,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("removes a deleted thread root's summary while retaining its live replies", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -4220,7 +4040,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "4",
       body: "Later main message",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -4287,7 +4107,7 @@ describe("WorkspaceRuntime", () => {
       body: "Reply to retract",
     };
     const retracted = { ...ownThreadReply, deletedAt: NOW, version: 2, updatedAt: NOW };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -4359,7 +4179,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("applies DELETE /v2/messages/:id without emptying the stored body", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -4404,7 +4224,7 @@ describe("WorkspaceRuntime", () => {
 
   it("does not let stale history resurrect a source-less message.retracted event", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const attachment: Attachment = {
       id: "20000000-0000-4000-8000-0000000000b9",
       messageId: OWN_MESSAGE_ID,
@@ -4511,7 +4331,7 @@ describe("WorkspaceRuntime", () => {
       mentionCount: 1,
     };
     const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     api.histories.set(CONVERSATION_ID, {
@@ -4592,7 +4412,7 @@ describe("WorkspaceRuntime", () => {
         mentionCount: 1,
       };
       const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
-      const api = new FakeDesktopApi(
+      const api = new FakeWorkspaceClient(
         bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
       );
       const runtime = runtimeWith(api, new MemoryWorkspaceCache());
@@ -4679,7 +4499,7 @@ describe("WorkspaceRuntime", () => {
       unreadCount: 1,
       mentionCount: 0,
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     const finalCatchUp = deferred<SyncAttemptResult>();
@@ -4765,7 +4585,7 @@ describe("WorkspaceRuntime", () => {
         mentionCount: 1,
       };
       const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
-      const api = new FakeDesktopApi(
+      const api = new FakeWorkspaceClient(
         bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
       );
       const cache = new FakeWorkspaceCache();
@@ -4864,7 +4684,7 @@ describe("WorkspaceRuntime", () => {
       mentionCount: 1,
     };
     const afterRetract = { ...beforeRetract, unreadCount: 0, mentionCount: 0 };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRetract] }),
     );
     api.histories.set(CONVERSATION_ID, {
@@ -4939,7 +4759,7 @@ describe("WorkspaceRuntime", () => {
 
   it("projects idempotent reaction mutations and their realtime echoes", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -4971,7 +4791,7 @@ describe("WorkspaceRuntime", () => {
 
   it("loads and mutates tasks while keeping newer optimistic versions over stale events", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -5059,7 +4879,7 @@ describe("WorkspaceRuntime", () => {
     };
     const cache = new FakeWorkspaceCache();
     await cache.replaceSnapshot(bootstrapAt("9"), [], [], [staleTask]);
-    const api = new FakeDesktopApi(bootstrapAt("12"));
+    const api = new FakeWorkspaceClient(bootstrapAt("12"));
     api.conversationTaskResults.push({
       tasks: [currentTask],
       nextCursor: null,
@@ -5088,7 +4908,7 @@ describe("WorkspaceRuntime", () => {
       },
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           channel(CONVERSATION_ID, "general"),
@@ -5114,7 +4934,7 @@ describe("WorkspaceRuntime", () => {
     const builtInId = "10000000-0000-4000-8000-0000000000c2";
     const announcement = channel(announcementId, "company-news");
     const builtIn = channel(builtInId, "hype/release-notes");
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           channel(CONVERSATION_ID, "general"),
@@ -5161,7 +4981,7 @@ describe("WorkspaceRuntime", () => {
   ] satisfies { readonly label: string; readonly page: TaskListResponse }[])(
     "rejects $label without blocking chat",
     async ({ page }) => {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.conversationTaskResults.push(page);
       const cache = new FakeWorkspaceCache();
       const runtime = runtimeWith(api, cache);
@@ -5177,7 +4997,7 @@ describe("WorkspaceRuntime", () => {
   );
 
   it("rejects an empty advancing task page during on-demand loading", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push({
       tasks: [],
       nextCursor: "task-page-1",
@@ -5194,7 +5014,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects an empty terminal task continuation instead of accepting an incomplete page", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push(
       { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
       { tasks: [], nextCursor: null, hasMore: false },
@@ -5211,7 +5031,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a task cursor cycle without repeating requests", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push(
       { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
       { tasks: [catalogTask(1)], nextCursor: "task-page-2", hasMore: true },
@@ -5233,7 +5053,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects duplicate task IDs across catalog pages", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push(
       { tasks: [catalogTask(0)], nextCursor: "task-page-1", hasMore: true },
       { tasks: [catalogTask(0)], nextCursor: null, hasMore: false },
@@ -5260,7 +5080,7 @@ describe("WorkspaceRuntime", () => {
       error: "The workspace task catalog crossed conversation scope",
     },
   ])("rejects a task that crosses $label scope", async ({ task: wrongTask, error }) => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push({
       tasks: [wrongTask],
       nextCursor: null,
@@ -5277,7 +5097,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("accepts a complete task catalog at the 20,000-task collection capacity", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     addTaskCatalogPages(api, WORKSPACE_TASK_COLLECTION_LIMIT);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5292,7 +5112,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a task catalog above the 20,000-task collection capacity", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     addTaskCatalogPages(api, WORKSPACE_TASK_COLLECTION_LIMIT + 1);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5312,7 +5132,7 @@ describe("WorkspaceRuntime", () => {
       title: "Updated during membership repair",
       updatedAt: "2026-07-24T12:02:00.000Z",
     };
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -5351,7 +5171,7 @@ describe("WorkspaceRuntime", () => {
       title: "Updated during HTTP membership repair",
       updatedAt: "2026-07-24T12:02:00.000Z",
     };
-    const api = new FakeDesktopApi(bootstrapAt("12"));
+    const api = new FakeWorkspaceClient(bootstrapAt("12"));
     api.bootstrapResults.push(bootstrapAt("10"));
     api.conversationTaskResults.push({ tasks: [currentTask], nextCursor: null, hasMore: false });
     api.syncResults.push({
@@ -5388,7 +5208,7 @@ describe("WorkspaceRuntime", () => {
 
   it("keeps realtime events newer than an in-flight search reaction hydration", async () => {
     const cache = new FakeWorkspaceCache();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const hydration = deferred<ListMessageReactionsResponse>();
     api.reactionResults.push(hydration.promise);
     const runtime = runtimeWith(api, cache);
@@ -5408,7 +5228,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps the realtime queue usable after a reaction projection fails", async () => {
     const cache = new FakeWorkspaceCache();
     cache.reactionUpsertFailures = 1;
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.addReactionResults.push({ reaction: ownReaction, syncCursor: testPosition("11") });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -5426,7 +5246,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps an abandoned failed-message edit recoverable across a restart", async () => {
     const cache = new FakeWorkspaceCache();
     await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Authored while offline");
-    const firstRuntime = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    const firstRuntime = runtimeWith(new FakeWorkspaceClient(bootstrapAt("10")), cache);
     await firstRuntime.start(session);
 
     // Entering edit mode only copies this durable body into renderer state; it deliberately makes
@@ -5434,7 +5254,7 @@ describe("WorkspaceRuntime", () => {
     expect(firstRuntime.state.outbox[0]?.operation.message.body).toBe("Authored while offline");
     await firstRuntime.stop();
 
-    const restarted = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    const restarted = runtimeWith(new FakeWorkspaceClient(bootstrapAt("10")), cache);
     await restarted.start(session);
     expect(restarted.state.outbox).toHaveLength(1);
     expect(restarted.state.outbox[0]?.operation.message.body).toBe("Authored while offline");
@@ -5445,7 +5265,7 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Original body");
     cache.outboxMutations.length = 0;
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.sendResults.push({ status: "permanent", reason: "validation" });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -5490,7 +5310,7 @@ describe("WorkspaceRuntime", () => {
       "2026-07-24T12:00:00.001Z",
     );
     await cache.clearServerStatePreservingOutbox();
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.sendResults.push({ status: "permanent", reason: "validation" });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -5514,7 +5334,7 @@ describe("WorkspaceRuntime", () => {
   it("still discards a failed message immediately and durably", async () => {
     const cache = new FakeWorkspaceCache();
     await enqueuePermanentFailure(cache, OWN_CLIENT_MESSAGE_ID, "Discard me");
-    const runtime = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    const runtime = runtimeWith(new FakeWorkspaceClient(bootstrapAt("10")), cache);
     await runtime.start(session);
 
     await runtime.discardMessage(OWN_CLIENT_MESSAGE_ID);
@@ -5522,13 +5342,13 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).outbox).toEqual([]);
     await runtime.stop();
 
-    const restarted = runtimeWith(new FakeDesktopApi(bootstrapAt("10")), cache);
+    const restarted = runtimeWith(new FakeWorkspaceClient(bootstrapAt("10")), cache);
     await restarted.start(session);
     expect(restarted.state.outbox).toEqual([]);
   });
 
   it("restarts realtime with the cursor a resync established, and does not loop", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("5"));
+    const api = new FakeWorkspaceClient(bootstrapAt("5"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -5554,7 +5374,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      const api = new FakeDesktopApi(bootstrapAt("5"));
+      const api = new FakeWorkspaceClient(bootstrapAt("5"));
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
 
@@ -5588,7 +5408,7 @@ describe("WorkspaceRuntime", () => {
   it("serializes an in-flight sync retry with a realtime resync demand", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 1_000 });
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
@@ -5631,7 +5451,7 @@ describe("WorkspaceRuntime", () => {
   it("bounds a resync chain whose handshakes each report the connection live", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("5"));
+      const api = new FakeWorkspaceClient(bootstrapAt("5"));
       // A restored workspace whose cursor sits below the oldest retained event answers every
       // handshake this way: the socket comes up live and the demand follows from a later flush, so
       // `system.connected` says nothing about the cursor and cannot end the chain.
@@ -5670,7 +5490,7 @@ describe("WorkspaceRuntime", () => {
   it("retries a resync whose download failed instead of wedging the client", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("5"));
+      const api = new FakeWorkspaceClient(bootstrapAt("5"));
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
 
@@ -5699,7 +5519,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("applies an in-flight lower-sequence peer event after a send is accepted", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -5739,7 +5559,7 @@ describe("WorkspaceRuntime", () => {
       downloadUrl: null,
       createdAt: NOW,
     };
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [],
@@ -5809,7 +5629,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "5",
       body: "Later reply B",
     };
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.histories.set(CONVERSATION_ID, {
       messages: [ownMessage],
       threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 1, latestReply: threadReply }],
@@ -5879,7 +5699,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("projects canonical unread counts from read-cursor events", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -5930,7 +5750,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not erase counts when a retained legacy read-cursor event replays", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           {
@@ -5979,7 +5799,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("projects and selects a created channel without refreshing or skipping earlier events", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6035,7 +5855,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects channel creation before bootstrap without contacting the server", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
     await expect(runtime.createChannel("Too Soon", "too-soon", null, "members")).rejects.toThrow(
@@ -6045,7 +5865,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not project a successful mutation into a replacement session", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6066,7 +5886,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("clears the old workspace synchronously while a replacement identity bootstrap is pending", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const firstCache = new FakeWorkspaceCache();
     const replacementCache = new FakeWorkspaceCache();
     const runtime = new WorkspaceRuntime(api, {
@@ -6108,7 +5928,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not let delayed old-scope cache initialization replace the current cache", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const delayedCrypto = deferred<CacheCryptoStatus>();
     api.cryptoStatusResults.push(delayedCrypto.promise, {
       mode: "memory_only",
@@ -6141,7 +5961,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not publish a delayed old-cache reload after a replacement scope starts", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const firstCache = new FakeWorkspaceCache();
     await firstCache.replaceSnapshot(bootstrapAt("10"), [ownMessage]);
     const delayedReload = deferred<void>();
@@ -6174,7 +5994,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("keeps a server-created channel selected when its cache write fails", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6201,7 +6021,7 @@ describe("WorkspaceRuntime", () => {
       conversationId: DIRECT_CONVERSATION_ID,
       body: "Cached CPO thread",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         members: [user, peer],
         conversations: [channel(CONVERSATION_ID, "general"), peerDm],
@@ -6248,7 +6068,7 @@ describe("WorkspaceRuntime", () => {
       conversationId: DIRECT_CONVERSATION_ID,
       body: "Hydrated after first paint",
     };
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, peer] }));
     const delayedHistory = deferred<MessageHistoryResponse>();
     api.directConversationResults.push({ conversation: createdDm, syncCursor: testPosition("12") });
     api.historyResults.set(DIRECT_CONVERSATION_ID, [delayedHistory.promise]);
@@ -6299,7 +6119,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects direct-message creation before bootstrap without contacting the server", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, peer] }));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
 
     await expect(runtime.createDirectConversation(PEER_ID)).rejects.toThrow(
@@ -6309,7 +6129,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not project a successful direct conversation into a replacement session", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, peer] }));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6335,7 +6155,7 @@ describe("WorkspaceRuntime", () => {
   it("rearms the retry timer so a retryable send is redelivered with no user action", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       const cache = new FakeWorkspaceCache();
       const runtime = runtimeWith(api, cache);
       await runtime.start(session);
@@ -6359,7 +6179,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("lets a replacement generation flush while the retired send remains hung", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const hungSend = deferred<SendAttemptResult>();
     api.sendResults.push(hungSend.promise, {
       status: "accepted",
@@ -6393,7 +6213,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not let a retired flush adopt the replacement while a status patch is delayed", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [
           channel(CONVERSATION_ID, "general"),
@@ -6466,7 +6286,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -6513,7 +6333,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("applies a realtime event without reloading the whole decrypted cache", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6530,7 +6350,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("projects creator and invitee roles from live group creation events", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     const creatorGroupId = "20000000-0000-4000-8000-000000000081";
@@ -6571,7 +6391,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("opens a search hit in the main timeline and clears the focus on normal navigation", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6616,7 +6436,7 @@ describe("WorkspaceRuntime", () => {
       conversationId: SECOND_CONVERSATION_ID,
       body: "Must not escape a completed membership repair",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -6654,7 +6474,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -6688,7 +6508,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("reauthorizes and opens an exact notification message in the main timeline", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.messageByIdResults.push({ message: peerMessage });
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -6715,7 +6535,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID, PEER_ID],
       membershipRole: "member",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversations: [privateSummary], members: [user, peer] }),
     );
     api.messageByIdResults.push({ message: peerMessage });
@@ -6744,7 +6564,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("falls back when a cached notification target has been retracted", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     api.emitWorkspaceEvent(peerEvent);
@@ -6785,7 +6605,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("falls back when a source-less retract wins during exact notification hydration", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const hydration = deferred<MessageByIdResponse>();
     api.messageByIdResults.push(hydration.promise);
     const cache = new FakeWorkspaceCache();
@@ -6830,7 +6650,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("opens an authorized notification target from the replica before by-ID hydration", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -6849,7 +6669,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("opens an exact notification reply inside its canonical thread", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.messageByIdResults.push({ message: threadReply });
     api.threadResults.push({ root: ownMessage, replies: [threadReply], nextCursor: null });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
@@ -6874,7 +6694,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("preflights only notification targets the current workspace can navigate", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     const before = runtime.state;
@@ -6897,7 +6717,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("discards notification actions outside the current session generation and scope", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     const before = runtime.state;
@@ -6929,7 +6749,7 @@ describe("WorkspaceRuntime", () => {
 
   it("falls back only to an authorized conversation when exact hydration is unavailable", async () => {
     const secondSummary = channel(SECOND_CONVERSATION_ID, "second");
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
       }),
@@ -6963,7 +6783,7 @@ describe("WorkspaceRuntime", () => {
       ...peerMessage,
       conversationId: SECOND_CONVERSATION_ID,
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), secondSummary],
       }),
@@ -6984,7 +6804,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("discards an exact hydration response after the local runtime generation changes", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const hydration = deferred<MessageByIdResponse>();
     api.messageByIdResults.push(hydration.promise);
     const cache = new FakeWorkspaceCache();
@@ -7012,7 +6832,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not continue an in-flight reply action into a replacement scope", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.messageByIdResults.push({ message: threadReply });
     const reactionHydration = deferred<ListMessageReactionsResponse>();
     api.reactionResults.push(reactionHydration.promise);
@@ -7049,7 +6869,7 @@ describe("WorkspaceRuntime", () => {
 
   it("orders a peer-created conversation the way a cold load would", async () => {
     const alphaId = "20000000-0000-4000-8000-000000000010";
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
 
@@ -7088,7 +6908,7 @@ describe("WorkspaceRuntime", () => {
       ...initialSummary,
       participantIds: [USER_ID, PEER_ID, AGENT_ID],
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [initialSummary],
       }),
@@ -7135,7 +6955,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7226,7 +7046,7 @@ describe("WorkspaceRuntime", () => {
     const initial = bootstrapAt("10", {
       conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
     });
-    const api = new FakeDesktopApi(initial);
+    const api = new FakeWorkspaceClient(initial);
     api.histories.set(SECOND_CONVERSATION_ID, {
       messages: [firstMessage],
       threadSummaries: [],
@@ -7347,7 +7167,7 @@ describe("WorkspaceRuntime", () => {
     const initial = bootstrapAt("10", {
       conversations: [channel(CONVERSATION_ID, "general"), firstPrivate, secondPrivate],
     });
-    const api = new FakeDesktopApi(initial);
+    const api = new FakeWorkspaceClient(initial);
     api.histories.set(SECOND_CONVERSATION_ID, {
       messages: [firstMessage],
       threadSummaries: [],
@@ -7469,7 +7289,7 @@ describe("WorkspaceRuntime", () => {
       conversationSequence: "0",
       body: "Must stay purged after a delayed history response",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7544,7 +7364,7 @@ describe("WorkspaceRuntime", () => {
       sourceMessageId: null,
       title: "Must stay purged after a delayed task response",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7586,7 +7406,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects an ordinary frame queued by the realtime session a repair superseded", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -7648,7 +7468,7 @@ describe("WorkspaceRuntime", () => {
       clientMessageId: "20000000-0000-4000-8000-00000000002b",
       conversationId: SECOND_CONVERSATION_ID,
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7742,7 +7562,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7816,7 +7636,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7879,7 +7699,7 @@ describe("WorkspaceRuntime", () => {
       participantIds: [USER_ID],
       membershipRole: "owner",
     };
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", {
         conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
       }),
@@ -7958,7 +7778,7 @@ describe("WorkspaceRuntime", () => {
       clientMessageId: "20000000-0000-4000-8000-000000000031",
       conversationId: SECOND_CONVERSATION_ID,
     };
-    const oldApi = new FakeDesktopApi(initial);
+    const oldApi = new FakeWorkspaceClient(initial);
     oldApi.histories.set(SECOND_CONVERSATION_ID, {
       messages: [privateMessage],
       threadSummaries: [],
@@ -8000,7 +7820,7 @@ describe("WorkspaceRuntime", () => {
     expect(oldApi.acknowledged).not.toContain("11");
 
     // Even a stale pre-removal snapshot cannot reopen the conversation while the old run waits.
-    const freshApi = new FakeDesktopApi(initial);
+    const freshApi = new FakeWorkspaceClient(initial);
     const freshRuntime = runtimeWith(freshApi, cache);
     await freshRuntime.start(session);
     expect(
@@ -8033,7 +7853,7 @@ describe("WorkspaceRuntime", () => {
       conversationId: SECOND_CONVERSATION_ID,
     };
     const staleSnapshot = deferred<HumanWorkspaceBootstrapResponse>();
-    const api = new FakeDesktopApi(initial);
+    const api = new FakeWorkspaceClient(initial);
     api.bootstrapResults.push(staleSnapshot.promise, bootstrapAt("12"));
     api.histories.set(SECOND_CONVERSATION_ID, {
       messages: [privateMessage],
@@ -8079,7 +7899,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("orders a newly delivered member the way a cold load would", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     const alice: User = {
       id: "20000000-0000-4000-8000-000000000011",
       kind: "human",
@@ -8105,7 +7925,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("drops a disabled member from the directory when member.updated arrives over realtime", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
@@ -8127,7 +7947,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("refreshes the directory from an offline backfill before reloading the cache", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     api.syncResults.push({
       status: "accepted",
       response: {
@@ -8155,7 +7975,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("coalesces a backfilled batch of member.updated events into one directory read", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     api.syncResults.push({
       status: "accepted",
       response: {
@@ -8181,7 +8001,7 @@ describe("WorkspaceRuntime", () => {
   it("retries a failed directory read on a healthy socket, with no sync pass to lean on", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
       // Deliberately no queued sync result: nothing arms a sync retry, so `#repairAndFlush` is
       // never re-entered. On a connected socket that is the normal state, and it used to mean a
       // single failed read left the disabled member resolvable until the app restarted.
@@ -8212,7 +8032,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps an in-flight catalog stale after an independent member retry succeeds", async () => {
     vi.useFakeTimers();
     const catalog = deferred<HumanWorkspaceBootstrapResponse>();
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     let refreshing: Promise<void> | undefined;
     try {
@@ -8257,7 +8077,7 @@ describe("WorkspaceRuntime", () => {
   it("keeps stale state while an independent sync recovery is still pending", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
       const syncRecovery = deferred<SyncAttemptResult>();
       // The first attempt arms a retry; the retry then remains in flight while the independent
       // member-directory retry succeeds.
@@ -8299,7 +8119,7 @@ describe("WorkspaceRuntime", () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
 
@@ -8331,7 +8151,7 @@ describe("WorkspaceRuntime", () => {
   it("discards a directory read that a newer read already superseded", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
       api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
       const slow = deferred<ListMembersResponse>();
       api.memberResults.push(slow.promise, { members: [user] });
@@ -8356,7 +8176,7 @@ describe("WorkspaceRuntime", () => {
   it("serializes durable member replacements when a newer refetch overtakes a stalled write", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
       api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
       api.memberResults.push({ members: [user, agent] }, { members: [user] });
       const stalledWrite = deferred<void>();
@@ -8391,7 +8211,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("does not let a stopped session's stalled member write block the current session", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     api.memberResults.push({ members: [user, agent] });
     const stalledWrite = deferred<void>();
     const cache = new FakeWorkspaceCache();
@@ -8422,7 +8242,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("ignores a directory read that lands after the runtime stopped", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, agent] }));
     const slow = deferred<ListMembersResponse>();
     api.memberResults.push(slow.promise);
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
@@ -8438,7 +8258,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("pages conversations that the bootstrap response could not carry", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8498,7 +8318,7 @@ describe("WorkspaceRuntime", () => {
       },
     },
   ])("rejects $label before replacing the snapshot", async ({ bootstrap, page }) => {
-    const api = new FakeDesktopApi(bootstrap);
+    const api = new FakeWorkspaceClient(bootstrap);
     if (page !== null) api.conversationPages.set(NEXT_PAGE_CURSOR, page);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
@@ -8514,7 +8334,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects an empty advancing conversation page instead of accepting a partial catalog", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8534,7 +8354,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a nonadvancing conversation cursor instead of accepting a partial catalog", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8554,7 +8374,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a conversation cursor cycle without repeating requests", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8579,7 +8399,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects duplicate conversation IDs across catalog pages", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8596,7 +8416,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a conversation summary from another workspace", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: NEXT_PAGE_CURSOR, conversationsHasMore: true }),
     );
     api.conversationPages.set(NEXT_PAGE_CURSOR, {
@@ -8621,7 +8441,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("accepts a complete catalog at the replica's 5,000-conversation capacity", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: "page-1", conversationsHasMore: true }),
     );
     addConversationCatalogPages(api, 4_999);
@@ -8636,7 +8456,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("rejects a catalog above the replica's 5,000-conversation capacity", async () => {
-    const api = new FakeDesktopApi(
+    const api = new FakeWorkspaceClient(
       bootstrapAt("10", { conversationsNextCursor: "page-1", conversationsHasMore: true }),
     );
     addConversationCatalogPages(api, 5_000);
@@ -8666,7 +8486,7 @@ describe("WorkspaceRuntime", () => {
         id: "20000000-0000-4000-8000-00000000002c",
         conversationId: SECOND_CONVERSATION_ID,
       };
-      const api = new FakeDesktopApi(
+      const api = new FakeWorkspaceClient(
         bootstrapAt("10", {
           conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
         }),
@@ -8748,7 +8568,7 @@ describe("WorkspaceRuntime", () => {
   });
 
   it("surfaces a permanent sync failure instead of silently going stale", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const api = new FakeWorkspaceClient(bootstrapAt("10"));
     api.syncResults.push({ status: "permanent", reason: "forbidden" });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
@@ -8760,7 +8580,7 @@ describe("WorkspaceRuntime", () => {
   it("retries a retryable sync after the server's Retry-After delay", async () => {
     vi.useFakeTimers();
     try {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.syncResults.push({ status: "retryable", reason: "server", retryAfterMs: 2_000 });
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
@@ -8777,7 +8597,7 @@ describe("WorkspaceRuntime", () => {
 
   describe("updateProfileTitle", () => {
     it("updates currentUser and the matching member with the returned user", async () => {
-      const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, peer] }));
+      const api = new FakeWorkspaceClient(bootstrapAt("10", { members: [user, peer] }));
       const runtime = runtimeWith(api, new FakeWorkspaceCache());
       await runtime.start(session);
 
@@ -8798,7 +8618,7 @@ describe("WorkspaceRuntime", () => {
       const titledUser = { ...user, title: "Captain" };
       const titledMember: User = titledUser;
       const titledBootstrap = bootstrapAt("10", { members: [titledMember, peer] });
-      const api = new FakeDesktopApi({
+      const api = new FakeWorkspaceClient({
         ...titledBootstrap,
         currentUser: { ...titledBootstrap.currentUser, user: titledUser },
       });
@@ -8815,7 +8635,7 @@ describe("WorkspaceRuntime", () => {
     });
 
     it("re-throws when the server rejects the update", async () => {
-      const api = new FakeDesktopApi(bootstrapAt("10"));
+      const api = new FakeWorkspaceClient(bootstrapAt("10"));
       api.updateProfile = async () => {
         throw new Error("Profile update failed");
       };
@@ -8830,7 +8650,7 @@ describe("WorkspaceRuntime", () => {
 
 it("drops an old realtime frame queued behind a cache write when HTTP resets the protocol epoch", async () => {
   vi.useFakeTimers();
-  const api = new FakeDesktopApi(bootstrapAt("10"));
+  const api = new FakeWorkspaceClient(bootstrapAt("10"));
   const cache = new MemoryWorkspaceCache();
   const runtime = runtimeWith(api, cache);
   const pendingApply = deferred<void>();

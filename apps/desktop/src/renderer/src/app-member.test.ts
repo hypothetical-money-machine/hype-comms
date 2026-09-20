@@ -1,29 +1,23 @@
 import { testPosition } from "../../shared/test-support/sync-position";
+import { createAppClient, createAppRuntimes } from "./app-test-fixture";
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   ChatSessionState,
   ConversationMutationResponse,
   HumanWorkspaceBootstrapResponse,
   Message,
   NotificationContext,
-  NotificationState,
   RealtimeSessionScope,
-  ThemeState,
-  UpdateState,
   User,
 } from "@hype-comms/contracts";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
-import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
-import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
-import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
-import type { ThemeRuntime } from "./theme-runtime";
 
 const USER_ID = "40000000-0000-4000-8000-000000000001";
 const PEER_ID = "40000000-0000-4000-8000-000000000002";
@@ -58,7 +52,7 @@ function user(id: string, displayName: string, title?: string | null): User {
   };
 }
 
-const currentUser = user(USER_ID, "Morgan", "Founder");
+const currentUser = { ...user(USER_ID, "Morgan", "Founder"), kind: "human" as const };
 const peer = user(PEER_ID, "Sam", "Product");
 const other = user(OTHER_ID, "Taylor");
 const agent: User = {
@@ -117,7 +111,7 @@ const bootstrap = {
     announcementChannels: false,
     humansOnlyChannels: false,
   },
-} as unknown as HumanWorkspaceBootstrapResponse;
+} satisfies HumanWorkspaceBootstrapResponse;
 
 const humansOnlyBootstrap = {
   ...bootstrap,
@@ -125,7 +119,7 @@ const humansOnlyBootstrap = {
   conversations: [
     ...bootstrap.conversations,
     {
-      ...bootstrap.conversations[0],
+      ...bootstrap.conversations[0]!,
       conversation: {
         ...bootstrap.conversations[0]!.conversation,
         id: HUMANS_CHANNEL_ID,
@@ -137,7 +131,7 @@ const humansOnlyBootstrap = {
     },
   ],
   featureFlags: { ...bootstrap.featureFlags, humansOnlyChannels: true },
-} as unknown as HumanWorkspaceBootstrapResponse;
+} satisfies HumanWorkspaceBootstrapResponse;
 
 const humansThreadRoot: Message = {
   id: HUMANS_THREAD_ROOT_ID,
@@ -163,14 +157,6 @@ const humansFollowUp: Message = {
   body: "A consecutive planning update",
   createdAt: "2026-08-23T12:01:00.000Z",
   updatedAt: "2026-08-23T12:01:00.000Z",
-};
-
-const notificationState: NotificationState = {
-  version: 1,
-  devicePreference: "enabled",
-  contentPreviewPreference: "disabled",
-  nativeSupport: "supported",
-  osPermission: "granted",
 };
 
 const activeContext: Extract<NotificationContext, { status: "active" }> = {
@@ -213,182 +199,90 @@ function createClient(
     syncCursor: testPosition("11"),
   }));
 
-  const client = {
-    platform: "linux",
-    isHeadless: true,
-    getSessionState: async () => session,
-    retrySession: async () => session,
-    onSessionChanged: () => () => undefined,
-    signOut: async () => ({ status: "signed-out" }) as const,
-    getAppVersion: async () => "0.1.29-test",
-    getUpdateState: async (): Promise<UpdateState> => ({ status: "idle" }),
-    checkForUpdates: async () => undefined,
-    restartToInstallUpdate: async () => undefined,
-    onUpdateStateChanged: () => () => undefined,
-    initializeCacheCrypto: async () =>
-      ({
-        mode: "memory_only",
-        scope: { userId: USER_ID, workspaceId: WORKSPACE_ID },
-        reason: "credential_store_unavailable",
-      }) as const,
-    getWorkspaceBootstrap: async () => workspaceBootstrap,
-    updateProfile: async () => currentUser,
-    listWorkspaceMembers: async () => ({ members: workspaceBootstrap.members }),
-    listAgentEnrollments: async () => ({ enrollments: [] }),
-    reviewAgentEnrollment: async () => {
-      throw new Error("unused");
+  const client = createAppClient({
+    session,
+    bootstrap: () => workspaceBootstrap,
+    overrides: {
+      signOut: async () => ({ status: "signed-out" }) as const,
+      getWorkspaceBootstrap: async () => workspaceBootstrap,
+      updateProfile: async () => currentUser,
+      listWorkspaceMembers: async () => ({ members: workspaceBootstrap.members }),
+      listAgentEnrollments: async () => ({ enrollments: [] }),
+      reviewAgentEnrollment: async () => {
+        throw new Error("unused");
+      },
+      cancelAgentEnrollment: async () => {
+        throw new Error("unused");
+      },
+      createChannel: async () => {
+        throw new Error("unused");
+      },
+      archiveChannel: async () => {
+        throw new Error("unused");
+      },
+      getChannelMembers: async () => {
+        throw new Error("unused");
+      },
+      upsertChannelMember: async () => {
+        throw new Error("unused");
+      },
+      removeChannelMember: async () => {
+        throw new Error("unused");
+      },
+      createDirectConversation,
+      getConversationMessages: async ({ conversationId }: { conversationId: string }) => ({
+        attachments: [],
+        reactions: [],
+        snapshotPosition: workspaceBootstrap.syncCursor,
+        messages: conversationId === HUMANS_CHANNEL_ID ? [...humansMessages] : [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      }),
+      getMessageById: async () => {
+        throw new Error("unused");
+      },
+      getMessageThread: async () => ({
+        attachments: [],
+        reactions: [],
+        snapshotPosition: workspaceBootstrap.syncCursor,
+        root: humansThreadRoot,
+        replies: [],
+        nextCursor: null,
+      }),
+      searchMessages: async () => ({ results: [], nextCursor: null }),
+      listConversationTasks: async () => ({
+        snapshotPosition: workspaceBootstrap.syncCursor,
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      listMyTasks: async () => ({
+        snapshotPosition: workspaceBootstrap.syncCursor,
+        tasks: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
+        realtimeStarts += 1;
+        return Object.freeze({
+          userId: session.userId,
+          workspaceId: session.workspaceId,
+          epoch: realtimeStarts,
+        });
+      },
+      activateWorkspaceRealtime: async () => undefined,
+      stopWorkspaceRealtime: async () => undefined,
+      onWorkspaceEvent: () => () => undefined,
+      getNotificationContext: async (): Promise<NotificationContext> => activeContext,
+      reportNotificationActivity: async () => undefined,
+      drainNotificationActions: async (ready) => ({ ...ready, actions: [] }),
+      acknowledgeNotificationAction: async () => undefined,
+      onNotificationAction: () => () => undefined,
     },
-    cancelAgentEnrollment: async () => {
-      throw new Error("unused");
-    },
-    listConversations: async () => ({
-      conversations: workspaceBootstrap.conversations,
-      nextCursor: null,
-      hasMore: false,
-    }),
-    createChannel: async () => {
-      throw new Error("unused");
-    },
-    archiveChannel: async () => {
-      throw new Error("unused");
-    },
-    getChannelMembers: async () => {
-      throw new Error("unused");
-    },
-    upsertChannelMember: async () => {
-      throw new Error("unused");
-    },
-    removeChannelMember: async () => {
-      throw new Error("unused");
-    },
-    createDirectConversation,
-    getConversationMessages: async ({ conversationId }: { conversationId: string }) => ({
-      attachments: [],
-      reactions: [],
-      snapshotPosition: workspaceBootstrap.syncCursor,
-      messages: conversationId === HUMANS_CHANNEL_ID ? humansMessages : [],
-      threadSummaries: [],
-      threadsSupported: true,
-      nextCursor: null,
-    }),
-    getMessageById: async () => {
-      throw new Error("unused");
-    },
-    getMessageThread: async () => ({
-      attachments: [],
-      reactions: [],
-      snapshotPosition: workspaceBootstrap.syncCursor,
-      root: humansThreadRoot,
-      replies: [],
-      nextCursor: null,
-    }),
-    listMessageReactions: async () => ({ reactions: [] }),
-    searchMessages: async () => ({ results: [], nextCursor: null }),
-    listConversationTasks: async () => ({
-      snapshotPosition: workspaceBootstrap.syncCursor,
-      tasks: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    listMyTasks: async () => ({
-      snapshotPosition: workspaceBootstrap.syncCursor,
-      tasks: [],
-      nextCursor: null,
-      hasMore: false,
-    }),
-    advanceReadCursor: async () => undefined,
-    syncWorkspace: async (after: string) =>
-      ({
-        status: "accepted",
-        response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },
-      }) as const,
-    startWorkspaceRealtime: async (): Promise<RealtimeSessionScope> => {
-      realtimeStarts += 1;
-      return Object.freeze({
-        userId: session.userId,
-        workspaceId: session.workspaceId,
-        epoch: realtimeStarts,
-      });
-    },
-    activateWorkspaceRealtime: async () => undefined,
-    stopWorkspaceRealtime: async () => undefined,
-    acknowledgeWorkspaceEvent: async () => undefined,
-    getRealtimeState: async () => "offline",
-    onRealtimeStateChanged: () => () => undefined,
-    onWorkspaceEvent: () => () => undefined,
-    getNotificationContext: async (): Promise<NotificationContext> => activeContext,
-    reportNotificationActivity: async () => undefined,
-    drainNotificationActions: async (ready: unknown) => ({
-      ...(ready as Record<string, unknown>),
-      actions: [],
-    }),
-    acknowledgeNotificationAction: async () => undefined,
-    onNotificationAction: () => () => undefined,
-    getNotificationState: async () => notificationState,
-    setNotificationPreference: async () => notificationState,
-    refreshNotificationCapability: async () => notificationState,
-    onNotificationStateChanged: () => () => undefined,
-    getAiChannelState: async () => ({
-      version: 1,
-      generation: 1,
-      status: "configured",
-      workspaceName: "hype-comms",
-      entries: [],
-      plan: [],
-      permissionRequest: null,
-      error: null,
-    }),
-    startAiChannel: async () => {
-      throw new Error("unused");
-    },
-    chooseAiChannelWorkspace: async () => {
-      throw new Error("unused");
-    },
-    newAiChannelSession: async () => {
-      throw new Error("unused");
-    },
-    sendAiChannelPrompt: async () => {
-      throw new Error("unused");
-    },
-    cancelAiChannelPrompt: async () => {
-      throw new Error("unused");
-    },
-    respondAiChannelPermission: async () => {
-      throw new Error("unused");
-    },
-    onAiChannelStateChanged: () => () => undefined,
-  } as unknown as DesktopApi;
+  });
 
   return client;
-}
-
-function createTheme(): ThemeRuntime {
-  const state: ThemeState = {
-    preference: "system",
-    resolvedThemeId: "dark",
-    resolvedColorScheme: "dark",
-  };
-  return {
-    state,
-    subscribe: () => () => undefined,
-    setPreference: async () => state,
-  } as unknown as ThemeRuntime;
-}
-
-function createCompactMode(): CompactModeRuntime {
-  return {
-    enabled: false,
-    subscribe: () => () => undefined,
-    toggle: async () => false,
-  } as unknown as CompactModeRuntime;
-}
-
-function createSidebarPosition(): SidebarPositionRuntime {
-  return {
-    position: "left",
-    subscribe: () => () => undefined,
-    setPosition: () => undefined,
-  } as unknown as SidebarPositionRuntime;
 }
 
 async function renderWorkspace(
@@ -402,11 +296,8 @@ async function renderWorkspace(
   render(
     createElement(App, {
       client,
-      theme: createTheme(),
-      compactMode: createCompactMode(),
+      ...createAppRuntimes(client),
       devicePreferences: createTestDevicePreferencesRuntime(options.devicePreferences),
-      fencedBlockquotes: new FencedBlockquoteRuntime(null),
-      sidebarPosition: createSidebarPosition(),
     }),
   );
   await screen.findByTestId("workspace-ready");
@@ -416,6 +307,30 @@ async function renderWorkspace(
 afterEach(() => cleanup());
 
 describe("workspace member directory", () => {
+  it("does not describe an unloaded timeline as an empty conversation", async () => {
+    const client = createClient();
+    const loaded = await client.getConversationMessages({ conversationId: GENERAL_ID });
+    let finish = (): void => undefined;
+    vi.spyOn(client, "getConversationMessages").mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve(loaded);
+        }),
+    );
+    render(
+      createElement(App, {
+        client,
+        ...createAppRuntimes(client),
+        devicePreferences: createTestDevicePreferencesRuntime(),
+      }),
+    );
+    await screen.findByText("Loading messages…");
+    expect(screen.queryByText("Welcome to # General")).toBeNull();
+    finish();
+    await screen.findByText("Welcome to # General");
+    expect(screen.queryByText("Loading messages…")).toBeNull();
+  });
+
   it("renders member titles when present and starts a direct message", async () => {
     const client = await renderWorkspace();
 
