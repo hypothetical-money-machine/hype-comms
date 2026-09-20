@@ -7,6 +7,8 @@ import {
   type NotificationState,
 } from "@hype-comms/contracts";
 
+import { reportMainProcessError } from "./main-process-log";
+
 export interface NotificationPreferencePersistence {
   load(): Promise<NotificationPreference>;
   save(preference: NotificationPreference): Promise<void>;
@@ -156,7 +158,14 @@ export class NotificationSettingsController {
       return this.#state;
     }
     this.#state = parsed;
-    for (const listener of this.#listeners) listener(parsed);
+    for (const listener of this.#listeners) {
+      try {
+        listener(parsed);
+      } catch (error) {
+        // reportMainProcessError never throws, so no inner guard is needed to keep the loop going.
+        reportMainProcessError("Notification settings listener failed", error);
+      }
+    }
     return parsed;
   }
 

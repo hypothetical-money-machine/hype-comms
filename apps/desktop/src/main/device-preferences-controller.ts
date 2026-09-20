@@ -6,6 +6,7 @@ import {
 } from "@hype-comms/contracts";
 
 import { devicePreferencesEqual } from "../shared/device-preferences";
+import { reportMainProcessError } from "./main-process-log";
 
 export interface DevicePreferencesPersistence {
   load(): Promise<DevicePreferences>;
@@ -34,7 +35,7 @@ export class DevicePreferencesController {
     this.#reportListenerError =
       options.reportListenerError ??
       ((error) => {
-        console.error("Device preferences listener failed", error);
+        reportMainProcessError("Device preferences listener failed", error);
       });
   }
 

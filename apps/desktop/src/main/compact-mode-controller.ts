@@ -1,3 +1,5 @@
+import { reportMainProcessError } from "./main-process-log";
+
 export interface CompactModePersistence {
   load(): Promise<boolean>;
   save(enabled: boolean): Promise<void>;
@@ -20,7 +22,7 @@ export class CompactModeController {
     this.#reportListenerError =
       options.reportListenerError ??
       ((error) => {
-        console.error("Compact mode state listener failed", error);
+        reportMainProcessError("Compact mode state listener failed", error);
       });
   }
 
