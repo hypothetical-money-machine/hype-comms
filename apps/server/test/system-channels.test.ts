@@ -5,12 +5,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import type { Pool } from "pg";
 
 import { messageBodySchema, type CurrentUser, type WorkspaceEvent } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { loadReleaseNoteBulletins } from "../src/modules/system-channels/release-notes.js";
 import {
@@ -22,20 +21,12 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "20000000-0000-4000-8000-000000000001";
 const memberId = "20000000-0000-4000-8000-000000000002";
 const workspaceId = "20000000-0000-4000-8000-000000000004";
 const otherWorkspaceId = "20000000-0000-4000-8000-000000000005";
 const RELEASE_NOTES_SLUG = "hype/release-notes";
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 function identity(
   id: string,
@@ -154,8 +145,7 @@ describe("loadReleaseNoteBulletins", () => {
 });
 
 describeWithPostgres("seedSystemChannels", () => {
-  const schemaName = `system_channels_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let audits: AnnouncementAuditRecord[];
 
@@ -178,21 +168,27 @@ describeWithPostgres("seedSystemChannels", () => {
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "system_channels", poolSize: 8 });
+    pool = schema.pool;
   });
 
   beforeEach(async () => {
     audits = [];
-    await pool.query(`
-      TRUNCATE realtime_tickets, sync_event_audiences, sync_events, system_bulletins,
-               conversation_read_cursors, messages, conversation_memberships, conversations,
-               workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "realtime_tickets",
+        "sync_event_audiences",
+        "sync_events",
+        "system_bulletins",
+        "conversation_read_cursors",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     // Truncating users also removes the publisher migration 0031 installs, so restore it.
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
@@ -219,10 +215,7 @@ describeWithPostgres("seedSystemChannels", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
   });
 
   async function channelRow(workspace = workspaceId) {

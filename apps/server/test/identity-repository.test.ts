@@ -1,47 +1,36 @@
-import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import type { Pool } from "pg";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
-
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const later = "2026-07-25T12:00:00.000Z";
 const userId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
 describeWithPostgres("IdentityRepository", () => {
-  const schemaName = `identity_repository_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let repository: IdentityRepository;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 6 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "identity_repository", poolSize: 6 });
+    pool = schema.pool;
     repository = new IdentityRepository(pool);
   });
 
   beforeEach(async () => {
-    await pool.query(`
-      TRUNCATE device_sessions, magic_link_tokens, invitations, workspace_memberships,
-               workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(schema.pool, {
+      only: [
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     await repository.insertUser({
       id: userId,
       email: "owner@example.com",
@@ -53,11 +42,7 @@ describeWithPostgres("IdentityRepository", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
   });
 
   it("maps a pre-title user row to a null title", async () => {
