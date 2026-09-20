@@ -13,13 +13,10 @@
     "README.md"
   ],
   "scripts": {
-    "prebuild": "npm run build --workspace @hype-comms/api-client",
-    "build": "tsc -p tsconfig.json --noEmit && node build.mjs",
+    "build": "tsc -b && node build.mjs",
     "prepack": "npm run build",
-    "pretest": "npm run build",
-    "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hype-comms/api-client",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json --noEmit"
   },
   "engines": {
     "node": ">=24"

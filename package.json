@@ -19,8 +19,8 @@
     "esbuild@0.28.2": true
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "check": "npm run verify:test-database && npm run verify:vite-stack && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
+    "build": "tsc -b tsconfig.build.json && npm run build:assets --workspace @hype-comms/server && npm run build --workspace @hype-comms/cli && npm run build --workspace @hype-comms/desktop",
+    "check": "npm run verify:test-database && npm run verify:vite-stack && npm run verify:zod-alignment && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit",
     "demo": "node --env-file-if-exists=.env.local scripts/demo.mjs",
     "demo:headless": "node --env-file-if-exists=.env.local scripts/demo.mjs --headless",
@@ -59,7 +59,8 @@
     "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
     "test:unit": "npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts && npm test --workspace @hype-comms/api-client",
     "test:integration": "npm run test:postgres",
-    "verify:test-database": "node scripts/test-postgres.mjs --ready"
+    "verify:test-database": "node scripts/test-postgres.mjs --ready",
+    "verify:zod-alignment": "node scripts/verify-zod-alignment.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
