@@ -60,6 +60,13 @@ A platform lane covers every cell of its row. Partial coverage—one architectur
 format, or one OS version—does not pass that platform's lane and must not be recorded as if it
 did.
 
+## Retired Codex integration
+
+The disabled Codex host, protocol, and worker have been removed from the desktop build. AI Channel
+continues to use the active Claude integration and the user-installed Claude Code executable.
+Package verification still rejects bundled Codex packages and executables and requires the Claude
+worker. No user credentials or local work are removed by this retirement.
+
 ## Retired desktop Wake integration
 
 The desktop Wake integration, its dedicated CLI/server protocol, and pilot evidence tooling have

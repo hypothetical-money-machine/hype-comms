@@ -28,7 +28,6 @@ const baselinePackageEntries = () =>
     "/dist/main/build-metadata.json",
     "/dist/main/index.js",
     "/dist/main/claude-acp-worker.js",
-    "/dist/main/codex-app-server-worker.js",
     "/dist/preload/index.js",
     "/dist/renderer/index.html",
     "/dist/renderer/assets/index.js",
@@ -40,15 +39,15 @@ const baselinePackageEntries = () =>
 
 const desktopBuildMetadata = (apiOrigin) => Buffer.from(JSON.stringify({ apiOrigin }, null, 2));
 
-test("requires the Codex worker without allowing bundled Codex packages or executables", () => {
+test("requires the active Claude worker and rejects bundled Codex packages or executables", () => {
   const asarPath = "/tmp/hype-comms/resources/app.asar";
   assert.doesNotThrow(() => verifyPackageEntries(asarPath, baselinePackageEntries()));
 
   const missingWorker = baselinePackageEntries();
-  missingWorker.delete("/dist/main/codex-app-server-worker.js");
+  missingWorker.delete("/dist/main/claude-acp-worker.js");
   assert.throws(
     () => verifyPackageEntries(asarPath, missingWorker),
-    /missing \/dist\/main\/codex-app-server-worker\.js/u,
+    /missing \/dist\/main\/claude-acp-worker\.js/u,
   );
 
   const bundledPackage = baselinePackageEntries();
@@ -58,7 +57,12 @@ test("requires the Codex worker without allowing bundled Codex packages or execu
     /contains bundled official Codex packages/u,
   );
 
-  for (const executable of ["/vendor/codex", "/vendor/codex.exe"]) {
+  for (const executable of [
+    "/vendor/codex",
+    "/vendor/codex.exe",
+    "/node_modules/.bin/codex.cmd",
+    "/node_modules/.bin/codex.ps1",
+  ]) {
     const bundledExecutable = baselinePackageEntries();
     bundledExecutable.add(executable);
     assert.throws(
