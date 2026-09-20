@@ -228,6 +228,7 @@ export interface InsertDeviceSessionInput {
   readonly createdAt: IsoDateTime;
   readonly lastSeenAt: IsoDateTime;
   readonly expiresAt: IsoDateTime;
+  readonly workosSessionId?: AuthKitProviderSessionId;
 }
 
 export interface InsertAgentInput {
@@ -970,8 +971,8 @@ export class IdentityRepository {
   async insertDeviceSession(input: InsertDeviceSessionInput): Promise<DeviceSession> {
     const result = await this.#database.query<DeviceSessionRow>(
       `INSERT INTO device_sessions
-         (id, user_id, token_hash, label, created_at, last_seen_at, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (id, user_id, token_hash, label, created_at, last_seen_at, expires_at, workos_session_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, user_id, label, created_at, last_seen_at, expires_at, revoked_at`,
       [
         input.id,
@@ -981,6 +982,9 @@ export class IdentityRepository {
         input.createdAt,
         input.lastSeenAt,
         input.expiresAt,
+        input.workosSessionId === undefined
+          ? null
+          : authKitProviderSessionIdSchema.parse(input.workosSessionId),
       ],
     );
     return mapDeviceSession(result.rows[0] as DeviceSessionRow);
