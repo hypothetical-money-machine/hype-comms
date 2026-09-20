@@ -25,6 +25,7 @@ const NOW = "2026-07-24T12:00:00.000Z";
 const CURRENT_USER_URL = "https://chat.example/v1/auth/me";
 const SESSION_REFRESH_URL = "https://chat.example/v1/auth/session/refresh";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const TWENTY_NINE_DAYS_MS = 29 * 24 * 60 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const FIVE_MINUTES_MS = 5 * 60_000;
 const AUTHKIT_CODE = "C".repeat(43);
@@ -929,7 +930,7 @@ describe("ChatSession renewal", () => {
     }, cookies);
   }
 
-  it("rotates the stored credential before the thirty-day window lapses", async () => {
+  it("checks twice a day but rotates only when the renewal window begins", async () => {
     const requests: string[] = [];
     const cookies = storedIdentityCookies();
     const session = createRenewingSession(() => emptyResponse(), cookies, requests);
@@ -939,9 +940,104 @@ describe("ChatSession renewal", () => {
 
     await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
 
+    expect(rotations(requests)).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(TWENTY_NINE_DAYS_MS - TWELVE_HOURS_MS);
+
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
     expect(cookies.removals).toEqual([]);
+    session.stop();
+  });
+
+  it("retries a request that loses a race with credential rotation", async () => {
+    const requests: string[] = [];
+    const cookies = storedIdentityCookies();
+    let productAttempts = 0;
+    let notifyFirstRequest: (() => void) | undefined;
+    let releaseFirstRequest: (() => void) | undefined;
+    const firstRequestStarted = new Promise<void>((resolve) => {
+      notifyFirstRequest = resolve;
+    });
+    const firstRequestMayFinish = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    const session = createSession(async (url, init) => {
+      requests.push(`${init.method} ${url}`);
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        cookies.expirations.set("hype_comms_session", (Date.now() + THIRTY_DAYS_MS) / 1000);
+        return emptyResponse();
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        notifyFirstRequest?.();
+        await firstRequestMayFinish;
+        return emptyResponse(401);
+      }
+      return jsonResponse({ ok: true });
+    }, cookies);
+
+    await session.restore();
+    const productRequest = session.fetch("https://chat.example/v1/product", { method: "GET" });
+    await firstRequestStarted;
+    await session.renewSession();
+    releaseFirstRequest?.();
+
+    await expect(productRequest).resolves.toMatchObject({ status: 200 });
+    expect(productAttempts).toBe(2);
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("rotated-identity-cookie");
+    session.stop();
+  });
+
+  it("does not replay a request after sign-out and same-user sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    let notifyFirstRequest!: () => void;
+    let releaseFirstRequest!: () => void;
+    const firstRequestStarted = new Promise<void>((resolve) => {
+      notifyFirstRequest = resolve;
+    });
+    const firstRequestMayFinish = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    let productAttempts = 0;
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url.endsWith("/v1/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v1/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        notifyFirstRequest();
+        await firstRequestMayFinish;
+        return emptyResponse(401);
+      }
+      return emptyResponse();
+    }, cookies);
+
+    await session.restore();
+    const productRequest = session.fetch("https://chat.example/v1/messages/message-1", {
+      method: "DELETE",
+    });
+    await firstRequestStarted;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    const productOutcome = expect(productRequest).rejects.toThrow(
+      "Workspace request session changed",
+    );
+    releaseFirstRequest();
+
+    await productOutcome;
+    expect(productAttempts).toBe(1);
+    expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
     session.stop();
   });
 
@@ -951,7 +1047,7 @@ describe("ChatSession renewal", () => {
     const session = createRenewingSession(() => emptyResponse(503), cookies, requests);
 
     await session.restore();
-    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+    await session.renewSession();
 
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
@@ -975,7 +1071,7 @@ describe("ChatSession renewal", () => {
     );
 
     await session.restore();
-    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+    await session.renewSession();
 
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
