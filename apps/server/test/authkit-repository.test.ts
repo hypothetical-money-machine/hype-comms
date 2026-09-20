@@ -412,11 +412,18 @@ describeWithPostgres("AuthKitRepository", () => {
       userId: ownerId,
       expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString(),
     });
+    // The AuthKit handoff exchange writes device_sessions through the identity repository's
+    // single insertDeviceSession owner, so the row it produces must be readable through the
+    // repository's normal magic-link session lookup with exactly the fields that lookup returns.
     expect(
       await identityRepository.findDeviceSessionByTokenHash(hashToken(exchanged.token)),
     ).toMatchObject({
       userId: ownerId,
       label: "Morgan's laptop",
+      createdAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000).toISOString(),
+      revokedAt: null,
     });
     const persisted = await pool.query<{ workos_session_id: string }>(
       "SELECT workos_session_id FROM device_sessions",

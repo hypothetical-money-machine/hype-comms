@@ -23,6 +23,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { withTransaction } from "../../db/pool.js";
 import {
+  insertDeviceSession,
   lockHumanActivationSyncAudienceMemberships,
   publishHumanActivationSyncEvents,
 } from "./repository.js";
@@ -773,28 +774,16 @@ export class AuthKitRepository {
       );
       if (consumed.rowCount !== 1) throw new AuthKitCredentialRejectedError();
 
-      await client.query(
-        `INSERT INTO device_sessions (
-           id,
-           user_id,
-           token_hash,
-           label,
-           created_at,
-           last_seen_at,
-           expires_at,
-           workos_session_id
-         )
-         VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
-        [
-          randomUUID(),
-          handoff.user_id,
-          session.hash,
-          label,
-          now,
-          expiresAt,
-          handoff.workos_session_id,
-        ],
-      );
+      await insertDeviceSession(client, {
+        id: randomUUID(),
+        userId: entityIdSchema.parse(handoff.user_id),
+        tokenHash: session.hash,
+        label,
+        createdAt: isoDateTimeSchema.parse(now.toISOString()),
+        lastSeenAt: isoDateTimeSchema.parse(now.toISOString()),
+        expiresAt: isoDateTimeSchema.parse(expiresAt.toISOString()),
+        workosSessionId: authKitProviderSessionIdSchema.parse(handoff.workos_session_id),
+      });
 
       return {
         token: sessionTokenSchema.parse(session.token),
