@@ -1,3 +1,4 @@
+import type { SyncPosition } from "@hype-comms/contracts";
 import type {
   AdvanceReadCursorResponse,
   AddReactionResponse,
@@ -299,9 +300,9 @@ export interface DesktopApi
     conversationId: string,
     lastReadMessageId: string,
   ) => Promise<AdvanceReadCursorResponse>;
-  readonly syncWorkspace: (after: string) => Promise<SyncAttemptResult>;
+  readonly syncWorkspace: (after: SyncPosition) => Promise<SyncAttemptResult>;
   /** Prepares and returns a scope without opening a socket. */
-  readonly startWorkspaceRealtime: (after: string) => Promise<RealtimeSessionScope>;
+  readonly startWorkspaceRealtime: (after: SyncPosition) => Promise<RealtimeSessionScope>;
   /** Opens the socket only after the renderer has installed the prepared scope. */
   readonly activateWorkspaceRealtime: (scope: RealtimeSessionScope) => Promise<void>;
   readonly stopWorkspaceRealtime: (scope?: RealtimeSessionScope) => Promise<void>;

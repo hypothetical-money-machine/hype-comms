@@ -24,7 +24,7 @@ export function parseBoundedIpcPayload<T>(
     throw new TypeError("IPC payload must be JSON-serializable");
   }
   if (serialized === undefined) throw new TypeError("IPC payload must be JSON-serializable");
-  if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
+  if (new TextEncoder().encode(serialized).byteLength > maxBytes) {
     throw new RangeError("IPC payload exceeds its byte limit");
   }
   return schema.parse(value);

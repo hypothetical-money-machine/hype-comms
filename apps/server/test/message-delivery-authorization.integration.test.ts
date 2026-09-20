@@ -417,7 +417,7 @@ describe("message-delivery authorization", () => {
         clientMessageId: input.clientMessageId,
         conversationId,
         expectedConversationSequence: "0",
-        expectedWorkspaceSequence: removed.syncCursor,
+        expectedWorkspaceSequence: removed.syncCursor.sequence,
       });
     } finally {
       continueRemoval.resolve();
@@ -663,7 +663,7 @@ describe("message-delivery authorization", () => {
         clientMessageId: input.clientMessageId,
         conversationId,
         expectedConversationSequence: "0",
-        expectedWorkspaceSequence: archived.syncCursor,
+        expectedWorkspaceSequence: archived.syncCursor.sequence,
       });
     } finally {
       continueArchive.resolve();

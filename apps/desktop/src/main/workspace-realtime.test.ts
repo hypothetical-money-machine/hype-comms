@@ -1,3 +1,4 @@
+import { testPosition } from "../shared/test-support/sync-position";
 import { EventEmitter } from "node:events";
 import { WorkspaceProtocolError } from "./workspace-protocol";
 
@@ -56,8 +57,8 @@ class FakeSocket extends EventEmitter {
   }
 }
 
-function ticketResponse(ticket = "t".repeat(32)): { ticket: string; expiresAt: string } {
-  return { ticket, expiresAt: "2026-08-10T12:01:00.000Z" };
+function ticketResponse(ticket = "t".repeat(32)) {
+  return { ticket, position: testPosition("10"), expiresAt: "2026-08-10T12:01:00.000Z" };
 }
 
 function connectedEvent(options?: {
@@ -73,7 +74,7 @@ function connectedEvent(options?: {
     occurredAt: NOW,
     workspaceId: options?.workspaceId ?? WORKSPACE_A,
     conversationId: null,
-    workspaceSequence: options?.workspaceSequence ?? "10",
+    position: testPosition(options?.workspaceSequence ?? "10"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -95,7 +96,7 @@ function membershipEvent(options?: {
     occurredAt: NOW,
     workspaceId: options?.workspaceId ?? WORKSPACE_A,
     conversationId: CONVERSATION_ID,
-    workspaceSequence: options?.workspaceSequence ?? "9",
+    position: testPosition(options?.workspaceSequence ?? "9"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -113,7 +114,7 @@ function messageEvent(
     occurredAt: NOW,
     workspaceId: WORKSPACE_A,
     conversationId: CONVERSATION_ID,
-    workspaceSequence: "9",
+    position: testPosition("9"),
     conversationSequence: "1",
     entityVersion: 1,
     delivery: "at_least_once",
@@ -146,7 +147,7 @@ function resyncRequiredEvent(): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_A,
     conversationId: null,
-    workspaceSequence: "8",
+    position: testPosition("8"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -179,7 +180,7 @@ async function flushMicrotasks(): Promise<void> {
 
 function createHarness(options?: {
   readonly nextSessionEpoch?: () => number;
-  readonly ticket?: () => Promise<{ ticket: string; expiresAt: string }>;
+  readonly ticket?: () => Promise<ReturnType<typeof ticketResponse>>;
   readonly onEvent?: (event: ProductRealtimeEvent) => boolean;
   readonly onWindowlessEvent?: (event: ProductRealtimeEvent) => void;
   readonly onState?: (state: RealtimeConnectionState) => void;
@@ -191,7 +192,7 @@ function createHarness(options?: {
   const maxPayloads: number[] = [];
   const states: RealtimeConnectionState[] = [];
   const drops: RealtimeDropReason[] = [];
-  const ticket = vi.fn<() => Promise<{ ticket: string; expiresAt: string }>>(
+  const ticket = vi.fn<() => Promise<ReturnType<typeof ticketResponse>>>(
     options?.ticket ?? (async () => ticketResponse()),
   );
   const onEvent = vi.fn<(event: ProductRealtimeEvent) => boolean>(options?.onEvent ?? (() => true));
@@ -247,7 +248,7 @@ describe("WorkspaceRealtime", () => {
         throw new WorkspaceProtocolError();
       },
     });
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(harness.states).toEqual(["connecting", "incompatible"]);
@@ -258,7 +259,7 @@ describe("WorkspaceRealtime", () => {
 
   it.each([426, 404])("stops on an incompatible HTTP %s websocket upgrade", async (statusCode) => {
     const harness = createHarness();
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const destroy = vi.fn();
     const socket = harness.sockets[0]!;
@@ -285,14 +286,14 @@ describe("WorkspaceRealtime", () => {
   it("uses the acknowledged cursor and reaches live only after a scope-matching handshake", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
 
     expect(harness.states).toEqual(["connecting"]);
     expect(harness.ticket).toHaveBeenCalledTimes(1);
     expect(harness.urls[0]?.protocol).toBe("ws:");
     expect(harness.urls[0]?.searchParams.get("ticket")).toBe("t".repeat(32));
-    expect(harness.urls[0]?.searchParams.get("after")).toBe("8");
+    expect(harness.urls[0]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("8")));
     expect(harness.origins).toEqual(["http://127.0.0.1:5173"]);
     expect(harness.maxPayloads).toEqual([WORKSPACE_REALTIME_MAX_PAYLOAD_BYTES]);
 
@@ -314,17 +315,17 @@ describe("WorkspaceRealtime", () => {
   it("replaces an active generation when the authoritative scope changes", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("90", SCOPE_A);
+    harness.realtime.start(testPosition("90"), SCOPE_A);
     await flushMicrotasks();
     const staleSocket = harness.sockets[0];
-    harness.realtime.acknowledge("100");
+    harness.realtime.acknowledge(testPosition("100"));
 
-    harness.realtime.start("3", SCOPE_B);
+    harness.realtime.start(testPosition("3"), SCOPE_B);
     await flushMicrotasks();
 
     expect(staleSocket?.close).toHaveBeenCalledTimes(1);
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("3");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("3")));
     expect(harness.states).toEqual(["connecting", "connecting"]);
 
     staleSocket?.open();
@@ -350,16 +351,16 @@ describe("WorkspaceRealtime", () => {
   });
 
   it("makes a superseded ticket request inert across stop and restart", async () => {
-    const first = deferred<{ ticket: string; expiresAt: string }>();
-    const second = deferred<{ ticket: string; expiresAt: string }>();
+    const first = deferred<ReturnType<typeof ticketResponse>>();
+    const second = deferred<ReturnType<typeof ticketResponse>>();
     let request = 0;
     const harness = createHarness({
       ticket: () => (request++ === 0 ? first.promise : second.promise),
     });
 
-    harness.realtime.start("4", SCOPE_A);
+    harness.realtime.start(testPosition("4"), SCOPE_A);
     harness.realtime.stop();
-    harness.realtime.start("7", SCOPE_B);
+    harness.realtime.start(testPosition("7"), SCOPE_B);
     expect(harness.ticket).toHaveBeenCalledTimes(2);
 
     first.resolve(ticketResponse("s".repeat(32)));
@@ -371,17 +372,17 @@ describe("WorkspaceRealtime", () => {
     await flushMicrotasks();
     expect(harness.createSocket).toHaveBeenCalledTimes(1);
     expect(harness.urls[0]?.searchParams.get("ticket")).toBe("u".repeat(32));
-    expect(harness.urls[0]?.searchParams.get("after")).toBe("7");
+    expect(harness.urls[0]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("7")));
 
     harness.realtime.stop();
   });
 
   it("does not report or reconnect a rejected ticket from a stopped generation", async () => {
-    const pending = deferred<{ ticket: string; expiresAt: string }>();
+    const pending = deferred<ReturnType<typeof ticketResponse>>();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness({ ticket: () => pending.promise });
 
-    harness.realtime.start("4", SCOPE_A);
+    harness.realtime.start(testPosition("4"), SCOPE_A);
     harness.realtime.stop();
     pending.reject(new Error("stale ticket failure"));
     await flushMicrotasks();
@@ -395,13 +396,13 @@ describe("WorkspaceRealtime", () => {
     const harness = createHarness();
     const clearTimeout = vi.spyOn(globalThis, "clearTimeout").mockImplementation(() => undefined);
 
-    harness.realtime.start("5", SCOPE_A);
+    harness.realtime.start(testPosition("5"), SCOPE_A);
     await flushMicrotasks();
     harness.sockets[0]?.closed();
     expect(harness.states).toEqual(["connecting", "reconnecting"]);
     expect(vi.getTimerCount()).toBe(1);
 
-    harness.realtime.start("6", SCOPE_B);
+    harness.realtime.start(testPosition("6"), SCOPE_B);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
 
@@ -422,7 +423,7 @@ describe("WorkspaceRealtime", () => {
     });
     target.realtime = harness.realtime;
 
-    harness.realtime.start("5", SCOPE_A);
+    harness.realtime.start(testPosition("5"), SCOPE_A);
     await flushMicrotasks();
     harness.sockets[0]?.closed();
 
@@ -434,17 +435,17 @@ describe("WorkspaceRealtime", () => {
   it("keeps the highest acknowledged cursor when start repeats for the same scope", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("5", SCOPE_A);
+    harness.realtime.start(testPosition("5"), SCOPE_A);
     await flushMicrotasks();
-    harness.realtime.start("9", { ...SCOPE_A });
-    harness.realtime.start("2", { ...SCOPE_A });
+    harness.realtime.start(testPosition("9"), { ...SCOPE_A });
+    harness.realtime.start(testPosition("2"), { ...SCOPE_A });
     expect(harness.ticket).toHaveBeenCalledTimes(1);
 
     harness.sockets[0]?.closed();
     await vi.runOnlyPendingTimersAsync();
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("9");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("9")));
 
     harness.realtime.stop();
   });
@@ -452,7 +453,7 @@ describe("WorkspaceRealtime", () => {
   it("observes windowless events without renderer delivery, buffering, or cursor progress", async () => {
     const harness = createHarness({ onEvent: () => false });
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const windowedSocket = harness.sockets[0];
     windowedSocket?.message(connectedEvent({ workspaceSequence: "8" }));
@@ -463,7 +464,7 @@ describe("WorkspaceRealtime", () => {
     harness.realtime.enterWindowless(SCOPE_A);
     await flushMicrotasks();
     const windowlessSocket = harness.sockets[1];
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("8");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("8")));
 
     windowlessSocket?.message(connectedEvent({ workspaceSequence: "8" }));
     windowlessSocket?.message(messageEvent());
@@ -475,10 +476,10 @@ describe("WorkspaceRealtime", () => {
 
     // Renderer readiness follows HTTP catch-up and opens a new epoch from the durable replica
     // cursor. The windowless message was never claimed as UI progress or buffered for delivery.
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     expect(windowlessSocket?.close).toHaveBeenCalledTimes(1);
-    expect(harness.urls[2]?.searchParams.get("after")).toBe("8");
+    expect(harness.urls[2]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("8")));
     harness.sockets[2]?.message(connectedEvent({ workspaceSequence: "8" }));
     expect(harness.onEvent).toHaveBeenCalledTimes(2);
     expect(harness.onWindowlessEvent).toHaveBeenCalledTimes(2);
@@ -489,15 +490,15 @@ describe("WorkspaceRealtime", () => {
   it("resumes windowless transport from the highest renderer acknowledgement", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("5", SCOPE_A);
+    harness.realtime.start(testPosition("5"), SCOPE_A);
     await flushMicrotasks();
-    harness.realtime.acknowledge("7");
+    harness.realtime.acknowledge(testPosition("7"));
     harness.realtime.stop();
 
     harness.realtime.enterWindowless(SCOPE_A);
     await flushMicrotasks();
 
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("7");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("7")));
     harness.realtime.stop();
   });
 
@@ -509,6 +510,7 @@ describe("WorkspaceRealtime", () => {
       },
     });
 
+    harness.realtime.prepare({ ...SCOPE_A, after: testPosition("8") });
     harness.realtime.enterWindowless(SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
@@ -528,7 +530,7 @@ describe("WorkspaceRealtime", () => {
   it("latches a windowless resync demand until renderer recovery supplies a newer cursor", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(connectedEvent({ workspaceSequence: "8" }));
@@ -549,22 +551,22 @@ describe("WorkspaceRealtime", () => {
     // The recreated renderer receives the retained body-free control, but delivery alone cannot
     // reopen the cursor-expired generation. Its resync flow stops transport, commits a newer
     // snapshot, and starts once from that new durable cursor.
-    expect(harness.realtime.start("8", SCOPE_A)).toBe(true);
+    expect(harness.realtime.start(testPosition("8"), SCOPE_A)).toBe(true);
     expect(harness.onEvent).toHaveBeenLastCalledWith(recovery);
     expect(harness.ticket).toHaveBeenCalledTimes(1);
     harness.realtime.stop();
-    harness.realtime.start("9", SCOPE_A);
+    harness.realtime.start(testPosition("9"), SCOPE_A);
     await flushMicrotasks();
 
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("9");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("9")));
     harness.realtime.resetSession();
   });
 
   it("rejects a replay event from another workspace before delivery", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("12", SCOPE_A);
+    harness.realtime.start(testPosition("12"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(membershipEvent({ workspaceId: WORKSPACE_B }));
@@ -582,7 +584,7 @@ describe("WorkspaceRealtime", () => {
   ])("rejects a system.connected event for the wrong %s", async (_field, frame) => {
     const harness = createHarness();
 
-    harness.realtime.start("12", SCOPE_A);
+    harness.realtime.start(testPosition("12"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(membershipEvent());
@@ -598,7 +600,7 @@ describe("WorkspaceRealtime", () => {
   it("delivers a pre-handshake resync requirement so an expired cursor can recover", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     harness.sockets[0]?.message(resyncRequiredEvent());
 
@@ -613,7 +615,7 @@ describe("WorkspaceRealtime", () => {
   it("binds one system.connected connection ID and rejects a second handshake", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("10", SCOPE_A);
+    harness.realtime.start(testPosition("10"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(connectedEvent());
@@ -633,7 +635,7 @@ describe("WorkspaceRealtime", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness();
 
-    harness.realtime.start("10", SCOPE_A);
+    harness.realtime.start(testPosition("10"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(frame);
@@ -651,7 +653,7 @@ describe("WorkspaceRealtime", () => {
   it("skips a structurally valid unsupported event without killing the stream", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("10", SCOPE_A);
+    harness.realtime.start(testPosition("10"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message({
@@ -661,7 +663,7 @@ describe("WorkspaceRealtime", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_A,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: "1",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -702,7 +704,7 @@ describe("WorkspaceRealtime", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(frame);
@@ -719,7 +721,7 @@ describe("WorkspaceRealtime", () => {
   it("bounds replay count and waits for an authoritative restart instead of reconnecting", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     for (let index = 0; index < WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT; index += 1) {
@@ -732,7 +734,7 @@ describe("WorkspaceRealtime", () => {
     expect(harness.onEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "system.resync_required",
-        workspaceSequence: "8",
+        position: testPosition("8"),
         payload: { reason: "client_replay_overflow" },
       }),
     );
@@ -746,10 +748,10 @@ describe("WorkspaceRealtime", () => {
     expect(harness.ticket).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
 
-    harness.realtime.start("5000", SCOPE_A);
+    harness.realtime.start(testPosition("5000"), SCOPE_A);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("5000");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("5000")));
 
     harness.realtime.stop();
   });
@@ -757,7 +759,7 @@ describe("WorkspaceRealtime", () => {
   it("retains replay-overflow recovery while the renderer is unavailable and redelivers on start", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     harness.realtime.rendererUnavailable();
     const socket = harness.sockets[0];
@@ -770,12 +772,12 @@ describe("WorkspaceRealtime", () => {
     expect(harness.ticket).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
 
-    expect(harness.realtime.start("8", SCOPE_A)).toBe(true);
+    expect(harness.realtime.start(testPosition("8"), SCOPE_A)).toBe(true);
     expect(harness.onEvent).toHaveBeenCalledTimes(1);
     expect(harness.onEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "system.resync_required",
-        workspaceSequence: "8",
+        position: testPosition("8"),
         payload: { reason: "client_replay_overflow" },
       }),
     );
@@ -783,10 +785,10 @@ describe("WorkspaceRealtime", () => {
     // performs authoritative HTTP recovery, and then explicitly starts from its repaired cursor.
     expect(harness.ticket).toHaveBeenCalledTimes(1);
     harness.realtime.stop();
-    harness.realtime.start("5000", SCOPE_A);
+    harness.realtime.start(testPosition("5000"), SCOPE_A);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("5000");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("5000")));
 
     harness.realtime.stop();
   });
@@ -802,7 +804,7 @@ describe("WorkspaceRealtime", () => {
       WORKSPACE_REALTIME_PENDING_REPLAY_BYTE_LIMIT / Buffer.byteLength(JSON.stringify(frame)),
     );
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     for (let index = 0; index <= acceptedFrames; index += 1) socket?.message(frame);
@@ -813,12 +815,12 @@ describe("WorkspaceRealtime", () => {
       type: "system.resync_required",
       payload: { reason: "client_replay_overflow" },
     });
-    expect(harness.realtime.start("8", SCOPE_A)).toBe(false);
+    expect(harness.realtime.start(testPosition("8"), SCOPE_A)).toBe(false);
     expect(harness.onEvent).toHaveBeenCalledTimes(2);
     expect(harness.onEvent.mock.calls[1]?.[0]).toBe(firstRecovery);
 
     rendererAcceptsDelivery = true;
-    expect(harness.realtime.start("8", SCOPE_A)).toBe(true);
+    expect(harness.realtime.start(testPosition("8"), SCOPE_A)).toBe(true);
     expect(harness.onEvent).toHaveBeenCalledTimes(3);
     expect(harness.onEvent.mock.calls[2]?.[0]).toBe(firstRecovery);
     expect(JSON.stringify(harness.onEvent.mock.calls)).not.toContain(
@@ -830,14 +832,14 @@ describe("WorkspaceRealtime", () => {
     // A renderer-owned stop during recovery is not sign-out. The same/older durable cursor must
     // still receive the retained control and may not reopen the overflowing socket generation.
     harness.realtime.stop();
-    expect(harness.realtime.start("8", SCOPE_A)).toBe(true);
+    expect(harness.realtime.start(testPosition("8"), SCOPE_A)).toBe(true);
     expect(harness.onEvent).toHaveBeenCalledTimes(4);
     expect(harness.ticket).toHaveBeenCalledTimes(1);
 
-    harness.realtime.start("9", SCOPE_A);
+    harness.realtime.start(testPosition("9"), SCOPE_A);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("9");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("9")));
 
     harness.realtime.resetSession();
   });
@@ -845,17 +847,17 @@ describe("WorkspaceRealtime", () => {
   it("purges a retained recovery latch on scope replacement and definitive session reset", async () => {
     const harness = createHarness({ onEvent: () => false });
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     for (let index = 0; index <= WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT; index += 1) {
       harness.sockets[0]?.message(membershipEvent());
     }
     expect(harness.onEvent).toHaveBeenCalledTimes(1);
 
-    harness.realtime.start("3", SCOPE_B);
+    harness.realtime.start(testPosition("3"), SCOPE_B);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("3");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("3")));
     expect(harness.onEvent).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index <= WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT; index += 1) {
@@ -864,10 +866,10 @@ describe("WorkspaceRealtime", () => {
     expect(harness.onEvent).toHaveBeenCalledTimes(2);
 
     harness.realtime.resetSession();
-    harness.realtime.start("3", SCOPE_B);
+    harness.realtime.start(testPosition("3"), SCOPE_B);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(3);
-    expect(harness.urls[2]?.searchParams.get("after")).toBe("3");
+    expect(harness.urls[2]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("3")));
     expect(harness.onEvent).toHaveBeenCalledTimes(2);
 
     harness.realtime.stop();
@@ -883,7 +885,7 @@ describe("WorkspaceRealtime", () => {
     expect(frameBytes).toBeLessThan(WORKSPACE_REALTIME_MAX_PAYLOAD_BYTES);
     expect(acceptedFrames).toBeLessThan(WORKSPACE_REALTIME_PENDING_REPLAY_EVENT_LIMIT);
 
-    harness.realtime.start("8", SCOPE_A);
+    harness.realtime.start(testPosition("8"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     for (let index = 0; index < acceptedFrames; index += 1) socket?.message(frame);
@@ -911,16 +913,16 @@ describe("WorkspaceRealtime", () => {
   it("reconnects from the last acknowledged cursor after rejecting a frame", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("10", SCOPE_A);
+    harness.realtime.start(testPosition("10"), SCOPE_A);
     await flushMicrotasks();
     harness.sockets[0]?.message(membershipEvent({ workspaceSequence: "11" }));
-    harness.realtime.acknowledge("12");
-    harness.realtime.acknowledge("7");
+    harness.realtime.acknowledge(testPosition("12"));
+    harness.realtime.acknowledge(testPosition("7"));
     harness.sockets[0]?.message("invalid");
 
     await vi.runOnlyPendingTimersAsync();
     await flushMicrotasks();
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("12");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("12")));
 
     harness.realtime.stop();
   });
@@ -931,7 +933,7 @@ describe("WorkspaceRealtime", () => {
       onEvent: (event) => event.type !== "channel.membership_changed" || acceptMembership,
     });
 
-    harness.realtime.start("20", SCOPE_A);
+    harness.realtime.start(testPosition("20"), SCOPE_A);
     await flushMicrotasks();
     const firstSocket = harness.sockets[0];
     firstSocket?.message(connectedEvent({ workspaceSequence: "20" }));
@@ -943,14 +945,14 @@ describe("WorkspaceRealtime", () => {
     expect(harness.ticket).toHaveBeenCalledTimes(1);
 
     acceptMembership = true;
-    harness.realtime.start("20", SCOPE_A);
+    harness.realtime.start(testPosition("20"), SCOPE_A);
     await flushMicrotasks();
     expect(harness.ticket).toHaveBeenCalledTimes(2);
-    expect(harness.urls[1]?.searchParams.get("after")).toBe("20");
+    expect(harness.urls[1]?.searchParams.get("after")).toBe(JSON.stringify(testPosition("20")));
     harness.sockets[1]?.message(membershipEvent({ workspaceSequence: "21" }));
     harness.sockets[1]?.message(connectedEvent({ workspaceSequence: "21" }));
     expect(harness.onEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "channel.membership_changed", workspaceSequence: "21" }),
+      expect.objectContaining({ type: "channel.membership_changed", position: testPosition("21") }),
     );
     expect(harness.states).toEqual(["connecting", "live", "offline", "connecting", "live"]);
 
@@ -963,7 +965,7 @@ describe("WorkspaceRealtime", () => {
     });
     const harness = createHarness({ onEvent });
 
-    harness.realtime.start("20", SCOPE_A);
+    harness.realtime.start(testPosition("20"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.message(membershipEvent());
@@ -978,7 +980,7 @@ describe("WorkspaceRealtime", () => {
   it("retires a failed socket instead of waiting for a close callback", async () => {
     const harness = createHarness();
 
-    harness.realtime.start("20", SCOPE_A);
+    harness.realtime.start(testPosition("20"), SCOPE_A);
     await flushMicrotasks();
     const socket = harness.sockets[0];
     socket?.fail();
@@ -1000,7 +1002,7 @@ describe("WorkspaceRealtime", () => {
       ticket: vi.fn().mockRejectedValue(new Error("Server unavailable")),
     });
 
-    harness.realtime.start("0", SCOPE_A);
+    harness.realtime.start(testPosition("0"), SCOPE_A);
     await flushMicrotasks();
 
     expect(harness.states).toEqual(["connecting", "reconnecting"]);
@@ -1016,15 +1018,36 @@ describe("WorkspaceRealtime", () => {
 it("rejects activation and acknowledgement from a previous realtime instance of the same account", async () => {
   const nextSessionEpoch = createRealtimeEpochAllocator();
   const first = createHarness({ nextSessionEpoch });
-  const oldScope = first.realtime.prepare({ ...SCOPE_A, after: "5" });
+  const oldScope = first.realtime.prepare({ ...SCOPE_A, after: testPosition("5") });
   first.realtime.resetSession();
   const second = createHarness({ nextSessionEpoch });
-  const newScope = second.realtime.prepare({ ...SCOPE_A, after: "10" });
+  const newScope = second.realtime.prepare({ ...SCOPE_A, after: testPosition("10") });
   expect(newScope.epoch).toBeGreaterThan(oldScope.epoch);
   expect(second.realtime.activate(oldScope)).toBe(false);
-  second.realtime.acknowledge({ scope: oldScope, cursor: "999" });
+  second.realtime.acknowledge({ scope: oldScope, cursor: testPosition("999") });
   expect(second.drops).toContain("stale-control");
   second.realtime.stop(oldScope);
   expect(second.realtime.activeScope).toEqual(newScope);
   second.realtime.resetSession();
+});
+
+it("ignores a wrong-epoch acknowledgement and reconnects from the committed position", async () => {
+  const harness = createHarness();
+  harness.realtime.start(testPosition("8"), SCOPE_A);
+  await flushMicrotasks();
+  harness.realtime.acknowledge(testPosition("999", "eeeeeeee-0000-4000-8000-000000000002"));
+  expect(harness.drops).toContain("stale-control");
+  harness.realtime.start(testPosition("8"), SCOPE_A);
+  await flushMicrotasks();
+  const url = new URL(harness.urls.at(-1)!);
+  expect(JSON.parse(url.searchParams.get("after")!)).toEqual(testPosition("8"));
+  harness.realtime.stop();
+});
+
+it("waits for a real bootstrap position when the first window closes before preparation", () => {
+  const harness = createHarness();
+  expect(() => harness.realtime.enterWindowless(SCOPE_A)).not.toThrow();
+  expect(harness.sockets).toEqual([]);
+  expect(harness.ticket).not.toHaveBeenCalled();
+  harness.realtime.stop();
 });
