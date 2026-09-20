@@ -43,11 +43,15 @@ describe("scoped workspace networking", () => {
         start(controller) {
           body = controller;
         },
-        pull() {
-          reading.resolve();
-        },
       }),
+      { headers: { "content-type": "application/json" } },
     );
+    const originalReader = response.body!.getReader.bind(response.body!);
+    vi.spyOn(response.body!, "getReader").mockImplementation(() => {
+      const reader = originalReader();
+      reading.resolve();
+      return reader;
+    });
     const scoped = scopedWorkspaceSession(
       { fetch: async () => response, markSignedOut: async () => undefined },
       session,

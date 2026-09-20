@@ -193,6 +193,12 @@ conversations.
 
 ## HTTP and realtime interface
 
+`packages/api-client` owns first-party HTTP requests, endpoint definitions, bounded attachment
+transfer and the realtime client. Desktop main supplies session credentials, filesystem access,
+notification observation and IPC delivery. CLI supplies profile credentials, output and exit-code
+mapping. The shared client has injected fetch and socket dependencies; renderer code remains
+unprivileged. See [the client package](../packages/api-client/README.md).
+
 First-party product endpoints are under `/v2`; externally configured callback and inbound webhook
 URLs remain stable. Requests accept and return JSON unless transferring directly
 to S3, and are validated by shared strict schemas. Success responses contain canonical
@@ -300,14 +306,18 @@ domain events are:
 - `attachment.ready` or `attachment.failed` (only the uploader and conversation audience
   once attached).
 
-Before `system.connected` proves the ticket's exact user scope, desktop main buffers at most 1,024
+Before `system.connected` proves the ticket's exact user scope, the shared client buffers at most 1,024
 validated replay events and 4 MiB of serialized frames; each WebSocket frame is also capped at
 4 MiB. Overflow drops the message-bearing buffer, stops that connection generation without a
 same-cursor reconnect, and retains only a body-free, scope-bound resync control until renderer HTTP
 recovery supplies a newer durable cursor. A renderer navigation or crash similarly pauses event
 delivery at the last acknowledged cursor. Shared event schemas also verify canonical cross-field
 relations—such as message conversation/sequence/version and task workspace/conversation/version—
-for both WebSocket and HTTP sync before either path can reach the encrypted replica.
+for both WebSocket and HTTP sync before either path can reach the encrypted replica. Live durable
+events awaiting acknowledgement have the same event/byte limits. Desktop acknowledges only after
+cache commit; CLI acknowledges only after its output writable completes. A parsed frame alone
+never advances replay. Unknown product events make this canonical protocol incompatible rather
+than being skipped before a later acknowledgement.
 
 Workspace protocol 2 uses one current entity/event shape on `/v2`. Clients no longer send
 `X-Hype-Comms-Capabilities`, and tickets contain identity and expiry rather than feature booleans.
