@@ -81,10 +81,18 @@ import {
   type WorkspaceCache,
 } from "./workspace-cache";
 
+import {
+  WorkspaceRecovery,
+  workspaceNeedsRecovery,
+  collectionNeedsRecovery,
+  type RecoveryEntry,
+} from "./workspace-recovery";
+
 /** Why the encrypted cache fell back to memory. Derived so a new crypto reason cannot drift. */
 export type CacheFallbackReason = Extract<CacheCryptoStatus, { mode: "memory_only" }>["reason"];
 
 export interface WorkspaceRuntimeState {
+  readonly recovery: readonly RecoveryEntry[];
   readonly collections: readonly CollectionState[];
   readonly bootstrap: WorkspaceSnapshot | null;
   readonly messages: readonly Message[];
@@ -159,6 +167,9 @@ const NOTIFICATION_TARGET_UNAVAILABLE = "That notification is no longer availabl
 const SOURCE_LESS_RETRACT_METADATA_ERROR =
   "Could not refresh unread counts after a message was deleted.";
 
+/** Shown whenever a metadata refresh leaves the cached catalog in place. */
+const CATALOG_REFRESH_FAILED = "Could not refresh the workspace catalog";
+
 /** Mirrors the encrypted replica's `workspaceSnapshotSchema` conversation bound. */
 const WORKSPACE_CONVERSATION_LIMIT = 5_000;
 
@@ -173,6 +184,7 @@ const MAX_LOCAL_RETRACT_EFFECTS = 20_000;
 export const WORKSPACE_TASK_COLLECTION_LIMIT = 20_000;
 
 const INITIAL_STATE: WorkspaceRuntimeState = {
+  recovery: [],
   collections: [],
   bootstrap: null,
   messages: [],
@@ -384,10 +396,13 @@ export class WorkspaceRuntime {
   readonly #client: DesktopApi;
   readonly #createCache: (status: CacheCryptoStatus) => WorkspaceCache;
   #state = INITIAL_STATE;
+  readonly #recovery = new WorkspaceRecovery(() => this.#setState({}));
   #cache: WorkspaceCache | null = null;
   #generation = 0;
   #offlineOnly = false;
-  #protocolBlocked = false;
+  get #protocolBlocked(): boolean {
+    return this.#recovery.has("protocol");
+  }
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
   #outboxFlushOwner: ProjectionGuard | null = null;
   #outboxFlushRequested = false;
@@ -395,18 +410,34 @@ export class WorkspaceRuntime {
   #syncRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #sourceLessRetractMetadataRetryTimer: ReturnType<typeof setTimeout> | null = null;
   #sourceLessRetractMetadataAttempt = 0;
-  #sourceLessRetractMetadataVersion = 0;
-  #sourceLessRetractMetadataPending = false;
+  get #sourceLessRetractMetadataPending(): boolean {
+    return this.#recovery.has("retract_metadata");
+  }
   #resyncTimer: ReturnType<typeof setTimeout> | null = null;
   #syncAttempt = 0;
-  /** True until the current sync pass has fully repaired and reloaded the local projection. */
-  #syncRecoveryPending = false;
+  /** The current sync pass has not repaired and reloaded the local projection yet. */
+  get #syncRecoveryPending(): boolean {
+    return this.#recovery.has("sync");
+  }
   /** A cached replica is still completing its pre-snapshot HTTP catch-up. */
-  #startupReplicaCatchUpPending = false;
+  get #startupReplicaCatchUpPending(): boolean {
+    return this.#recovery.startupPhase === "replica_catch_up";
+  }
   /** A startup whose durable HTTP catch-up has not yet opened renderer realtime delivery. */
-  #startupRealtimePending = false;
-  #startupMetadataPending = false;
-  #catalogPending = false;
+  get #startupRealtimePending(): boolean {
+    return this.#recovery.startupPhase === "realtime";
+  }
+  get #startupMetadataPending(): boolean {
+    return this.#recovery.has("startup");
+  }
+  /**
+   * A catalog refresh still in flight. A blocked catalog is known-stale rather than moving, so it
+   * keeps the health banner and its retry without holding sends back: such a send targets a
+   * conversation the last good catalog still names, and the server authorizes it either way.
+   */
+  get #catalogPending(): boolean {
+    return this.#recovery.isPending("catalog");
+  }
   #catalogConfirmedIds: Set<string> | null = null;
   #catalogRequest = 0;
   #cacheProjectionQueue: Promise<void> = Promise.resolve();
@@ -419,7 +450,9 @@ export class WorkspaceRuntime {
   /** Transient failures of the resync now in flight, so its backoff grows the usual way. */
   #resyncFailures = 0;
   /** True from a resync demand until its snapshot, sync pass, and realtime restart all succeed. */
-  #resyncRecoveryPending = false;
+  get #resyncRecoveryPending(): boolean {
+    return this.#recovery.has("resync");
+  }
   /** Monotonic demand id, so an older retry cannot settle a newer resync recovery. */
   #resyncRequest = 0;
   /** When the resync now in place restarted realtime; how a chain is told from a fresh demand. */
@@ -433,7 +466,9 @@ export class WorkspaceRuntime {
    * Cleared only on success, so a failed re-read is retried by the next sync pass instead of
    * silently leaving a disabled member in the directory until the app restarts.
    */
-  #membersDirty = false;
+  get #membersDirty(): boolean {
+    return this.#recovery.has("members");
+  }
   /** Monotonic refetch id, so a slow response cannot overwrite a newer directory. */
   #membersRequest = 0;
   /** Serializes durable replacements in the active cache generation without delaying reads. */
@@ -446,7 +481,9 @@ export class WorkspaceRuntime {
   #eventQueue: Promise<void> = Promise.resolve();
   #recoveryQueue: Promise<void> = Promise.resolve();
   /** Blocks delivery and cursor work from the instant a membership invalidation is observed. */
-  #membershipRepairPending = false;
+  get #membershipRepairPending(): boolean {
+    return this.#recovery.has("membership");
+  }
   /** Invalidates snapshot requests that began before the latest membership barrier. */
   #membershipEpoch = 0;
   /** Membership frames accepted by this renderer session but not yet durably repaired and acked. */
@@ -497,8 +534,13 @@ export class WorkspaceRuntime {
     return () => this.#listeners.delete(listener);
   }
 
-  #setState(update: Partial<WorkspaceRuntimeState>): void {
-    this.#state = { ...this.#state, ...update };
+  #setState(update: Partial<Omit<WorkspaceRuntimeState, "stale" | "recovery">>): void {
+    const state = { ...this.#state, ...update };
+    this.#state = {
+      ...state,
+      recovery: this.#recovery.snapshot,
+      stale: state.bootstrap === null || workspaceNeedsRecovery(this.#recovery.snapshot),
+    };
     for (const listener of this.#listeners) listener(this.#state);
   }
 
@@ -557,16 +599,23 @@ export class WorkspaceRuntime {
       this.#scope.userId !== scope.userId ||
       this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
+    // Recovery changes notify synchronously. Retire private view data before the first notification.
+    if (scopeChanged) {
+      this.#state = { ...INITIAL_STATE, busy: true };
+      this.#cache = null;
+      this.#syncCursor = null;
+    }
+    this.#scope = scope;
     this.#rotateProjectionBarrier();
     this.#cacheProjectionQueue = Promise.resolve();
     this.#historyHydrations.clear();
     this.#collectionLoads.clear();
     this.#offlineOnly = options.offline === true;
-    this.#startupMetadataPending = !this.#offlineOnly;
-    this.#catalogPending = false;
+    this.#recovery.reset();
+    const startupRecovery = this.#recovery.begin("startup");
+    if (this.#offlineOnly) this.#recovery.block(startupRecovery, "The workspace is offline");
     this.#catalogConfirmedIds = null;
     this.#catalogRequest += 1;
-    this.#protocolBlocked = false;
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -576,24 +625,16 @@ export class WorkspaceRuntime {
     this.#membersAttempt = 0;
     this.#resetResyncState();
     this.#syncAttempt = 0;
-    this.#syncRecoveryPending = false;
-    this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
-    this.#startupReplicaCatchUpPending = false;
-    this.#startupRealtimePending = false;
     this.#clearActivity(true);
     // A fresh bootstrap answers any invalidation the previous session left unanswered.
-    this.#membersDirty = false;
     this.#clearReadTargets();
     this.#locallyProjectedRetracts.clear();
     // ChatSession may transition directly from one signed-in identity to another. Retire every
     // visible and writable reference to the old scope before the first async cache/bootstrap step;
     // otherwise old messages could remain rendered under the replacement session boundary.
-    this.#scope = scope;
     if (scopeChanged) {
-      this.#cache = null;
-      this.#syncCursor = null;
       this.#historyCursors.clear();
       this.#threadSummaryPositions.clear();
       this.#collectionLoads.clear();
@@ -634,7 +675,7 @@ export class WorkspaceRuntime {
         // Acceptance happens before queueing. A repair ahead of this one may retire the socket,
         // but it must not retire this obligation or acknowledge a cursor that crosses it.
         this.#acceptedMembershipRepairs.set(event.id, event.position);
-        this.#membershipRepairPending = true;
+        this.#recovery.begin("membership");
         this.#membershipEpoch += 1;
         this.#clearRetryTimer();
         this.#clearReadTargets();
@@ -645,8 +686,7 @@ export class WorkspaceRuntime {
         this.#cancelCollectionLoads("The workspace requires a new snapshot");
         // Publish the demand as soon as it arrives. A timer-based attempt can currently be awaiting
         // network I/O on the recovery queue and must observe that a newer recovery owns staleness.
-        this.#resyncRecoveryPending = true;
-        this.#setState({ stale: true });
+        this.#recovery.begin("resync");
       }
       this.#eventQueue = this.#eventQueue
         .then(() =>
@@ -654,8 +694,11 @@ export class WorkspaceRuntime {
         )
         .catch((error: unknown) => {
           if (generation === this.#generation) {
+            this.#recovery.block(
+              this.#recovery.begin("replica"),
+              errorMessage(error, "Could not apply a realtime update"),
+            );
             this.#setState({
-              stale: true,
               error: errorMessage(error, "Could not apply a realtime update"),
             });
           }
@@ -717,8 +760,8 @@ export class WorkspaceRuntime {
           return;
       }
       this.#hydrateRetractReservations(cached.retractReservations, cached.messages);
-      this.#membershipRepairPending =
-        cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
+      if (cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0)
+        this.#recovery.ensure("membership");
       this.#syncCursor = cached.syncCursor;
       this.#pruneCreatedMessageMentions(
         cached.messages,
@@ -737,7 +780,6 @@ export class WorkspaceRuntime {
           (cached.bootstrap === null ? null : firstConversation(cached.bootstrap)),
         cacheMode: cryptoStatus.mode,
         cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
-        stale: true,
         ...(this.#offlineOnly
           ? {
               busy: false,
@@ -771,11 +813,11 @@ export class WorkspaceRuntime {
         // observed events for notifications while no renderer existed, but that observation never
         // became UI progress. Only this HTTP pass may bridge that interval before the normal
         // authoritative snapshot and its final catch-up open a fresh realtime epoch.
-        this.#startupReplicaCatchUpPending = true;
+        this.#recovery.advanceStartup(startupRecovery, "replica_catch_up");
         await this.#repairAndFlush(generation, false);
         if (generation !== this.#generation || this.#cache === null) return;
         if (this.#syncRecoveryPending) {
-          this.#setState({ busy: false, stale: true });
+          this.#setState({ busy: false });
           return;
         }
         await this.#completeStartupAfterReplicaCatchUp(generation);
@@ -786,11 +828,13 @@ export class WorkspaceRuntime {
       await this.#completeStartupAfterSnapshot(generation);
     } catch (error) {
       if (generation !== this.#generation) return;
-      this.#startupReplicaCatchUpPending = false;
-      this.#startupRealtimePending = false;
+      this.#recovery.block(
+        startupRecovery,
+        errorMessage(error, "Could not initialize the workspace"),
+      );
       this.#setState({
         busy: false,
-        stale: true,
+
         error: errorMessage(error, "Could not initialize the workspace"),
       });
     }
@@ -798,6 +842,7 @@ export class WorkspaceRuntime {
 
   async stop(): Promise<void> {
     ++this.#generation;
+    this.#recovery.reset();
     this.#rotateProjectionBarrier();
     this.#cacheProjectionQueue = Promise.resolve();
     this.#historyHydrations.clear();
@@ -811,12 +856,8 @@ export class WorkspaceRuntime {
     this.#clearMembersRetryTimer();
     this.#membersAttempt = 0;
     this.#resetResyncState();
-    this.#syncRecoveryPending = false;
-    this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
-    this.#startupReplicaCatchUpPending = false;
-    this.#startupRealtimePending = false;
     this.#unsubscribeEvent?.();
     this.#unsubscribeConnection?.();
     this.#unsubscribeActivity?.();
@@ -835,7 +876,6 @@ export class WorkspaceRuntime {
     this.#createdMessageMentions.clear();
     this.#locallyProjectedRetracts.clear();
     this.#invalidatedThreadSummaryConversationIds.clear();
-    this.#membersDirty = false;
     this.#historyCursors.clear();
     this.#threadSummaryPositions.clear();
     this.#collectionLoads.clear();
@@ -1359,6 +1399,15 @@ export class WorkspaceRuntime {
     );
   }
 
+  collectionStale(identity: CollectionIdentity): boolean {
+    const state = this.collectionState(identity);
+    return (
+      !state.loaded ||
+      state.invalidatedAt !== null ||
+      collectionNeedsRecovery(this.#state.recovery, identity)
+    );
+  }
+
   #rotateProjectionBarrier(): void {
     this.#cancelCollectionLoads("The workspace projection was replaced");
     this.#projectionAbortController.abort();
@@ -1489,9 +1538,23 @@ export class WorkspaceRuntime {
         }
       }
     };
-    const pending = load().finally(() => {
-      if (this.#collectionLoads.get(key) === pending) this.#collectionLoads.delete(key);
-    });
+    const collectionRecovery = this.#recovery.beginCollection(identity);
+    const pending = load()
+      .then(
+        () => {
+          this.#recovery.complete(collectionRecovery);
+        },
+        (error: unknown) => {
+          this.#recovery.block(
+            collectionRecovery,
+            errorMessage(error, "Could not load this collection"),
+          );
+          throw error;
+        },
+      )
+      .finally(() => {
+        if (this.#collectionLoads.get(key) === pending) this.#collectionLoads.delete(key);
+      });
     this.#collectionLoads.set(key, pending);
     return pending;
   }
@@ -2256,6 +2319,7 @@ export class WorkspaceRuntime {
           "The channel was created, but its local cache needs repair. Reconnect to refresh it.";
       }
       if (generation !== this.#generation || cache !== this.#cache) return;
+      if (repairError !== null) this.#recovery.block(this.#recovery.begin("replica"), repairError);
       this.#historyCursors.set(conversationId, null);
       this.#setState({
         bootstrap: projected,
@@ -2265,7 +2329,7 @@ export class WorkspaceRuntime {
         focusedThreadMessageId: null,
         threadLoading: false,
         threadError: null,
-        ...(repairError === null ? {} : { stale: true, error: repairError }),
+        ...(repairError === null ? {} : { error: repairError }),
       });
     });
     this.#eventQueue = projection;
@@ -2326,6 +2390,7 @@ export class WorkspaceRuntime {
           "The conversation was opened, but its local cache needs repair. Reconnect to refresh it.";
       }
       if (generation !== this.#generation || cache !== this.#cache) return;
+      if (repairError !== null) this.#recovery.block(this.#recovery.begin("replica"), repairError);
       this.#setState({
         bootstrap: projected,
         selectedConversationId: conversationId,
@@ -2334,7 +2399,7 @@ export class WorkspaceRuntime {
         focusedThreadMessageId: null,
         threadLoading: false,
         threadError: null,
-        ...(repairError === null ? {} : { stale: true, error: repairError }),
+        ...(repairError === null ? {} : { error: repairError }),
       });
     });
     this.#eventQueue = projection;
@@ -2490,12 +2555,10 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    const generation = this.#generation;
     const hydration = this.loadOlder(conversationId)
-      .catch((error: unknown) => {
-        if (generation === this.#generation)
-          this.#setState({ error: errorMessage(error, "Could not load this conversation") });
-      })
+      // The collection lease owns failure reporting and retry. A global error here would follow
+      // navigation to healthy conversations and outlive a successful retry of this timeline.
+      .catch(() => undefined)
       .finally(() => {
         if (this.#historyHydrations.get(conversationId) === hydration)
           this.#historyHydrations.delete(conversationId);
@@ -2505,6 +2568,7 @@ export class WorkspaceRuntime {
 
   async resetLocalCache(): Promise<void> {
     ++this.#generation;
+    this.#recovery.reset();
     this.#retireMembersReplacementQueue();
     this.#recoveryQueue = Promise.resolve();
     this.#clearRetryTimer();
@@ -2513,8 +2577,6 @@ export class WorkspaceRuntime {
     this.#clearMembersRetryTimer();
     this.#membersAttempt = 0;
     this.#resetResyncState();
-    this.#syncRecoveryPending = false;
-    this.#membershipRepairPending = false;
     this.#acceptedMembershipRepairs.clear();
     this.#realtimeEpoch += 1;
     this.#clearReadTargets();
@@ -2655,7 +2717,8 @@ export class WorkspaceRuntime {
     if (cache === null || generation !== this.#generation) return false;
     this.#retireMembersReplacementQueue();
     this.#membersRequest += 1;
-    this.#membersDirty = false;
+    const membersRecovery = this.#recovery.current("members");
+    const membershipRecovery = this.#recovery.current("membership");
     this.#clearMembersRetryTimer();
     this.#membershipEpoch += 1;
     this.#realtimeEpoch += 1;
@@ -2667,7 +2730,8 @@ export class WorkspaceRuntime {
     await cache.resetProtocolReplica();
     if (cache !== this.#cache || generation !== this.#generation) return false;
     this.#acceptedMembershipRepairs.clear();
-    this.#membershipRepairPending = false;
+    this.#recovery.complete(membershipRecovery);
+    this.#recovery.complete(membersRecovery);
     this.#syncCursor = null;
     this.#retractReservations = [];
     this.#retractedMessageIds.clear();
@@ -2688,7 +2752,6 @@ export class WorkspaceRuntime {
       tasks: [],
       threadSummaries: [],
       conversationFiles: [],
-      stale: true,
     });
     return true;
   }
@@ -2716,9 +2779,20 @@ export class WorkspaceRuntime {
     };
     const selectedConversationId =
       this.#state.selectedConversationId ?? firstConversation(bootstrap);
-    this.#setState({ bootstrap, selectedConversationId, busy: false, stale: true });
+    this.#setState({ bootstrap, selectedConversationId, busy: false });
     if (loadSelected && selectedConversationId !== null)
       this.#ensureConversationHistory(selectedConversationId);
+  }
+
+  /**
+   * Drops a half-filled page set once the refresh that opened it can no longer complete it, so
+   * `#ensureConversationHistory` and the outbox fall back to the last good catalog rather than to
+   * whichever pages happened to arrive. The lease stays blocked, keeping the banner and its retry.
+   */
+  #releasePartialCatalog(partial: Set<string> | null): void {
+    if (partial === null || this.#catalogConfirmedIds !== partial) return;
+    if (this.#state.bootstrap === null) return;
+    this.#catalogConfirmedIds = null;
   }
 
   async #refreshSnapshot(
@@ -2732,9 +2806,11 @@ export class WorkspaceRuntime {
     const membershipEpoch = this.#membershipEpoch;
     const signal = this.#projectionAbortController.signal;
     const request = ++this.#catalogRequest;
+    const membersRecovery = this.#recovery.current("members");
+    const replicaRecovery = this.#recovery.current("replica");
     const confirmed = new Set<string>();
     this.#catalogConfirmedIds = confirmed;
-    this.#catalogPending = true;
+    const catalogRecovery = this.#recovery.begin("catalog");
     this.#cancelCollectionLoads("Workspace metadata is being refreshed");
     this.#historyCursors.clear();
     this.#threadCursors.clear();
@@ -2771,22 +2847,28 @@ export class WorkspaceRuntime {
       if (!(await cache.stageMetadataPage(page, signal)) || !isCurrent()) return;
       this.#publishMetadataPage(page, confirmed, this.#startupMetadataPending);
     };
+    const abandon = (): boolean => {
+      this.#releasePartialCatalog(confirmed);
+      this.#recovery.complete(catalogRecovery);
+      return false;
+    };
     try {
       const snapshot = prefetched ?? (await this.#fetchSnapshot(publishPage));
-      if (!isCurrent()) return false;
+      if (!isCurrent()) return abandon();
       validate(snapshot);
       const previousEpoch = this.#syncCursor?.epoch ?? this.#state.bootstrap?.syncCursor.epoch;
       if (previousEpoch !== undefined && previousEpoch !== snapshot.syncCursor.epoch) {
-        if (!(await this.#resetProtocolReplica(generation))) return false;
+        if (!(await this.#resetProtocolReplica(generation))) return abandon();
+        // The replay below opens its own catalog lease and page set, retiring both of these.
         return this.#refreshSnapshot(generation, undefined, snapshot);
       }
       if (prefetched !== undefined) await publishPage(snapshot);
-      if (!isCurrent()) return false;
+      if (!isCurrent()) return abandon();
       return await this.#commitCacheProjection(async () => {
-        if (!isCurrent()) return false;
+        if (!isCurrent()) return abandon();
         const installed = await cache.installMetadataSnapshot(snapshot, signal);
-        if (!isCurrent()) return false;
-        if (!(await this.#reloadCache(generation, cache, true)) || !isCurrent()) return false;
+        if (!isCurrent()) return abandon();
+        if (!(await this.#reloadCache(generation, cache, true)) || !isCurrent()) return abandon();
         const visible = new Set(
           this.#state.bootstrap?.conversations.map((summary) => summary.conversation.id),
         );
@@ -2799,7 +2881,6 @@ export class WorkspaceRuntime {
               : firstConversation(this.#state.bootstrap);
         const selectedThreadRootId =
           selectedConversationId === oldSelection ? this.#state.selectedThreadRootId : null;
-        this.#catalogPending = false;
         this.#catalogConfirmedIds = null;
         this.#setState({
           selectedConversationId,
@@ -2817,12 +2898,13 @@ export class WorkspaceRuntime {
           threadSummaries: this.#state.threadSummaries.filter((summary) =>
             visible.has(summary.latestReply.conversationId),
           ),
-          stale:
-            this.#startupMetadataPending ||
-            this.#syncRecoveryPending ||
-            this.#resyncRecoveryPending,
           ...(installed ? { error: null } : {}),
         });
+        this.#recovery.complete(catalogRecovery);
+        if (installed) {
+          this.#recovery.complete(membersRecovery);
+          this.#recovery.complete(replicaRecovery);
+        }
         if (selectedConversationId !== null)
           this.#ensureConversationHistory(selectedConversationId);
         if (selectedThreadRootId !== null)
@@ -2830,10 +2912,15 @@ export class WorkspaceRuntime {
         return true;
       });
     } catch (error) {
+      this.#releasePartialCatalog(confirmed);
       if (isCurrent()) {
+        this.#recovery.block(
+          catalogRecovery,
+          errorMessage(error, "Could not refresh the workspace"),
+        );
         this.#setState({
           busy: false,
-          stale: true,
+
           error: errorMessage(error, "Could not refresh the workspace catalog"),
         });
         if (this.#membershipRepairPending) throw error;
@@ -2855,6 +2942,7 @@ export class WorkspaceRuntime {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
     const request = ++this.#membersRequest;
+    const membersRecovery = this.#recovery.ensure("members");
     try {
       const response = await this.#client.listWorkspaceMembers();
       if (generation !== this.#generation || cache !== this.#cache) return;
@@ -2866,25 +2954,15 @@ export class WorkspaceRuntime {
         response.members,
       );
       if (!replaced) return;
-      this.#membersDirty = false;
-      // A read that recovers from an earlier failure clears the staleness that failure published.
-      // `#repairAndFlush` does this for the sync path; the retry timer has no such drain.
-      const recovered = this.#membersAttempt > 0;
-      const clearsStale =
-        recovered &&
-        !this.#syncRecoveryPending &&
-        !this.#resyncRecoveryPending &&
-        this.#state.error === null;
+      this.#recovery.complete(membersRecovery);
       this.#membersAttempt = 0;
       this.#clearMembersRetryTimer();
       const snapshot = this.#state.bootstrap;
       if (snapshot === null) {
-        if (clearsStale) this.#setState({ stale: false });
         return;
       }
       this.#setState({
         bootstrap: { ...snapshot, members: [...response.members].sort(compareMembers) },
-        ...(clearsStale ? { stale: false } : {}),
       });
     } catch {
       if (
@@ -2899,7 +2977,7 @@ export class WorkspaceRuntime {
       // schedules one -- its retry timer is armed only when `/v2/sync` itself returns retryable.
       // Without this timer a single failed read would leave a disabled member resolvable until
       // the app restarts, which is exactly what this refetch exists to prevent.
-      this.#setState({ stale: true });
+      this.#recovery.block(membersRecovery, "Could not refresh workspace members");
       this.#scheduleMembersRetry(generation);
     }
   }
@@ -2980,127 +3058,134 @@ export class WorkspaceRuntime {
   ): Promise<void> {
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation || this.#protocolBlocked) return;
-    this.#syncRecoveryPending = true;
-    this.#clearSyncRetryTimer();
-    let state = await cache.load();
-    let cursor = state.syncCursor;
-    if (cursor === null) throw new Error("Sync requires an authoritative workspace position");
-    let resets = 0;
-    let sourceLessRetractApplied = false;
-    for (;;) {
-      const result = await this.#client.syncWorkspace(cursor);
-      if (generation !== this.#generation) return;
-      if (result.status === "upgrade_required") {
-        this.#requireProtocolUpgrade();
-        return;
-      }
-      if (result.status === "authentication_required") return;
-      if (result.status === "permanent") {
-        // Retrying cannot help, so the failure must be visible instead of silently going stale.
-        this.#setState({ stale: true, error: syncFailureMessage(result.reason) });
-        return;
-      }
-      if (result.status === "retryable") {
-        this.#setState({ stale: true });
-        this.#scheduleSyncRetry(generation, result.retryAfterMs);
-        return;
-      }
-      if (result.status === "reset_required") {
-        if (resets > 0) {
-          this.#setState({
-            stale: true,
-            error: "The server keeps asking this device to resync. Reset the local cache.",
-          });
+    const syncRecovery = this.#recovery.begin("sync");
+    try {
+      this.#clearSyncRetryTimer();
+      let state = await cache.load();
+      let cursor = state.syncCursor;
+      if (cursor === null) throw new Error("Sync requires an authoritative workspace position");
+      let resets = 0;
+      let sourceLessRetractApplied = false;
+      for (;;) {
+        const result = await this.#client.syncWorkspace(cursor);
+        if (generation !== this.#generation) return;
+        if (result.status === "upgrade_required") {
+          this.#requireProtocolUpgrade();
           return;
         }
-        resets += 1;
-        if (result.reason === "epoch_mismatch") {
-          if (!(await this.#resetProtocolReplica(generation))) return;
-        } else {
-          await cache.clearServerStatePreservingOutbox();
+        if (result.status === "authentication_required") {
+          this.#recovery.block(syncRecovery, "Sign in to resume workspace sync");
+          return;
         }
-        this.#syncCursor = null;
-        await this.#refreshSnapshot(generation);
-        if (generation !== this.#generation) return;
-        state = await cache.load();
-        cursor = state.syncCursor;
-        if (cursor === null) throw new Error("Bootstrap did not establish a sync position");
-        continue;
-      }
-      let repairedMembership = false;
-      for (const event of result.response.events) {
-        // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
-        // here and drained once below. Without this the fix would only work while the app is
-        // online, and a disable that landed during a backfill would survive the catch-up.
-        if (event.type === "member.updated") this.#membersDirty = true;
-        if (isSelfMembershipChange(event, this.#scope?.userId ?? null)) {
-          const repaired = await this.#repairMembershipEvent(event, generation, false);
-          if (generation !== this.#generation || cache !== this.#cache) return;
-          if (repaired) {
-            cursor = this.#syncCursor ?? event.position;
-            repairedMembership = true;
-            break;
+        if (result.status === "permanent") {
+          // Retrying cannot help, so the failure must be visible instead of silently going stale.
+          this.#recovery.block(syncRecovery, syncFailureMessage(result.reason));
+          this.#setState({ error: syncFailureMessage(result.reason) });
+          return;
+        }
+        if (result.status === "retryable") {
+          this.#scheduleSyncRetry(generation, result.retryAfterMs);
+          return;
+        }
+        if (result.status === "reset_required") {
+          if (resets > 0) {
+            this.#recovery.block(
+              syncRecovery,
+              "The server repeatedly rejected the rebuilt replica",
+            );
+            this.#setState({
+              error: "The server keeps asking this device to resync. Reset the local cache.",
+            });
+            return;
           }
+          resets += 1;
+          if (result.reason === "epoch_mismatch") {
+            if (!(await this.#resetProtocolReplica(generation))) return;
+          } else {
+            await cache.clearServerStatePreservingOutbox();
+          }
+          this.#syncCursor = null;
+          await this.#refreshSnapshot(generation);
+          if (generation !== this.#generation) return;
+          state = await cache.load();
+          cursor = state.syncCursor;
+          if (cursor === null) throw new Error("Bootstrap did not establish a sync position");
           continue;
         }
-        const projection = this.#captureProjection(cache);
-        if (!this.#isProjectionCurrent(projection)) return;
-        const retractSource =
-          event.type === "message.retracted"
-            ? this.#retractedMessageSource(event.payload.messageId, event.conversationId)
-            : undefined;
-        let applied: CacheEventResult;
-        try {
-          applied = await cache.applyEvent(event, projection.signal, retractSource);
-        } catch (error) {
+        let repairedMembership = false;
+        for (const event of result.response.events) {
+          // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
+          // here and drained once below. Without this the fix would only work while the app is
+          // online, and a disable that landed during a backfill would survive the catch-up.
+          if (event.type === "member.updated") this.#recovery.begin("members");
+          if (isSelfMembershipChange(event, this.#scope?.userId ?? null)) {
+            const repaired = await this.#repairMembershipEvent(event, generation, false);
+            if (generation !== this.#generation || cache !== this.#cache) return;
+            if (repaired) {
+              cursor = this.#syncCursor ?? event.position;
+              repairedMembership = true;
+              break;
+            }
+            continue;
+          }
+          const projection = this.#captureProjection(cache);
           if (!this.#isProjectionCurrent(projection)) return;
-          throw error;
+          const retractSource =
+            event.type === "message.retracted"
+              ? this.#retractedMessageSource(event.payload.messageId, event.conversationId)
+              : undefined;
+          let applied: CacheEventResult;
+          try {
+            applied = await cache.applyEvent(event, projection.signal, retractSource);
+          } catch (error) {
+            if (!this.#isProjectionCurrent(projection)) return;
+            throw error;
+          }
+          if (!this.#isProjectionCurrent(projection)) return;
+          if (applied.status === "applied")
+            for (const journal of this.#collectionJournals) journal.record(event);
+          if (
+            event.type === "message.retracted" &&
+            retractSource === undefined &&
+            applied.status === "applied"
+          ) {
+            sourceLessRetractApplied = true;
+            this.#setState({
+              threadSummaries: this.#invalidateConversationThreadSummaries(event.conversationId),
+            });
+          }
         }
-        if (!this.#isProjectionCurrent(projection)) return;
-        if (applied.status === "applied")
-          for (const journal of this.#collectionJournals) journal.record(event);
+        if (repairedMembership) continue;
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await cache.advanceCursor(result.response.nextCursor);
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        await this.#acknowledgeCurrentScope(result.response.nextCursor, generation);
+        if (generation !== this.#generation || cache !== this.#cache) return;
         if (
-          event.type === "message.retracted" &&
-          retractSource === undefined &&
-          applied.status === "applied"
+          this.#syncCursor === null ||
+          compareSyncPositions(result.response.nextCursor, this.#syncCursor) > 0
         ) {
-          sourceLessRetractApplied = true;
-          this.#setState({
-            threadSummaries: this.#invalidateConversationThreadSummaries(event.conversationId),
-          });
+          this.#syncCursor = result.response.nextCursor;
         }
+        cursor = result.response.nextCursor;
+        if (!result.response.hasMore) break;
       }
-      if (repairedMembership) continue;
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      await cache.advanceCursor(result.response.nextCursor);
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      await this.#acknowledgeCurrentScope(result.response.nextCursor, generation);
-      if (generation !== this.#generation || cache !== this.#cache) return;
-      if (
-        this.#syncCursor === null ||
-        compareSyncPositions(result.response.nextCursor, this.#syncCursor) > 0
-      ) {
-        this.#syncCursor = result.response.nextCursor;
+      this.#syncAttempt = 0;
+      // Drained once for the whole backfill, and before the reload so the state this flush publishes
+      // is the refreshed directory rather than the stale cached one. Also the retry site for a
+      // realtime refetch that failed earlier.
+      if (this.#membersDirty) await this.#refreshMembers(generation);
+      if (!(await this.#reloadCache(generation, cache))) return;
+      this.#recovery.complete(syncRecovery);
+      if (sourceLessRetractApplied && refreshSourceLessRetracts) {
+        await this.#refreshSourceLessRetractMetadata(generation);
+        if (generation !== this.#generation || cache !== this.#cache) return;
       }
-      cursor = result.response.nextCursor;
-      if (!result.response.hasMore) break;
+      if (flushOutbox) await this.#flushOutbox(generation);
+    } catch (error) {
+      this.#recovery.block(syncRecovery, errorMessage(error, "Could not sync the workspace"));
+      throw error;
     }
-    this.#syncAttempt = 0;
-    // Drained once for the whole backfill, and before the reload so the state this flush publishes
-    // is the refreshed directory rather than the stale cached one. Also the retry site for a
-    // realtime refetch that failed earlier.
-    if (this.#membersDirty) await this.#refreshMembers(generation);
-    if (!(await this.#reloadCache(generation, cache))) return;
-    this.#syncRecoveryPending = false;
-    // A directory read that failed leaves the client genuinely stale, so the flush must not claim
-    // otherwise just because the event page drained. A resync remains stale until realtime has
-    // also restarted with the repaired cursor.
-    this.#setState({ stale: this.#membersDirty || this.#resyncRecoveryPending });
-    if (sourceLessRetractApplied && refreshSourceLessRetracts) {
-      await this.#refreshSourceLessRetractMetadata(generation);
-      if (generation !== this.#generation || cache !== this.#cache) return;
-    }
-    if (flushOutbox) await this.#flushOutbox(generation);
   }
 
   /**
@@ -3118,6 +3203,7 @@ export class WorkspaceRuntime {
     | { readonly status: "blocked" }
   > {
     if (this.#protocolBlocked) return { status: "blocked" };
+    const membershipRecovery = this.#recovery.ensure("membership");
     let cursor = startCursor;
     let targetHighWater: SyncPosition | null = null;
     for (;;) {
@@ -3129,13 +3215,16 @@ export class WorkspaceRuntime {
         this.#requireProtocolUpgrade();
         return { status: "blocked" };
       }
-      if (result.status === "authentication_required") return { status: "blocked" };
+      if (result.status === "authentication_required") {
+        this.#recovery.block(membershipRecovery, "Sign in to restore workspace access");
+        return { status: "blocked" };
+      }
       if (result.status === "permanent") {
-        this.#setState({ stale: true, error: syncFailureMessage(result.reason) });
+        this.#recovery.block(membershipRecovery, syncFailureMessage(result.reason));
+        this.#setState({ error: syncFailureMessage(result.reason) });
         return { status: "blocked" };
       }
       if (result.status === "retryable") {
-        this.#setState({ stale: true });
         return { status: "retryable", retryAfterMs: result.retryAfterMs };
       }
       if (result.status === "reset_required") {
@@ -3238,12 +3327,11 @@ export class WorkspaceRuntime {
     ) {
       return;
     }
-    this.#resyncRecoveryPending = true;
+    const resyncRecovery = this.#recovery.ensure("resync");
     const realtimeScope = this.#realtimeScope;
     this.#realtimeScope = null;
     if (realtimeScope === null) await this.#client.stopWorkspaceRealtime();
     else await this.#client.stopWorkspaceRealtime(realtimeScope);
-    this.#setState({ stale: true });
     const settledAt = this.#resyncSettledAt;
     // A demand that arrives long after the last resync settled is a new problem rather than a
     // repeat of the one that resync answered, so it starts counting again. Elapsed connected time
@@ -3256,8 +3344,8 @@ export class WorkspaceRuntime {
       // Mirrors the reset guard in #repairAndFlush: another download cannot help, so the dead end
       // has to be visible instead of spinning behind a "cached state may be stale" note.
       this.#clearResyncTimer();
+      this.#recovery.block(resyncRecovery, "The server repeatedly rejected the rebuilt replica");
       this.#setState({
-        stale: true,
         error: "The server keeps asking this device to resync. Reset the local cache.",
       });
       return;
@@ -3282,6 +3370,7 @@ export class WorkspaceRuntime {
     if (cache === null || generation !== this.#generation || request !== this.#resyncRequest) {
       return;
     }
+    const resyncRecovery = this.#recovery.ensure("resync");
     try {
       await cache.clearServerStatePreservingOutbox();
       if (generation !== this.#generation || request !== this.#resyncRequest) return;
@@ -3308,15 +3397,15 @@ export class WorkspaceRuntime {
       await this.#restartRealtime(generation);
       if (generation !== this.#generation || request !== this.#resyncRequest) return;
       this.#resyncFailures = 0;
-      this.#resyncRecoveryPending = false;
-      this.#setState({ stale: this.#membersDirty || this.#syncRecoveryPending });
+      this.#recovery.complete(resyncRecovery);
     } catch (error) {
       if (generation !== this.#generation || request !== this.#resyncRequest) return;
       // Realtime is stopped and the server-derived stores are already gone, so without rearming
       // here the client sits offline with no cached workspace until the user presses Retry. The
       // notice is the failure that actually happened, never the server-keeps-demanding dead end.
       this.#resyncFailures += 1;
-      this.#setState({ stale: true, error: errorMessage(error, "Could not resync the workspace") });
+      this.#recovery.block(resyncRecovery, errorMessage(error, "Could not resync the workspace"));
+      this.#setState({ error: errorMessage(error, "Could not resync the workspace") });
       this.#scheduleResync(generation, request, retryDelay(this.#resyncFailures));
     }
   }
@@ -3337,12 +3426,26 @@ export class WorkspaceRuntime {
     const preview =
       this.#startupReplicaCatchUpPending && !requireCurrentCatalog ? new Set<string>() : null;
     const projection = this.#captureProjection(cache);
-    if (preview !== null) {
-      this.#catalogConfirmedIds = preview;
-      this.#catalogPending = true;
-    }
-    let catalogGateCompleted = preview === null;
+    const catalogRecovery = preview === null ? undefined : this.#recovery.begin("catalog");
+    // Every exit below settles that lease: a superseded refresh completes it, a catalog that
+    // could not be applied blocks it with a reason, and neither leaves the preview gate installed.
+    const completeCatalog = (): void => {
+      this.#recovery.complete(catalogRecovery);
+      this.#releasePartialCatalog(preview);
+    };
+    const superseded = (): boolean => {
+      completeCatalog();
+      return false;
+    };
+    const unusable = (reason: string): boolean => {
+      this.#recovery.block(catalogRecovery, reason);
+      this.#releasePartialCatalog(preview);
+      return false;
+    };
     try {
+      if (preview !== null) {
+        this.#catalogConfirmedIds = preview;
+      }
       const snapshot = await this.#fetchSnapshot(
         preview === null
           ? undefined
@@ -3371,7 +3474,7 @@ export class WorkspaceRuntime {
             },
       );
       if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
-        return false;
+        return superseded();
       }
       if (
         snapshot.currentUser.user.id !== scope.userId ||
@@ -3381,35 +3484,31 @@ export class WorkspaceRuntime {
       }
 
       const cursorBeforeMetadata = this.#syncCursor;
-      if (cursorBeforeMetadata === null) return false;
+      if (cursorBeforeMetadata === null) return unusable(CATALOG_REFRESH_FAILED);
       if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
+        // The replacement refresh opens its own catalog lease and page set, retiring both of these.
         return this.#refreshSnapshot(generation, undefined, snapshot);
       }
       if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
         await this.#repairAndFlush(generation, false, false);
-        if (
-          generation !== this.#generation ||
-          cache !== this.#cache ||
-          this.#syncRecoveryPending ||
-          this.#membershipRepairPending
-        ) {
-          return false;
+        if (generation !== this.#generation || cache !== this.#cache) return superseded();
+        if (this.#syncRecoveryPending || this.#membershipRepairPending) {
+          return unusable("The workspace catalog is waiting for a cache repair");
         }
       }
 
       return await this.#commitCacheProjection(async () => {
-        if (!this.#isProjectionCurrent(projection)) return false;
+        if (!this.#isProjectionCurrent(projection)) return superseded();
         const loaded = await cache.load();
-        if (!this.#isProjectionCurrent(projection) || loaded.bootstrap === null) {
-          return false;
-        }
+        if (!this.#isProjectionCurrent(projection)) return superseded();
+        if (loaded.bootstrap === null) return unusable(CATALOG_REFRESH_FAILED);
         const durableCursor = loaded.syncCursor;
-        if (durableCursor === null) return false;
+        if (durableCursor === null) return unusable(CATALOG_REFRESH_FAILED);
         if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
           throw new Error("The workspace metadata advanced beyond the repaired cursor");
         }
         if (requireCurrentCatalog && compareSyncPositions(snapshot.syncCursor, durableCursor) < 0) {
-          return false;
+          return unusable(CATALOG_REFRESH_FAILED);
         }
 
         // When events landed after the metadata response, their cached catalog and member projection
@@ -3434,15 +3533,17 @@ export class WorkspaceRuntime {
           },
           signal,
         );
-        if (!this.#isProjectionCurrent(projection)) return false;
+        if (!this.#isProjectionCurrent(projection)) return superseded();
         if (!replaced) {
           const reloaded = await this.#reloadCache(generation, cache);
           // Source-less retractions cannot reconcile counters from their event payload. A durable
           // winner newer than this catalog may still have those old totals, so require a fresh server
           // catalog before its retry state can be cleared.
-          return !requireCurrentCatalog && reloaded;
+          if (requireCurrentCatalog || !reloaded) return superseded();
+          completeCatalog();
+          return true;
         }
-        if (!(await this.#reloadCache(generation, cache))) return false;
+        if (!(await this.#reloadCache(generation, cache))) return superseded();
 
         for (const conversationId of this.#historyCursors.keys()) {
           if (!visibleConversationIds.has(conversationId))
@@ -3460,18 +3561,13 @@ export class WorkspaceRuntime {
             threadError: null,
           });
         }
-        if (preview !== null && this.#catalogConfirmedIds === preview) {
-          this.#catalogPending = false;
-          this.#catalogConfirmedIds = null;
-          catalogGateCompleted = true;
-        }
+        completeCatalog();
         return true;
       });
-    } finally {
-      if (!catalogGateCompleted && this.#catalogConfirmedIds === preview) {
-        this.#catalogPending = false;
-        this.#catalogConfirmedIds = null;
-      }
+    } catch (error) {
+      this.#recovery.block(catalogRecovery, errorMessage(error, CATALOG_REFRESH_FAILED));
+      this.#releasePartialCatalog(preview);
+      throw error;
     }
   }
 
@@ -3484,7 +3580,7 @@ export class WorkspaceRuntime {
     if (cache === null || generation !== this.#generation) return false;
     for (;;) {
       if (!this.#sourceLessRetractMetadataPending) return true;
-      const version = this.#sourceLessRetractMetadataVersion;
+      const metadataRecovery = this.#recovery.current("retract_metadata");
       let refreshed = false;
       let requestFailed = false;
       try {
@@ -3498,7 +3594,7 @@ export class WorkspaceRuntime {
       if (refreshed) {
         // A newer source-less retract may have landed while this catalog was in flight. Do not
         // treat a response that predates it as authoritative for the newer invalidation.
-        if (version !== this.#sourceLessRetractMetadataVersion) continue;
+        if (!this.#recovery.isCurrent(metadataRecovery)) continue;
         let summariesRefreshed = false;
         try {
           summariesRefreshed = await this.#refreshInvalidatedThreadSummaries(generation, cache);
@@ -3507,33 +3603,26 @@ export class WorkspaceRuntime {
         }
         if (!summariesRefreshed) {
           if (generation !== this.#generation || cache !== this.#cache) return false;
-          this.#setState(
-            requestFailed
-              ? { stale: true, error: SOURCE_LESS_RETRACT_METADATA_ERROR }
-              : { stale: true },
-          );
+          if (requestFailed) {
+            this.#recovery.block(metadataRecovery, SOURCE_LESS_RETRACT_METADATA_ERROR);
+            this.#setState({ error: SOURCE_LESS_RETRACT_METADATA_ERROR });
+          }
           this.#scheduleSourceLessRetractMetadataRetry(generation);
           return false;
         }
-        if (version !== this.#sourceLessRetractMetadataVersion) continue;
-        this.#sourceLessRetractMetadataPending = false;
+        if (!this.#recovery.isCurrent(metadataRecovery)) continue;
+        this.#recovery.complete(metadataRecovery);
         this.#sourceLessRetractMetadataAttempt = 0;
         this.#clearSourceLessRetractMetadataRetryTimer();
         this.#setState({
-          stale:
-            this.#membersDirty ||
-            this.#membershipRepairPending ||
-            this.#syncRecoveryPending ||
-            this.#resyncRecoveryPending,
           ...(this.#state.error === SOURCE_LESS_RETRACT_METADATA_ERROR ? { error: null } : {}),
         });
         return true;
       }
-      this.#setState(
-        requestFailed
-          ? { stale: true, error: SOURCE_LESS_RETRACT_METADATA_ERROR }
-          : { stale: true },
-      );
+      if (requestFailed) {
+        this.#recovery.block(metadataRecovery, SOURCE_LESS_RETRACT_METADATA_ERROR);
+        this.#setState({ error: SOURCE_LESS_RETRACT_METADATA_ERROR });
+      }
       this.#scheduleSourceLessRetractMetadataRetry(generation);
       return false;
     }
@@ -3621,10 +3710,9 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || this.#cache === null) return;
     const refreshed = await this.#refreshWorkspaceMetadata(generation);
     if (!refreshed || generation !== this.#generation || this.#cache === null) {
-      if (generation === this.#generation) this.#setState({ busy: false, stale: true });
+      if (generation === this.#generation) this.#setState({ busy: false });
       return;
     }
-    this.#startupReplicaCatchUpPending = false;
     await this.#completeStartupAfterSnapshot(generation);
   }
 
@@ -3640,10 +3728,11 @@ export class WorkspaceRuntime {
     startCursor: SyncPosition,
   ): Promise<void> {
     if (generation !== this.#generation || cache !== this.#cache) return;
+    const membershipRecovery = this.#recovery.ensure("membership");
     const preflight = await this.#drainMembershipRepairGap(generation, startCursor);
     if (generation !== this.#generation || cache !== this.#cache) return;
     if (preflight.status === "retryable") {
-      this.#setState({ busy: false, stale: true });
+      this.#setState({ busy: false });
       this.#scheduleMembershipMarkerRetry(
         generation,
         cache,
@@ -3655,7 +3744,7 @@ export class WorkspaceRuntime {
     }
     if (preflight.status === "blocked") {
       this.#syncAttempt = 0;
-      this.#setState({ busy: false, stale: true });
+      this.#setState({ busy: false });
       return;
     }
     const repaired = await this.#refreshSnapshot(generation, preflight.minimumCursor);
@@ -3665,7 +3754,7 @@ export class WorkspaceRuntime {
     if (repairedState.repairMarker !== null) {
       throw new Error("Membership repair did not clear its durable marker");
     }
-    this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
+    if (this.#acceptedMembershipRepairs.size === 0) this.#recovery.complete(membershipRecovery);
     this.#syncCursor = repairedState.syncCursor;
     this.#publishMembershipCache(repairedState, marker.conversationId);
     // The snapshot is now the durable UI representation of the drained gap. Only the final
@@ -3676,7 +3765,8 @@ export class WorkspaceRuntime {
   async #completeStartupAfterSnapshot(generation: number): Promise<void> {
     if (this.#protocolBlocked) return;
     if (generation !== this.#generation || this.#cache === null) return;
-    this.#startupRealtimePending = true;
+    const startupRecovery = this.#recovery.current("startup");
+    this.#recovery.advanceStartup(startupRecovery, "realtime");
     if (this.#realtimeScope === null && this.#syncCursor !== null) {
       await this.#prepareRealtime(generation, this.#syncCursor);
       if (generation !== this.#generation || this.#cache === null) return;
@@ -3686,13 +3776,12 @@ export class WorkspaceRuntime {
     if (this.#syncRecoveryPending || this.#membershipRepairPending) {
       // A retryable final catch-up or an unresolved durable membership marker must keep renderer
       // realtime closed. Starting here could cross an unacknowledged revocation boundary.
-      this.#setState({ busy: false, stale: true });
+      this.#setState({ busy: false });
       return;
     }
     await this.#restartRealtime(generation);
     if (generation !== this.#generation) return;
-    this.#startupMetadataPending = false;
-    this.#startupRealtimePending = false;
+    this.#recovery.complete(startupRecovery);
     await this.#flushOutbox(generation);
     if (generation !== this.#generation) return;
     this.#setState({ busy: false });
@@ -3764,7 +3853,7 @@ export class WorkspaceRuntime {
     // HTTP catch-up membership events do not pass through the realtime listener. Rotate here too;
     // for realtime this harmlessly advances to the signal the authoritative repair will use.
     this.#rotateProjectionBarrier();
-    this.#membershipRepairPending = true;
+    const membershipRecovery = this.#recovery.ensure("membership");
     this.#membershipEpoch += 1;
     this.#clearRetryTimer();
     this.#clearReadTargets();
@@ -3832,7 +3921,7 @@ export class WorkspaceRuntime {
     if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
     if (restartRealtime) await this.#restartRealtime(generation);
     if (generation !== this.#generation || cache !== this.#cache) return repairedMembership;
-    this.#membershipRepairPending = this.#acceptedMembershipRepairs.size > 0;
+    if (this.#acceptedMembershipRepairs.size === 0) this.#recovery.complete(membershipRecovery);
     if (!this.#membershipRepairPending) {
       void this.#flushOutbox(generation);
       const selected = this.#state.selectedConversationId;
@@ -3893,7 +3982,6 @@ export class WorkspaceRuntime {
         visibleMessageIds.has(this.#state.focusedThreadMessageId)
           ? this.#state.focusedThreadMessageId
           : null,
-      stale: true,
     });
   }
 
@@ -3957,7 +4045,6 @@ export class WorkspaceRuntime {
         messageIds.has(this.#state.focusedThreadMessageId)
           ? this.#state.focusedThreadMessageId
           : null,
-      stale: true,
     });
   }
 
@@ -4011,7 +4098,7 @@ export class WorkspaceRuntime {
     this.#syncCursor = applied.committedPosition;
     this.#publishCommittedEvent(event, applied);
     if (applied.changes.invalidated.some((entry) => entry.kind === "members")) {
-      this.#membersDirty = true;
+      this.#recovery.begin("members");
       await this.#refreshMembers(generation);
     }
     if (applied.changes.invalidated.some((entry) => entry.kind === "conversation_metadata")) {
@@ -4080,8 +4167,7 @@ export class WorkspaceRuntime {
 
   #invalidateConversationThreadSummaries(conversationId: string): readonly MessageThreadSummary[] {
     this.#invalidatedThreadSummaryConversationIds.add(conversationId);
-    this.#sourceLessRetractMetadataPending = true;
-    this.#sourceLessRetractMetadataVersion += 1;
+    this.#recovery.begin("retract_metadata");
     return this.#withoutConversationThreadSummaries(conversationId);
   }
 
@@ -4291,7 +4377,7 @@ export class WorkspaceRuntime {
 
   #requireProtocolUpgrade(): void {
     if (this.#protocolBlocked) return;
-    this.#protocolBlocked = true;
+    this.#recovery.block(this.#recovery.begin("protocol"), WORKSPACE_PROTOCOL_UPGRADE_MESSAGE);
     this.#offlineOnly = true;
     this.#clearResyncTimer();
     this.#resetSourceLessRetractMetadataRefresh();
@@ -4301,7 +4387,7 @@ export class WorkspaceRuntime {
     this.#clearReadTargets();
     this.#setState({
       busy: false,
-      stale: true,
+
       connection: "incompatible",
       error: WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
     });
@@ -4615,6 +4701,7 @@ export class WorkspaceRuntime {
     cache: WorkspaceCache,
     allowMembershipRepair = false,
   ): Promise<boolean> {
+    const membershipRecovery = this.#recovery.current("membership");
     const projection = this.#captureProjection(cache);
     const current = (): boolean =>
       generation === this.#generation &&
@@ -4625,9 +4712,11 @@ export class WorkspaceRuntime {
     if (!current()) return false;
     const loaded = await cache.load();
     if (!current()) return false;
-    if (allowMembershipRepair)
-      this.#membershipRepairPending =
-        loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0;
+    if (allowMembershipRepair) {
+      if (loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0)
+        this.#recovery.ensure("membership");
+      else this.#recovery.complete(membershipRecovery);
+    }
     this.#hydrateRetractReservations(loaded.retractReservations, loaded.messages);
     let threadSummaries: readonly MessageThreadSummary[] = this.#state.threadSummaries.filter(
       (summary) =>
@@ -4703,7 +4792,7 @@ export class WorkspaceRuntime {
           this.#syncAttempt = 0;
           this.#setState({
             busy: false,
-            stale: true,
+
             error: errorMessage(error, "Could not initialize the workspace"),
           });
         }
@@ -4723,6 +4812,7 @@ export class WorkspaceRuntime {
       // repair resets the attempt and makes this queued retry redundant.
       void this.#serializeRecovery(async () => {
         if (generation !== this.#generation || this.#syncAttempt === 0) return;
+        const startupRecovery = this.#recovery.current("startup");
         const wasReplicaCatchUp = this.#startupReplicaCatchUpPending;
         await this.#repairAndFlush(generation, !wasReplicaCatchUp);
         if (
@@ -4742,8 +4832,7 @@ export class WorkspaceRuntime {
         ) {
           await this.#restartRealtime(generation);
           if (generation !== this.#generation) return;
-          this.#startupRealtimePending = false;
-          this.#startupMetadataPending = false;
+          this.#recovery.complete(startupRecovery);
           await this.#flushOutbox(generation);
           if (generation !== this.#generation) return;
           this.#setState({ busy: false });
@@ -4755,7 +4844,6 @@ export class WorkspaceRuntime {
       }).catch((error: unknown) => {
         if (generation === this.#generation) {
           this.#setState({
-            stale: true,
             error: errorMessage(error, "Could not sync the workspace"),
           });
         }
@@ -4818,8 +4906,6 @@ export class WorkspaceRuntime {
   #resetSourceLessRetractMetadataRefresh(): void {
     this.#clearSourceLessRetractMetadataRetryTimer();
     this.#sourceLessRetractMetadataAttempt = 0;
-    this.#sourceLessRetractMetadataPending = false;
-    this.#sourceLessRetractMetadataVersion += 1;
   }
 
   #clearReadTargets(): void {
@@ -4841,7 +4927,6 @@ export class WorkspaceRuntime {
     this.#clearResyncTimer();
     this.#resyncAttempt = 0;
     this.#resyncFailures = 0;
-    this.#resyncRecoveryPending = false;
     this.#resyncRequest += 1;
     this.#resyncSettledAt = null;
   }

@@ -1,11 +1,14 @@
 import type { RealtimeConnectionState } from "../../shared/desktop-api";
+import type { RecoveryEntry } from "./workspace-recovery";
 
 interface ConversationHealthProps {
   readonly connection: RealtimeConnectionState;
   readonly stale: boolean;
+  readonly collectionRecovery?: Pick<RecoveryEntry, "status" | "reason">;
   readonly cacheMode: "persistent" | "memory_only" | null;
   readonly notice: string | null;
   readonly onRetry: () => void;
+  readonly onRetryCollection?: () => void;
   readonly onResetCache?: () => void;
   readonly onCheckForUpdates: () => Promise<void>;
 }
@@ -41,15 +44,22 @@ export function RealtimeIncompatibleNotice({
 export function ConversationHealth({
   connection,
   stale,
+  collectionRecovery,
   cacheMode,
   notice,
   onRetry,
+  onRetryCollection,
   onResetCache,
   onCheckForUpdates,
 }: ConversationHealthProps) {
   const connectionLabel = connection === "live" ? null : connectionLabels[connection];
   const warnings = [
     stale ? "Showing cached messages; new activity may be delayed." : null,
+    collectionRecovery === undefined
+      ? null
+      : collectionRecovery.status === "pending"
+        ? "Refreshing this view…"
+        : (collectionRecovery.reason ?? "This view could not be refreshed."),
     cacheMode === "memory_only" ? "Local history will not be saved on this device." : null,
     notice,
   ].filter((warning): warning is string => warning !== null);
@@ -79,7 +89,15 @@ export function ConversationHealth({
         >
           <span>{warnings.join(" ")}</span>
           <div className="conversation-health-actions">
-            <button className="quiet-button" type="button" onClick={onRetry}>
+            <button
+              className="quiet-button"
+              type="button"
+              onClick={
+                !stale && collectionRecovery !== undefined
+                  ? (onRetryCollection ?? onRetry)
+                  : onRetry
+              }
+            >
               Retry
             </button>
             {notice !== null && onResetCache !== undefined ? (
