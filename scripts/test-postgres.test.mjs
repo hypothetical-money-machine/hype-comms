@@ -2,7 +2,24 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { requireTestDatabaseUrl, waitForPostgres } from "./test-postgres.mjs";
+import {
+  requireTestDatabaseUrl,
+  serverSuiteEnvironment,
+  waitForPostgres,
+} from "./test-postgres.mjs";
+
+test("always opts the spawned server suite into the required-test-database guard", () => {
+  assert.deepEqual(serverSuiteEnvironment({ PATH: "/usr/bin" }), {
+    PATH: "/usr/bin",
+    HYPE_COMMS_REQUIRE_TEST_DATABASE: "1",
+  });
+  // Overrides a caller that already (mis)set the flag, rather than deferring to it.
+  assert.deepEqual(
+    serverSuiteEnvironment({ HYPE_COMMS_REQUIRE_TEST_DATABASE: "" })
+      .HYPE_COMMS_REQUIRE_TEST_DATABASE,
+    "1",
+  );
+});
 
 test("requires an explicitly test-named PostgreSQL database", () => {
   assert.throws(() => requireTestDatabaseUrl({}), /HYPE_COMMS_TEST_DATABASE_URL is required/);
