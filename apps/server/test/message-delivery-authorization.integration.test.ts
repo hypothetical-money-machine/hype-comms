@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool, PoolClient } from "pg";
 
 import type {
@@ -17,7 +17,7 @@ import { IdentityService } from "../src/modules/identity/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const now = "2026-08-09T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
@@ -102,7 +102,7 @@ async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
   }
 }
 
-describeWithPostgres("message-delivery authorization", () => {
+describe("message-delivery authorization", () => {
   const applicationName = `delivery_${process.pid}_${randomUUID().slice(0, 8)}`;
   let database: TestDatabase;
   let adminPool: Pool;

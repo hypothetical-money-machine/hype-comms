@@ -438,22 +438,30 @@ Repository **variables** (empty today):
 
 ## Verification
 
-Use the fast inner-loop check while iterating. It runs formatting, linting, typechecking, and
-tests, but leaves workspace builds to the full gate:
+Use the local check while iterating. It runs formatting, lint, typechecking, unit tests, and
+Hermes tests without PostgreSQL:
 
 ```bash
 npm run check:fast
 ```
 
-Before opening a pull request, run the complete gate:
+`npm run test:unit` runs the same tests without the static checks. `npm run test:integration`
+runs only PostgreSQL integration tests. Integration files use `.integration.test.ts`; their
+registration never depends on an environment skip guard.
+
+Before opening a pull request, run the complete gate with a disposable PostgreSQL 16 service:
 
 ```bash
-npm run check
+HYPE_COMMS_TEST_DATABASE_URL=postgresql://localhost/hype_comms_test npm run check
 ```
 
-Five server suites covering authorization, invitations, sessions, membership roles, workspace
-access, and migrations silently skip when `HYPE_COMMS_TEST_DATABASE_URL` is absent. Run them against a
-disposable PostgreSQL container matching the deployed major version with:
+The full gate checks database availability first and fails when the URL is missing or unsafe. It
+then runs unit, PostgreSQL, Hermes, and build checks. Each database suite gets its own database;
+the role must have CREATEDB permission. At most four server test files run concurrently. The
+fixture runs real migrations and resets discovered application tables without erasing migration
+metadata. It drops only the database it created.
+
+To run the integration lane in a disposable Docker container:
 
 ```bash
 npm run test:db

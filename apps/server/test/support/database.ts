@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import { escapeIdentifier, Pool } from "pg";
-import { describe } from "vitest";
 
 import {
   assertTestDatabaseName,
@@ -9,9 +8,6 @@ import {
 } from "../../../../scripts/test-database-config.mjs";
 import { runMigrations } from "../../src/db/migrate.js";
 import { createPool } from "../../src/db/pool.js";
-
-export const describeWithPostgres =
-  process.env.HYPE_COMMS_TEST_DATABASE_URL === undefined ? describe.skip : describe;
 
 export interface TestDatabase {
   readonly pool: Pool;
