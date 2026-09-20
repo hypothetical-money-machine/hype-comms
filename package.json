@@ -53,12 +53,10 @@
     "test:db": "scripts/test-database.sh",
     "test:postgres": "node scripts/test-postgres.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "collect:agent-wake-evidence": "node scripts/collect-agent-wake-evidence.mjs",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
-    "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
-    "validate:agent-wake-evidence-manifest": "node scripts/validate-agent-wake-evidence-manifest.mjs"
+    "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
