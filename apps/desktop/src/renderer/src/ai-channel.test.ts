@@ -440,6 +440,35 @@ describe("AiChannel", () => {
     await waitFor(() => expect(input.value).toBe(""));
   });
 
+  it("autosizes a preserved draft when the composer remounts", async () => {
+    vi.spyOn(HTMLTextAreaElement.prototype, "scrollHeight", "get").mockImplementation(function (
+      this: HTMLTextAreaElement,
+    ) {
+      return this.value === "" ? 46 : 240;
+    });
+    vi.spyOn(HTMLTextAreaElement.prototype, "offsetHeight", "get").mockReturnValue(48);
+    vi.spyOn(HTMLTextAreaElement.prototype, "clientHeight", "get").mockReturnValue(46);
+    const harness = createTransport(aiState());
+    await renderChannel(harness);
+    const firstInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
+    const prompt = Array.from({ length: 20 }, (_, index) => `Line ${String(index + 1)}`).join("\n");
+    fireEvent.change(firstInput, { target: { value: prompt } });
+    expect(firstInput.style.height).toBe("180px");
+
+    act(() => harness.emit(aiState({ status: "configured" })));
+    expect(screen.queryByRole("textbox", { name: "Message Claude" })).toBeNull();
+    act(() => harness.emit(aiState({ status: "ready" })));
+    const remountedInput = await screen.findByRole<HTMLTextAreaElement>("textbox", {
+      name: "Message Claude",
+    });
+
+    expect(remountedInput.value).toBe(prompt);
+    expect(remountedInput.style.height).toBe("180px");
+    expect(remountedInput.style.overflowY).toBe("auto");
+  });
+
   it("keeps a failed prompt draft and exposes the sanitized error", async () => {
     const harness = createTransport(aiState({ generation: 8 }));
     harness.sendAiChannelPrompt.mockRejectedValue(new Error("Claude is not authenticated."));
