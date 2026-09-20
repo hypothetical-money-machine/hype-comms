@@ -1,3 +1,5 @@
+import { reportMainProcessError } from "./main-process-log";
+import { notifyStateListeners } from "./state-listeners";
 import {
   notificationPreferenceSchema,
   notificationStateSchema,
@@ -28,6 +30,7 @@ export interface NotificationCapabilitySource {
 export class NotificationSettingsController {
   readonly #persistence: NotificationPreferencePersistence;
   readonly #capability: NotificationCapabilitySource;
+  readonly #reportListenerError: (error: unknown) => void;
   readonly #listeners = new Set<(state: NotificationState) => void>();
   #state: NotificationState | null = null;
   #initialization: Promise<NotificationState> | null = null;
@@ -38,9 +41,13 @@ export class NotificationSettingsController {
   constructor(options: {
     readonly persistence: NotificationPreferencePersistence;
     readonly capability: NotificationCapabilitySource;
+    readonly reportListenerError?: (error: unknown) => void;
   }) {
     this.#persistence = options.persistence;
     this.#capability = options.capability;
+    this.#reportListenerError =
+      options.reportListenerError ??
+      ((error) => reportMainProcessError("Notification settings listener failed", error));
   }
 
   get state(): NotificationState {
@@ -152,11 +159,18 @@ export class NotificationSettingsController {
 
   #commit(next: NotificationState): NotificationState {
     const parsed = notificationStateSchema.parse(next);
-    if (this.#state !== null && JSON.stringify(this.#state) === JSON.stringify(parsed)) {
+    if (
+      this.#state !== null &&
+      this.#state.version === parsed.version &&
+      this.#state.devicePreference === parsed.devicePreference &&
+      this.#state.contentPreviewPreference === parsed.contentPreviewPreference &&
+      this.#state.nativeSupport === parsed.nativeSupport &&
+      this.#state.osPermission === parsed.osPermission
+    ) {
       return this.#state;
     }
     this.#state = parsed;
-    for (const listener of this.#listeners) listener(parsed);
+    notifyStateListeners(this.#listeners, parsed, this.#reportListenerError);
     return parsed;
   }
 

@@ -5,6 +5,57 @@ import path from "node:path";
 
 export type SyncDirectory = (directory: string) => Promise<void>;
 
+export interface PreferenceStoreOptions {
+  readonly userDataPath: string;
+  readonly syncDirectory?: SyncDirectory | undefined;
+}
+
+export interface PreferenceCodec<Value> {
+  readonly decode: (value: unknown) => Value | null;
+  readonly encode: (value: Value) => unknown;
+}
+
+interface JsonPreferenceOptions<Value> {
+  readonly filePath: string;
+  readonly maxBytes: number;
+  readonly defaultValue: Value;
+  readonly codec: PreferenceCodec<Value>;
+  readonly syncDirectory?: SyncDirectory | undefined;
+}
+
+/** One owner for bounded JSON reads and serialized atomic writes to a non-secret preference file. */
+export class JsonPreferenceFile<Value> {
+  readonly #options: JsonPreferenceOptions<Value>;
+  #saveTail: Promise<void> = Promise.resolve();
+
+  constructor(options: JsonPreferenceOptions<Value>) {
+    this.#options = options;
+  }
+
+  async load(): Promise<Value> {
+    const { filePath, maxBytes, defaultValue, codec } = this.#options;
+    const source = await readBoundedUtf8File(filePath, maxBytes);
+    if (source === null) return defaultValue;
+    try {
+      return codec.decode(JSON.parse(source) as unknown) ?? defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  }
+
+  save(value: Value): Promise<void> {
+    const { filePath, maxBytes, codec, syncDirectory = syncDirectoryBestEffort } = this.#options;
+    // Capture the bytes before queuing so a caller cannot change a pending write through mutation.
+    const source = `${JSON.stringify(codec.encode(value))}\n`;
+    if (Buffer.byteLength(source, "utf8") > maxBytes) {
+      return Promise.reject(new Error("Preference exceeds its file size limit"));
+    }
+    const request = this.#saveTail.then(() => atomicWrite(filePath, source, syncDirectory));
+    this.#saveTail = request.catch(() => undefined);
+    return request;
+  }
+}
+
 export interface PrivateReadableFileHandle {
   stat(): Promise<{
     readonly uid: number;
