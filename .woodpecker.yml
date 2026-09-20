@@ -38,8 +38,8 @@ steps:
       PROJECT: *project
     commands:
       # Public DNS routes through Cloudflare, which does not expose Harbor's /v2/ API. The
-      # Woodpecker agent reaches the same registry through the ops-cluster MetalLB address.
-      - echo "192.168.1.60 registry.fastnfree.dev" >> /etc/hosts
+      # Woodpecker agent reaches the same registry through the lab MetalLB address.
+      - echo "192.168.1.80 registry.fastnfree.dev" >> /etc/hosts
       - mkdir -p /kaniko/.docker
       - |
         set +x
