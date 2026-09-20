@@ -1,115 +1,31 @@
-import { contextBridge, ipcRenderer } from "electron";
-import type { IpcRendererEvent } from "electron";
 import {
-  AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-  AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
   DEVICE_PREFERENCES_IPC_MAX_BYTES,
-  DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
-  NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_IPC_MAX_BYTES,
-  NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
-  NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-  NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
-  NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
   NOTIFICATION_STATE_IPC_MAX_BYTES,
-  advanceReadCursorResponseSchema,
-  addReactionResponseSchema,
-  agentEnrollmentResponseSchema,
-  authCapabilitiesSchema,
-  aiChannelGenerationRequestSchema,
-  aiChannelPermissionResponseSchema,
-  aiChannelPromptRequestSchema,
   aiChannelStateSchema,
-  cacheCryptoStatusSchema,
-  cacheDecryptBatchRequestSchema,
-  cacheDecryptBatchResponseSchema,
-  cacheEncryptBatchRequestSchema,
-  cacheEncryptBatchResponseSchema,
-  channelMemberTargetSchema,
-  channelMembershipMutationResponseSchema,
-  channelMembersResponseSchema,
-  communicationPathsResponseSchema,
-  compactModePreferenceSchema,
-  conversationMutationResponseSchema,
-  createChannelOperationSchema,
-  createTaskOperationSchema,
-  devicePreferencesPatchSchema,
-  devicePreferencesSchema,
-  directConversationRequestSchema,
-  entityIdSchema,
   chatSessionStateSchema,
-  listConversationsQuerySchema,
-  listConversationsResponseSchema,
-  listAgentEnrollmentsResponseSchema,
-  listMembersResponseSchema,
-  conversationFilesQuerySchema,
-  conversationFilesResponseSchema,
-  listMessageAttachmentsRequestSchema,
-  listMessageAttachmentsResponseSchema,
-  listMessageReactionsRequestSchema,
-  listMessageReactionsResponseSchema,
-  openAttachmentResponseSchema,
-  magicLinkDeliveryStateSchema,
-  messageHistoryResponseSchema,
-  messageByIdResponseSchema,
-  retractMessageResponseSchema,
-  messageThreadRequestSchema,
-  messageThreadResponseSchema,
-  messageReactionTargetSchema,
-  messageSearchQuerySchema,
-  messageSearchResponseSchema,
-  moveTaskOperationSchema,
+  compactModePreferenceSchema,
+  devicePreferencesSchema,
   notificationActionSchema,
-  notificationActionAcknowledgementSchema,
-  notificationActionDrainRequestSchema,
-  notificationActionDrainResponseSchema,
-  notificationActivityUpdateSchema,
-  notificationContextSchema,
-  notificationCaptureActivationRequestSchema,
-  notificationCaptureActivationResponseSchema,
-  notificationPreferenceSchema,
   notificationStateSchema,
-  protocolHandlerStateSchema,
   realtimeConnectionStateSchema,
-  realtimeAcknowledgementSchema,
-  realtimeSessionScopeSchema,
   scopedEphemeralActivityFrameSchema,
-  scopedTypingActivityUpdateSchema,
-  requestMagicLinkSchema,
-  removeReactionResponseSchema,
-  reviewAgentEnrollmentRequestSchema,
-  sendAttemptResultSchema,
-  sendMessageOperationSchema,
-  sequenceSchema,
-  syncAttemptResultSchema,
-  taskListQuerySchema,
-  taskListResponseSchema,
-  taskMutationResponseSchema,
-  themeDesignSchema,
-  themePreferenceSchema,
-  updateStateSchema,
-  updateProfileResponseSchema,
-  updateTaskOperationSchema,
-  upsertChannelMemberRequestSchema,
-  upsertChannelMemberOperationSchema,
-  humanWorkspaceBootstrapResponseSchema,
   scopedProductRealtimeEventSchema,
-  type ChatSessionState,
+  updateStateSchema,
   type AiChannelGenerationRequest,
   type AiChannelPermissionResponse,
   type AiChannelPromptRequest,
   type AiChannelState,
   type CacheDecryptBatchRequest,
   type CacheEncryptBatchRequest,
+  type ChatSessionState,
   type ConversationFilesQuery,
   type CreateChannelOperation,
   type CreateTaskOperation,
-  type DirectConversationRequest,
   type DevicePreferences,
   type DevicePreferencesPatch,
+  type DirectConversationRequest,
   type ListConversationsQuery,
   type MessageSearchQuery,
   type MoveTaskOperation,
@@ -123,42 +39,41 @@ import {
   type RealtimeAcknowledgement,
   type RealtimeSessionScope,
   type ReviewAgentEnrollmentRequest,
-  type ScopedProductRealtimeEvent,
   type ScopedEphemeralActivityFrame,
+  type ScopedProductRealtimeEvent,
   type ScopedTypingActivityUpdate,
   type SendMessageOperation,
+  type TaskListQuery,
   type ThemeDesign,
   type ThemePreference,
   type ThemeState,
-  type TaskListQuery,
   type UpdateState,
   type UpdateTaskOperation,
   type User,
 } from "@hype-comms/contracts";
-
-import { DESKTOP_CHANNELS } from "../shared/channels";
+import type { IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
+import { readDesktopInitialValues } from "../shared/ipc-initial-values";
 import {
-  attachmentUploadRequestSchema,
-  attachmentUploadResultSchema,
-} from "../shared/attachment-upload";
+  createDesktopInvoker,
+  parseBoundedIpcPayload,
+  type IpcPayloadSchema,
+} from "../shared/ipc-invoke";
+
+import { DESKTOP_CHANNELS, type DesktopPushChannel } from "../shared/channels";
 import { resolveInitialCompactModeArgument } from "../shared/compact-mode";
-import { resolveInitialDevicePreferencesArgument } from "../shared/device-preferences";
 import type {
   DesktopApi,
   DesktopPlatform,
   NotificationCaptureTransport,
   NotificationTransport,
   RealtimeConnectionState,
-  ServerStatus,
 } from "../shared/desktop-api";
-import {
-  isBuiltInThemeState,
-  parseBuiltInThemeState,
-  resolveInitialThemeStateArgument,
-} from "../shared/theme";
+import { resolveInitialDevicePreferencesArgument } from "../shared/device-preferences";
+import { isBuiltInThemeState, resolveInitialThemeStateArgument } from "../shared/theme";
 
 function subscribe<T>(
-  channel: string,
+  channel: DesktopPushChannel,
   listener: (value: T) => void,
   validate: (value: unknown) => value is T,
 ): () => void {
@@ -174,32 +89,8 @@ function subscribe<T>(
   };
 }
 
-interface IpcPayloadSchema<T> {
-  readonly parse: (value: unknown) => T;
-}
-
-function parseBoundedIpcPayload<T>(
-  schema: IpcPayloadSchema<T>,
-  value: unknown,
-  maxBytes: number,
-): T {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new TypeError("IPC payload must be JSON-serializable");
-  }
-  if (serialized === undefined) {
-    throw new TypeError("IPC payload must be JSON-serializable");
-  }
-  if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
-    throw new RangeError("IPC payload exceeds its byte limit");
-  }
-  return schema.parse(value);
-}
-
 function subscribeToBoundedIpcPayload<T>(
-  channel: string,
+  channel: DesktopPushChannel,
   schema: IpcPayloadSchema<T>,
   maxBytes: number,
   listener: (value: T) => void,
@@ -223,9 +114,11 @@ if (platform !== "darwin" && platform !== "linux" && platform !== "win32") {
   throw new Error(`Unsupported desktop platform: ${platform}`);
 }
 const initialThemeState = resolveInitialThemeStateArgument(process.argv);
-const isHeadless = ipcRenderer.sendSync(DESKTOP_CHANNELS.automationHeadless) === true;
+const isHeadless = readDesktopInitialValues(ipcRenderer).automationHeadless;
 const initialCompactMode = resolveInitialCompactModeArgument(process.argv);
 const initialDevicePreferences = resolveInitialDevicePreferencesArgument(process.argv);
+
+const invokeDesktop = createDesktopInvoker(ipcRenderer);
 
 const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransport = Object.freeze(
   {
@@ -234,14 +127,13 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
     initialThemeState,
     initialCompactMode,
     initialDevicePreferences,
-    getAppVersion: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appVersion) as Promise<string>,
-    getUpdateState: async () =>
-      updateStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.updateState)),
+    getAppVersion: () => invokeDesktop("appVersion"),
+    getUpdateState: async () => invokeDesktop("updateState"),
     checkForUpdates: async () => {
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.updateCheck);
+      await invokeDesktop("updateCheck");
     },
     restartToInstallUpdate: async () => {
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.updateInstall);
+      await invokeDesktop("updateInstall");
     },
     onUpdateStateChanged: (listener: (state: UpdateState) => void) =>
       subscribe(
@@ -249,64 +141,24 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         listener,
         (value): value is UpdateState => updateStateSchema.safeParse(value).success,
       ),
-    getThemeState: async () =>
-      parseBuiltInThemeState(await ipcRenderer.invoke(DESKTOP_CHANNELS.themeState)),
-    getSystemThemeState: async () => {
-      const state = parseBuiltInThemeState(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.themeSystemState),
-      );
-      if (state.preference !== "system") {
-        throw new Error("Main returned a non-system appearance for the system preview");
-      }
-      return state;
-    },
+    getThemeState: async () => invokeDesktop("themeState"),
+    getSystemThemeState: () => invokeDesktop("themeSystemState"),
     setThemePreference: async (preference: ThemePreference) =>
-      parseBuiltInThemeState(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.themeSet,
-          themePreferenceSchema.parse(preference),
-        ),
-      ),
-    setThemeDesign: async (design: ThemeDesign) =>
-      parseBuiltInThemeState(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.themeDesignSet, themeDesignSchema.parse(design)),
-      ),
+      invokeDesktop("themeSet", preference),
+    setThemeDesign: async (design: ThemeDesign) => invokeDesktop("themeDesignSet", design),
     onThemeStateChanged: (listener: (state: ThemeState) => void) =>
       subscribe(DESKTOP_CHANNELS.themeChanged, listener, isBuiltInThemeState),
-    getCompactMode: async () =>
-      compactModePreferenceSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.compactModeState),
-      ),
-    setCompactMode: async (enabled: boolean) =>
-      compactModePreferenceSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.compactModeSet,
-          compactModePreferenceSchema.parse(enabled),
-        ),
-      ),
+    getCompactMode: async () => invokeDesktop("compactModeState"),
+    setCompactMode: async (enabled: boolean) => invokeDesktop("compactModeSet", enabled),
     onCompactModeChanged: (listener: (enabled: boolean) => void) =>
       subscribe(
         DESKTOP_CHANNELS.compactModeChanged,
         listener,
         (value): value is boolean => compactModePreferenceSchema.safeParse(value).success,
       ),
-    getDevicePreferences: async () =>
-      parseBoundedIpcPayload(
-        devicePreferencesSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.devicePreferencesState),
-        DEVICE_PREFERENCES_IPC_MAX_BYTES,
-      ),
+    getDevicePreferences: async () => invokeDesktop("devicePreferencesState"),
     updateDevicePreferences: async (patch: DevicePreferencesPatch) => {
-      const request = parseBoundedIpcPayload(
-        devicePreferencesPatchSchema,
-        patch,
-        DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
-      );
-      return parseBoundedIpcPayload(
-        devicePreferencesSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.devicePreferencesUpdate, request),
-        DEVICE_PREFERENCES_IPC_MAX_BYTES,
-      );
+      return invokeDesktop("devicePreferencesUpdate", patch);
     },
     onDevicePreferencesChanged: (listener: (preferences: DevicePreferences) => void) =>
       subscribeToBoundedIpcPayload(
@@ -315,83 +167,18 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         DEVICE_PREFERENCES_IPC_MAX_BYTES,
         listener,
       ),
-    getAiChannelState: async () =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelState),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+    getAiChannelState: async () => invokeDesktop("aiChannelState"),
     startAiChannel: async (input: AiChannelGenerationRequest) =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.aiChannelStart,
-          parseBoundedIpcPayload(
-            aiChannelGenerationRequestSchema,
-            input,
-            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-          ),
-        ),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
-    chooseAiChannelWorkspace: async () =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.aiChannelWorkspaceChoose),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+      invokeDesktop("aiChannelStart", input),
+    chooseAiChannelWorkspace: async () => invokeDesktop("aiChannelWorkspaceChoose"),
     newAiChannelSession: async (input: AiChannelGenerationRequest) =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.aiChannelSessionNew,
-          parseBoundedIpcPayload(
-            aiChannelGenerationRequestSchema,
-            input,
-            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-          ),
-        ),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+      invokeDesktop("aiChannelSessionNew", input),
     sendAiChannelPrompt: async (input: AiChannelPromptRequest) =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.aiChannelPromptSend,
-          parseBoundedIpcPayload(
-            aiChannelPromptRequestSchema,
-            input,
-            AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
-          ),
-        ),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+      invokeDesktop("aiChannelPromptSend", input),
     cancelAiChannelPrompt: async (input: AiChannelGenerationRequest) =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.aiChannelPromptCancel,
-          parseBoundedIpcPayload(
-            aiChannelGenerationRequestSchema,
-            input,
-            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-          ),
-        ),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+      invokeDesktop("aiChannelPromptCancel", input),
     respondAiChannelPermission: async (input: AiChannelPermissionResponse) =>
-      parseBoundedIpcPayload(
-        aiChannelStateSchema,
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.aiChannelPermissionRespond,
-          parseBoundedIpcPayload(
-            aiChannelPermissionResponseSchema,
-            input,
-            AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
-          ),
-        ),
-        AI_CHANNEL_STATE_IPC_MAX_BYTES,
-      ),
+      invokeDesktop("aiChannelPermissionRespond", input),
     onAiChannelStateChanged: (listener: (state: AiChannelState) => void) =>
       subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.aiChannelChanged,
@@ -399,86 +186,31 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         AI_CHANNEL_STATE_IPC_MAX_BYTES,
         listener,
       ),
-    getServerStatus: () =>
-      ipcRenderer.invoke(DESKTOP_CHANNELS.serverStatus) as Promise<ServerStatus>,
-    getProtocolHandlerState: async () =>
-      protocolHandlerStateSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.protocolHandlerState),
-      ),
-    getSessionState: async () =>
-      chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionState)),
-    retrySession: async () =>
-      chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionRetry)),
-    getAuthCapabilities: async () =>
-      authCapabilitiesSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionAuthCapabilities),
-      ),
-    startAuthKitSignIn: async () => {
-      const response: unknown = await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionStartAuthKit);
-      if (response !== undefined) {
-        throw new TypeError("AuthKit sign-in returned an unexpected payload");
-      }
-    },
+    getServerStatus: () => invokeDesktop("serverStatus"),
+    getProtocolHandlerState: async () => invokeDesktop("protocolHandlerState"),
+    getSessionState: async () => invokeDesktop("sessionState"),
+    retrySession: async () => invokeDesktop("sessionRetry"),
+    getAuthCapabilities: async () => invokeDesktop("sessionAuthCapabilities"),
+    startAuthKitSignIn: () => invokeDesktop("sessionStartAuthKit"),
     requestMagicLink: async (email: string) => {
-      const request = requestMagicLinkSchema.parse({ email });
-      return magicLinkDeliveryStateSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionRequestMagicLink, request),
-      );
+      const request = { email };
+      return await invokeDesktop("sessionRequestMagicLink", request);
     },
-    signOut: async () =>
-      chatSessionStateSchema.parse(await ipcRenderer.invoke(DESKTOP_CHANNELS.sessionSignOut)),
+    signOut: async () => invokeDesktop("sessionSignOut"),
     onSessionChanged: (listener: (state: ChatSessionState) => void) =>
       subscribe(
         DESKTOP_CHANNELS.sessionChanged,
         listener,
         (value): value is ChatSessionState => chatSessionStateSchema.safeParse(value).success,
       ),
-    getNotificationContext: async () =>
-      parseBoundedIpcPayload(
-        notificationContextSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationContext),
-        NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
-      ),
-    reportNotificationActivity: async (activity: NotificationActivityUpdate) => {
-      const request = parseBoundedIpcPayload(
-        notificationActivityUpdateSchema,
-        activity,
-        NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
-      );
-      const response: unknown = await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.notificationActivityUpdate,
-        request,
-      );
-      if (response !== undefined) {
-        throw new TypeError("Notification activity update returned an unexpected payload");
-      }
-    },
+    getNotificationContext: async () => invokeDesktop("notificationContext"),
+    reportNotificationActivity: (activity: NotificationActivityUpdate) =>
+      invokeDesktop("notificationActivityUpdate", activity),
     drainNotificationActions: async (ready: NotificationActionDrainRequest) => {
-      const request = parseBoundedIpcPayload(
-        notificationActionDrainRequestSchema,
-        ready,
-        NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
-      );
-      return parseBoundedIpcPayload(
-        notificationActionDrainResponseSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationActionsDrain, request),
-        NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
-      );
+      return invokeDesktop("notificationActionsDrain", ready);
     },
-    acknowledgeNotificationAction: async (acknowledgement: NotificationActionAcknowledgement) => {
-      const request = parseBoundedIpcPayload(
-        notificationActionAcknowledgementSchema,
-        acknowledgement,
-        NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
-      );
-      const response: unknown = await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.notificationActionAcknowledge,
-        request,
-      );
-      if (response !== undefined) {
-        throw new TypeError("Notification action acknowledgement returned an unexpected payload");
-      }
-    },
+    acknowledgeNotificationAction: (acknowledgement: NotificationActionAcknowledgement) =>
+      invokeDesktop("notificationActionAcknowledge", acknowledgement),
     onNotificationAction: (listener: (action: NotificationAction) => void) =>
       subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.notificationAction,
@@ -486,30 +218,11 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         NOTIFICATION_ACTION_IPC_MAX_BYTES,
         listener,
       ),
-    getNotificationState: async () =>
-      parseBoundedIpcPayload(
-        notificationStateSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationState),
-        NOTIFICATION_STATE_IPC_MAX_BYTES,
-      ),
+    getNotificationState: async () => invokeDesktop("notificationState"),
     setNotificationPreference: async (preference: NotificationPreference) => {
-      const request = parseBoundedIpcPayload(
-        notificationPreferenceSchema,
-        preference,
-        NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
-      );
-      return parseBoundedIpcPayload(
-        notificationStateSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationPreferenceSet, request),
-        NOTIFICATION_STATE_IPC_MAX_BYTES,
-      );
+      return invokeDesktop("notificationPreferenceSet", preference);
     },
-    refreshNotificationCapability: async () =>
-      parseBoundedIpcPayload(
-        notificationStateSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationCapabilityRefresh),
-        NOTIFICATION_STATE_IPC_MAX_BYTES,
-      ),
+    refreshNotificationCapability: async () => invokeDesktop("notificationCapabilityRefresh"),
     onNotificationStateChanged: (listener: (state: NotificationState) => void) =>
       subscribeToBoundedIpcPayload(
         DESKTOP_CHANNELS.notificationStateChanged,
@@ -521,165 +234,78 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       if (!isHeadless) {
         throw new Error("Captured notification activation is available only in headless mode");
       }
-      const request = parseBoundedIpcPayload(
-        notificationCaptureActivationRequestSchema,
-        { version: 1, captureId },
-        NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-      );
-      const response = parseBoundedIpcPayload(
-        notificationCaptureActivationResponseSchema,
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.notificationCaptureActivate, request),
-        NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
-      );
+      const request = { version: 1 as const, captureId };
+      const response = await invokeDesktop("notificationCaptureActivate", request);
       return response.activated;
     },
-    initializeCacheCrypto: async () =>
-      cacheCryptoStatusSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoInitialize),
-      ),
+    initializeCacheCrypto: async () => invokeDesktop("cacheCryptoInitialize"),
     encryptCacheRecords: async (input: CacheEncryptBatchRequest) =>
-      cacheEncryptBatchResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.cacheCryptoEncrypt,
-          cacheEncryptBatchRequestSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("cacheCryptoEncrypt", input),
     decryptCacheRecords: async (input: CacheDecryptBatchRequest) =>
-      cacheDecryptBatchResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.cacheCryptoDecrypt,
-          cacheDecryptBatchRequestSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("cacheCryptoDecrypt", input),
     resetCacheCrypto: async () => {
-      await ipcRenderer.invoke(DESKTOP_CHANNELS.cacheCryptoReset);
+      await invokeDesktop("cacheCryptoReset");
     },
-    getWorkspaceBootstrap: async () =>
-      humanWorkspaceBootstrapResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceBootstrap),
-      ),
-    listWorkspaceMembers: async () =>
-      listMembersResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMembersList),
-      ),
-    getCommunicationPaths: async () =>
-      communicationPathsResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAdminCommunicationPaths),
-      ),
-    listAgentEnrollments: async () =>
-      listAgentEnrollmentsResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAgentEnrollmentsList),
-      ),
+    getWorkspaceBootstrap: async () => invokeDesktop("workspaceBootstrap"),
+    listWorkspaceMembers: async () => invokeDesktop("workspaceMembersList"),
+    getCommunicationPaths: async () => invokeDesktop("workspaceAdminCommunicationPaths"),
+    listAgentEnrollments: async () => invokeDesktop("workspaceAgentEnrollmentsList"),
     reviewAgentEnrollment: async (
       enrollmentId: string,
       decision: ReviewAgentEnrollmentRequest["decision"],
     ) => {
-      const parsedId = entityIdSchema.parse(enrollmentId);
-      const parsedDecision = reviewAgentEnrollmentRequestSchema.parse({ decision }).decision;
-      return agentEnrollmentResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceAgentEnrollmentReview,
-          parsedId,
-          parsedDecision,
-        ),
-      );
+      return invokeDesktop("workspaceAgentEnrollmentReview", enrollmentId, decision);
     },
     cancelAgentEnrollment: async (enrollmentId: string) =>
-      agentEnrollmentResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceAgentEnrollmentCancel,
-          entityIdSchema.parse(enrollmentId),
-        ),
-      ),
+      invokeDesktop("workspaceAgentEnrollmentCancel", enrollmentId),
     updateProfile: async (title: string | null): Promise<User> =>
-      updateProfileResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceProfileUpdate, title),
-      ).user,
+      (await invokeDesktop("workspaceProfileUpdate", title)).user,
     listConversations: async (input: Partial<ListConversationsQuery> = {}) =>
-      listConversationsResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceConversationsList,
-          listConversationsQuerySchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceConversationsList", input),
     getConversationMessages: async (input: {
       readonly conversationId: string;
       readonly before?: string;
       readonly limit?: number;
-    }) =>
-      messageHistoryResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessagesList, input),
-      ),
-    getMessageById: async (messageId: string) =>
-      messageByIdResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceMessageGet,
-          entityIdSchema.parse(messageId),
-        ),
-      ),
+    }) => invokeDesktop("workspaceMessagesList", input),
+    getMessageById: async (messageId: string) => invokeDesktop("workspaceMessageGet", messageId),
     retractMessage: async (messageId: string) =>
-      retractMessageResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceMessageRetract,
-          entityIdSchema.parse(messageId),
-        ),
-      ),
+      invokeDesktop("workspaceMessageRetract", messageId),
     getMessageThread: async (input: {
       readonly messageId: string;
       readonly before?: string;
       readonly limit?: number;
     }) => {
-      const request = messageThreadRequestSchema.parse(input);
-      return messageThreadResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceMessageThread, request),
-      );
+      return invokeDesktop("workspaceMessageThread", input);
     },
     listMessageReactions: async (messageIds: readonly string[]) => {
-      const request = listMessageReactionsRequestSchema.parse({ messageIds });
-      return listMessageReactionsResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionsList, request),
-      );
+      const request = { messageIds: [...messageIds] };
+      return await invokeDesktop("workspaceReactionsList", request);
     },
     addMessageReaction: async (messageId: string, emoji: ReactionEmoji) => {
-      const target = messageReactionTargetSchema.parse({ messageId, emoji });
-      return addReactionResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionAdd, target),
-      );
+      const target = { messageId, emoji };
+      return await invokeDesktop("workspaceReactionAdd", target);
     },
     removeMessageReaction: async (messageId: string, emoji: ReactionEmoji) => {
-      const target = messageReactionTargetSchema.parse({ messageId, emoji });
-      return removeReactionResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReactionRemove, target),
-      );
+      const target = { messageId, emoji };
+      return await invokeDesktop("workspaceReactionRemove", target);
     },
     searchMessages: async (input: MessageSearchQuery) =>
-      messageSearchResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceMessageSearch,
-          messageSearchQuerySchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceMessageSearch", input),
     listConversationFiles: async (
       conversationId: string,
       input: Partial<ConversationFilesQuery> = {},
     ) =>
-      conversationFilesResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceConversationFilesList, {
-          conversationId,
-          query: conversationFilesQuerySchema.parse(input),
-        }),
-      ),
+      invokeDesktop("workspaceConversationFilesList", {
+        conversationId,
+        query: input,
+      }),
     listMessageAttachments: async (messageIds: readonly string[]) => {
-      const request = listMessageAttachmentsRequestSchema.parse({ messageIds });
-      return listMessageAttachmentsResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceAttachmentsList, request),
-      );
+      const request = { messageIds: [...messageIds] };
+      return await invokeDesktop("workspaceAttachmentsList", request);
     },
     chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
-      const request = attachmentUploadRequestSchema.parse({ conversationId, maxFiles });
-      const result = attachmentUploadResultSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceFileUpload, request),
-      );
+      const request = { conversationId, maxFiles };
+      const result = await invokeDesktop("workspaceFileUpload", request);
       if (
         (result.status === "completed" || result.status === "partial") &&
         result.attachments.length > request.maxFiles
@@ -689,143 +315,68 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
       return result;
     },
     openConversationFile: async (attachmentId: string) =>
-      openAttachmentResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceFileOpen,
-          entityIdSchema.parse(attachmentId),
-        ),
-      ),
+      invokeDesktop("workspaceFileOpen", attachmentId),
     listConversationTasks: async (conversationId: string, input: Partial<TaskListQuery> = {}) =>
-      taskListResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceTasksList, {
-          conversationId,
-          query: taskListQuerySchema.parse(input),
-        }),
-      ),
+      invokeDesktop("workspaceTasksList", {
+        conversationId,
+        query: input,
+      }),
     listMyTasks: async (input: Partial<TaskListQuery> = {}) =>
-      taskListResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceMyTasksList,
-          taskListQuerySchema.parse(input),
-        ),
-      ),
-    createTask: async (input: CreateTaskOperation) =>
-      taskMutationResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceTaskCreate,
-          createTaskOperationSchema.parse(input),
-        ),
-      ),
-    updateTask: async (input: UpdateTaskOperation) =>
-      taskMutationResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceTaskUpdate,
-          updateTaskOperationSchema.parse(input),
-        ),
-      ),
-    moveTask: async (input: MoveTaskOperation) =>
-      taskMutationResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceTaskMove,
-          moveTaskOperationSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceMyTasksList", input),
+    createTask: async (input: CreateTaskOperation) => invokeDesktop("workspaceTaskCreate", input),
+    updateTask: async (input: UpdateTaskOperation) => invokeDesktop("workspaceTaskUpdate", input),
+    moveTask: async (input: MoveTaskOperation) => invokeDesktop("workspaceTaskMove", input),
     sendConversationMessage: async (input: SendMessageOperation) =>
-      sendAttemptResultSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceMessageSend,
-          sendMessageOperationSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceMessageSend", input),
     createChannel: async (input: CreateChannelOperation) =>
-      conversationMutationResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceChannelCreate,
-          createChannelOperationSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceChannelCreate", input),
     archiveChannel: async (conversationId: string) =>
-      conversationMutationResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelArchive, conversationId),
-      ),
+      invokeDesktop("workspaceChannelArchive", conversationId),
     getChannelMembers: async (conversationId: string) =>
-      channelMembersResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMembersList, conversationId),
-      ),
+      invokeDesktop("workspaceChannelMembersList", conversationId),
     upsertChannelMember: async (
       conversationId: string,
       userId: string,
       role: "owner" | "member",
     ) => {
-      const operation = upsertChannelMemberOperationSchema.parse({
+      const operation = {
         conversationId,
         userId,
-        ...upsertChannelMemberRequestSchema.parse({ role }),
-      });
-      return channelMembershipMutationResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMemberUpsert, operation),
-      );
+        ...{ role },
+      };
+      return await invokeDesktop("workspaceChannelMemberUpsert", operation);
     },
     removeChannelMember: async (conversationId: string, userId: string) => {
-      const target = channelMemberTargetSchema.parse({
+      const target = {
         conversationId,
         userId,
-      });
-      return channelMembershipMutationResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceChannelMemberRemove, target),
-      );
+      };
+      return await invokeDesktop("workspaceChannelMemberRemove", target);
     },
     createDirectConversation: async (input: DirectConversationRequest) =>
-      conversationMutationResponseSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceDirectCreate,
-          directConversationRequestSchema.parse(input),
-        ),
-      ),
+      invokeDesktop("workspaceDirectCreate", input),
     advanceReadCursor: async (conversationId: string, lastReadMessageId: string) => {
       if (isHeadless) {
         throw new Error("Read cursors are disabled for headless automation clients");
       }
-      return advanceReadCursorResponseSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceReadAdvance, {
-          conversationId,
-          lastReadMessageId,
-        }),
-      );
+      return await invokeDesktop("workspaceReadAdvance", {
+        conversationId,
+        lastReadMessageId,
+      });
     },
-    syncWorkspace: async (after: string) =>
-      syncAttemptResultSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.workspaceSync, sequenceSchema.parse(after)),
-      ),
+    syncWorkspace: async (after: string) => invokeDesktop("workspaceSync", after),
     startWorkspaceRealtime: async (after: string): Promise<RealtimeSessionScope> =>
-      realtimeSessionScopeSchema.parse(
-        await ipcRenderer.invoke(
-          DESKTOP_CHANNELS.workspaceRealtimeStart,
-          sequenceSchema.parse(after),
-        ),
-      ),
+      invokeDesktop("workspaceRealtimeStart", after),
     activateWorkspaceRealtime: async (scope: RealtimeSessionScope) => {
-      await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceRealtimeActivate,
-        realtimeSessionScopeSchema.parse(scope),
-      );
+      await invokeDesktop("workspaceRealtimeActivate", scope);
     },
     stopWorkspaceRealtime: async (scope?: RealtimeSessionScope) => {
-      await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceRealtimeStop,
-        scope === undefined ? undefined : realtimeSessionScopeSchema.parse(scope),
-      );
+      await invokeDesktop("workspaceRealtimeStop", scope === undefined ? undefined : scope);
     },
     acknowledgeWorkspaceEvent: async (input: RealtimeAcknowledgement) => {
-      await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceRealtimeAcknowledge,
-        realtimeAcknowledgementSchema.parse(input),
-      );
+      await invokeDesktop("workspaceRealtimeAcknowledge", input);
     },
-    getRealtimeState: async () =>
-      realtimeConnectionStateSchema.parse(
-        await ipcRenderer.invoke(DESKTOP_CHANNELS.realtimeStateGet),
-      ),
+    getRealtimeState: async () => invokeDesktop("realtimeStateGet"),
     onRealtimeStateChanged: (listener: (state: RealtimeConnectionState) => void) =>
       subscribe(
         DESKTOP_CHANNELS.realtimeStateChanged,
@@ -841,10 +392,7 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
           scopedProductRealtimeEventSchema.safeParse(value).success,
       ),
     setWorkspaceTyping: async (input: ScopedTypingActivityUpdate) => {
-      await ipcRenderer.invoke(
-        DESKTOP_CHANNELS.workspaceActivityTypingSet,
-        scopedTypingActivityUpdateSchema.parse(input),
-      );
+      await invokeDesktop("workspaceActivityTypingSet", input);
     },
     onWorkspaceActivity: (listener: (frame: ScopedEphemeralActivityFrame) => void) =>
       subscribe(
