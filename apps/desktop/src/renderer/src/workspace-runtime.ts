@@ -2535,7 +2535,8 @@ export class WorkspaceRuntime {
   }
 
   hasOlder(conversationId: string): boolean {
-    return this.#historyCursors.get(conversationId) !== null;
+    const cursor = this.#historyCursors.get(conversationId);
+    return cursor !== null && (!this.#offlineOnly || cursor !== undefined);
   }
 
   #directConversationId(memberId: string): string | null {

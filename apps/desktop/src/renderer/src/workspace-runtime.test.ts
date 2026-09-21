@@ -2018,6 +2018,7 @@ describe("WorkspaceRuntime", () => {
       expect(runtime.state.reactions).toEqual([secondReaction]);
       expect(load.mock.calls).toEqual([[{ conversationId: SECOND_CONVERSATION_ID }]]);
       if (offline) {
+        expect(runtime.hasOlder(SECOND_CONVERSATION_ID)).toBe(false);
         expect(api.historyRequests).toEqual([]);
         await runtime.sendMessage(SECOND_CONVERSATION_ID, "Queued from restored cache", []);
         expect((await cache.load()).outbox).toHaveLength(1);
