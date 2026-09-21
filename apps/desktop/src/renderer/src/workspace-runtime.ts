@@ -1115,13 +1115,19 @@ export class WorkspaceRuntime {
 
   markConversationReadThrough(conversationId: string, messageId: string): void {
     if (this.#offlineOnly) return;
-    const message = this.#state.messages.find(
-      (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
-    );
     const summary = this.#state.bootstrap?.conversations.find(
       (candidate) => candidate.conversation.id === conversationId,
     );
-    if (message === undefined || summary === undefined) return;
+    if (summary === undefined) return;
+    const message =
+      this.#state.messages.find(
+        (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
+      ) ??
+      (summary.lastMessage?.id === messageId &&
+      summary.lastMessage.conversationId === conversationId
+        ? summary.lastMessage
+        : undefined);
+    if (message === undefined) return;
     const targetSequence = message.conversationSequence;
     const currentSequence = summary.readCursor?.lastReadConversationSequence;
     const tracked = this.#readTargets.get(conversationId);
@@ -1153,6 +1159,30 @@ export class WorkspaceRuntime {
     this.#sendReadTarget(conversationId, target, this.#generation);
   }
 
+  markConversationAsRead(conversationId: string): void {
+    if (this.#offlineOnly || this.#state.bootstrap === null) return;
+    const summary = this.#state.bootstrap.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (summary === undefined) return;
+    if (summary.unreadCount === 0 && summary.mentionCount === 0) return;
+    const targetMessage = summary.lastMessage;
+    if (targetMessage === null) return;
+
+    this.#setState({
+      bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
+        if (current === undefined) return null;
+        return {
+          ...current,
+          unreadCount: 0,
+          mentionCount: 0,
+        };
+      }),
+    });
+
+    this.markConversationReadThrough(conversationId, targetMessage.id);
+  }
+
   #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
     if (
       generation !== this.#generation ||
@@ -1177,7 +1207,14 @@ export class WorkspaceRuntime {
             ) {
               return current;
             }
-            return { ...current, readCursor: result.readCursor };
+            const clearsUnreads =
+              current.lastMessage === null ||
+              BigInt(projectedSequence) >= BigInt(current.lastMessage.conversationSequence);
+            return {
+              ...current,
+              readCursor: result.readCursor,
+              ...(clearsUnreads ? { unreadCount: 0, mentionCount: 0 } : {}),
+            };
           }),
         });
         if (this.#readTargets.get(conversationId) === target) {
