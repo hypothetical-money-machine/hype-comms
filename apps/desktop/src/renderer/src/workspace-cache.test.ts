@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cacheDecryptBatchResponseSchema,
@@ -216,6 +216,109 @@ afterEach(async () => {
 });
 
 describe("PersistentWorkspaceCache", () => {
+  it("decrypts only the requested conversation's history", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    const otherId = "10000000-0000-4000-8000-00000000000b";
+    const otherMessage = {
+      ...message,
+      id: "10000000-0000-4000-8000-00000000000c",
+      clientMessageId: "10000000-0000-4000-8000-00000000000d",
+      conversationId: otherId,
+    };
+    await cache.replaceSnapshot(
+      {
+        ...bootstrap,
+        conversations: [
+          ...bootstrap.conversations,
+          {
+            ...bootstrap.conversations[0]!,
+            conversation: {
+              ...bootstrap.conversations[0]!.conversation,
+              id: otherId,
+              slug: "other",
+            },
+          },
+        ],
+      },
+      [message, otherMessage],
+    );
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    await cache.load({ conversationId: null });
+    expect(
+      decrypt.mock.calls.flatMap(([input]) => input.items).some((item) => item.store === "message"),
+    ).toBe(false);
+    decrypt.mockClear();
+    const loaded = await cache.load({ conversationId: CONVERSATION_ID });
+    expect(loaded.messages).toEqual([message]);
+    expect(
+      decrypt.mock.calls
+        .flatMap(([input]) => input.items)
+        .filter((item) => item.store === "message")
+        .map((item) => item.recordId),
+    ).toEqual([MESSAGE_ID]);
+  });
+
+  it("refreshes the catalog without decrypting or encrypting unchanged history", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message], [reaction]);
+    await cache.enqueue(operation);
+    const before = await cache.load();
+    const encrypt = vi.spyOn(crypto, "encryptCacheRecords");
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        workspace: { ...bootstrap.workspace, name: "New name" },
+      }),
+    ).not.toBeNull();
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(encrypt.mock.calls.flatMap(([input]) => input.items.map((item) => item.store))).toEqual([
+      "workspace",
+      "member",
+      "conversation",
+    ]);
+    const after = await cache.load();
+    expect(after.messages).toEqual(before.messages);
+    expect(after.reactions).toEqual(before.reactions);
+    expect(after.outbox).toEqual(before.outbox);
+  });
+
+  it("rejects a metadata refresh when its cursor changes during encryption", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message]);
+    const encrypt = crypto.encryptCacheRecords.bind(crypto);
+    vi.spyOn(crypto, "encryptCacheRecords").mockImplementationOnce(async (input) => {
+      await cache.advanceCursor("1");
+      return encrypt(input);
+    });
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        workspace: { ...bootstrap.workspace, name: "Stale name" },
+      }),
+    ).toBeNull();
+    const state = await cache.load();
+    expect(state.bootstrap?.workspace.name).toBe(bootstrap.workspace.name);
+    expect(state.syncCursor).toBe("1");
+    expect(state.messages).toEqual([message]);
+  });
+
+  it("reads committed sync progress without decrypting history", async () => {
+    const crypto = new FakeCrypto();
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    expect(await cache.loadSyncCursor()).toBeNull();
+    await cache.replaceSnapshot(bootstrap, []);
+    expect(await cache.loadSyncCursor()).toBe(bootstrap.syncCursor);
+    await cache.advanceCursor("100");
+    expect(await cache.loadSyncCursor()).toBe("100");
+    expect(decrypt).not.toHaveBeenCalled();
+    expect((await cache.load()).syncCursor).toBe("100");
+  });
+
   it("derives personalized roles for group creation events in both cache implementations", async () => {
     const creatorGroupId = "10000000-0000-4000-8000-00000000000a";
     const inviteeGroupId = "10000000-0000-4000-8000-00000000000b";

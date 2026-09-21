@@ -17,6 +17,27 @@ afterEach(() => {
 });
 
 describe("message date separators", () => {
+  it("uses local calendar fields across midnight and year boundaries without constructing formatters", () => {
+    const formatter = vi.spyOn(Intl, "DateTimeFormat");
+    try {
+      const before = new Date(2025, 11, 31, 23, 59, 59).toISOString();
+      const after = new Date(2026, 0, 1, 0, 0, 1).toISOString();
+      expect(messageDayKey(before)).toBe("2025-12-31");
+      expect(messageDayKey(after)).toBe("2026-01-01");
+      expect(shouldShowDateSeparator(after, before)).toBe(true);
+      expect(shouldShowDateSeparator(after, after)).toBe(false);
+      expect(messageDateLabel(before, new Date(after))).toBe("Yesterday");
+      expect(formatter).not.toHaveBeenCalled();
+    } finally {
+      formatter.mockRestore();
+    }
+  });
+
+  it("rejects invalid timestamps in both local and explicit timezone paths", () => {
+    expect(() => messageDayKey("invalid")).toThrow();
+    expect(() => messageDayKey("invalid", "UTC")).toThrow();
+  });
+
   it("uses the viewer's calendar day instead of the UTC date", () => {
     expect(messageDayKey("2026-07-26T06:30:00.000Z", "America/Los_Angeles")).toBe("2026-07-25");
     expect(
