@@ -26,7 +26,7 @@ import {
   lockHumanActivationSyncAudienceMemberships,
   publishHumanActivationSyncEvents,
 } from "./repository.js";
-import { issueToken } from "./tokens.js";
+import { hashToken, issueToken } from "./tokens.js";
 
 const AUTHKIT_HANDOFF_TTL_MS = 5 * 60 * 1_000;
 const WORKOS_EVENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -199,10 +199,6 @@ export class AuthKitCredentialRejectedError extends Error {
     super("AuthKit credential was rejected");
     this.name = "AuthKitCredentialRejectedError";
   }
-}
-
-function hashCredential(credential: string): Buffer {
-  return createHash("sha256").update(credential, "utf8").digest();
 }
 
 function requirePattern(value: string, pattern: RegExp, description: string): string {
@@ -514,7 +510,7 @@ export class AuthKitRepository {
     const desktopAuthVariant = desktopAuthVariantSchema.parse(input.desktopAuthVariant);
     const expiresAt = requireDate(input.expiresAt, "a transaction expiry date");
     const id = randomUUID();
-    const providerStateHash = hashCredential(providerState);
+    const providerStateHash = hashToken(providerState);
     const associatedData = transactionAssociatedData({
       id,
       providerStateHash,
@@ -562,7 +558,7 @@ export class AuthKitRepository {
       "an opaque OAuth state value",
     );
     const now = requireDate(nowValue, "a transaction consumption date");
-    const providerStateHash = hashCredential(providerState);
+    const providerStateHash = hashToken(providerState);
 
     return withTransaction(this.#pool, async (client) => {
       const result = await client.query<AuthKitTransactionRow>(
@@ -745,7 +741,7 @@ export class AuthKitRepository {
             AND handoff.consumed_at IS NULL
             AND handoff.expires_at > $2
           FOR UPDATE OF handoff, membership`,
-        [hashCredential(handoffCode), now],
+        [hashToken(handoffCode), now],
       );
       const handoff = result.rows[0];
       if (
