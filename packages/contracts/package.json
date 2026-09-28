@@ -11,10 +11,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./wake-node": {
-      "types": "./dist/wake-node.d.ts",
-      "default": "./dist/wake-node.js"
     }
   },
   "scripts": {
@@ -31,6 +27,6 @@
   },
   "devDependencies": {
     "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   }
 }
