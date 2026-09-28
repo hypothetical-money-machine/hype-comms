@@ -1,5 +1,4 @@
 declare const __HYPE_COMMS_APPLICATION_ID__: string;
-declare const __HYPE_COMMS_AGENT_WAKE_ENABLED__: boolean;
 declare const __HYPE_COMMS_API_ORIGIN__: string;
 declare const __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__: "hype-comms" | "hype-comms-dev";
 declare const __HYPE_COMMS_BUILD_FLAVOR__: "development" | "production";
@@ -8,4 +7,3 @@ declare const __HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED__: boolean
 declare const __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: boolean;
 declare const __HYPE_COMMS_PRODUCT_NAME__: string;
 declare const __HYPE_COMMS_PRODUCTION_CSP__: string;
-declare const __HYPE_COMMS_UPDATES_ALLOWED__: boolean;
