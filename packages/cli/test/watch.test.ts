@@ -20,11 +20,7 @@ import {
 import { executeCli } from "../src/cli.js";
 import { RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
 import { MAX_RETRY_AFTER_MS } from "../src/errors.js";
-import {
-  PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT,
-  laterCursor,
-  watchRetryDelayMs,
-} from "../src/watch.js";
+import { laterCursor, watchRetryDelayMs } from "../src/watch.js";
 import {
   bootstrap,
   CLIENT_MESSAGE_ID,
@@ -223,7 +219,7 @@ describe("watch", () => {
     });
   });
 
-  it("streams replay beyond the wake-only pre-handshake buffer limit", async () => {
+  it("streams a large replay incrementally before the handshake", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -260,7 +256,7 @@ describe("watch", () => {
           mentionedUserIds: [],
         },
       });
-      for (let index = 0; index <= PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT; index += 1) {
+      for (let index = 0; index <= 1_200; index += 1) {
         socket.send(frame);
       }
       socket.send(
@@ -323,9 +319,9 @@ describe("watch", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; payload?: { reason?: string } });
-    expect(records).toHaveLength(PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 3);
+    expect(records).toHaveLength(1_200 + 3);
     expect(records[0]).toMatchObject({ type: "message.created" });
-    expect(records[PRODUCT_REALTIME_PENDING_REPLAY_EVENT_LIMIT + 1]).toMatchObject({
+    expect(records[1_200 + 1]).toMatchObject({
       type: "system.connected",
     });
     expect(records.at(-1)).toMatchObject({
@@ -374,16 +370,11 @@ describe("watch", () => {
     const script = `
       process.env.HYPE_COMMS_API_ORIGIN = ${JSON.stringify(origin)};
       process.env.HYPE_COMMS_TOKEN = ${JSON.stringify(`hype_comms_agent_${"a".repeat(43)}`)};
-      process.argv = [process.execPath, "hype-comms-cli", "wake", "watch", "--json", "--after", "5"];
+      process.argv = [process.execPath, "hype-comms-cli", "watch", "--json", "--after", "5"];
       globalThis.fetch = async (input) => {
         const pathname = new URL(String(input)).pathname;
-        const value = pathname === "/v1/agent-wake/bootstrap"
-          ? {
-              agentUserId: ${JSON.stringify(USER_ID)},
-              workspaceId: ${JSON.stringify(WORKSPACE_ID)},
-              highWaterCursor: "5",
-              conversations: [],
-            }
+        const value = pathname === "/v1/bootstrap"
+          ? ${JSON.stringify(bootstrap())}
           : pathname === "/v1/realtime/tickets"
             ? {
             ticket: "ticket_value_that_is_at_least_32_chars",

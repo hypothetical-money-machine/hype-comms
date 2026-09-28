@@ -6,7 +6,6 @@ import { defineConfig } from "electron-vite";
 import type { Plugin } from "vite";
 
 import { isReservedInvalidHostname } from "./api-origin-policy.mjs";
-import { resolveAgentWakePackageEvidence, resolveAgentWakeRollout } from "./agent-wake-rollout.mjs";
 import { resolveDesktopBuildFlavor } from "./build-flavor.mjs";
 import {
   DEFAULT_DEVELOPMENT_API_ORIGIN,
@@ -57,11 +56,6 @@ export default defineConfig(({ command }) => {
   const nativeNotificationsEnabled = resolveNativeNotificationRollout(
     process.env.HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED,
   );
-  const agentWakeEnabled = resolveAgentWakeRollout(process.env.HYPE_COMMS_AGENT_WAKE_ENABLED);
-  const agentWakePackageEvidenceEnabled = resolveAgentWakePackageEvidence(
-    process.env.HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED,
-    agentWakeEnabled,
-  );
   const macosNativeNotificationEvidenceEnabled = resolveMacosNativeNotificationEvidence(
     process.env.HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED,
     nativeNotificationsEnabled,
@@ -90,7 +84,6 @@ export default defineConfig(({ command }) => {
       plugins: [desktopBuildMetadata(apiOrigin)],
       define: {
         __HYPE_COMMS_APPLICATION_ID__: JSON.stringify(buildFlavor.appId),
-        __HYPE_COMMS_AGENT_WAKE_ENABLED__: JSON.stringify(agentWakeEnabled),
         __HYPE_COMMS_API_ORIGIN__: JSON.stringify(apiOrigin),
         __HYPE_COMMS_AUTH_PROTOCOL_SCHEME__: JSON.stringify(buildFlavor.protocolScheme),
         __HYPE_COMMS_BUILD_FLAVOR__: JSON.stringify(buildFlavor.name),
@@ -101,7 +94,6 @@ export default defineConfig(({ command }) => {
         __HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED__: JSON.stringify(nativeNotificationsEnabled),
         __HYPE_COMMS_PRODUCT_NAME__: JSON.stringify(buildFlavor.productName),
         __HYPE_COMMS_PRODUCTION_CSP__: JSON.stringify(PRODUCTION_CONTENT_SECURITY_POLICY),
-        __HYPE_COMMS_UPDATES_ALLOWED__: JSON.stringify(!agentWakePackageEvidenceEnabled),
       },
       build: {
         outDir: path.join(desktopRoot, "dist/main"),
