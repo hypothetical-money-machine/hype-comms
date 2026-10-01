@@ -16,7 +16,7 @@ import {
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import type { Pool, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { attachmentsForMessages } from "./attachment-queries.js";
 import {
@@ -83,10 +83,10 @@ export class WorkspaceAttachmentOperations {
     const fileName = sanitizeFileName(input.fileName);
     const contentType = input.contentType.trim();
     if (isRejectedAttachment(fileName, contentType)) {
-      throw new ApiError(400, "BAD_REQUEST", "Executable files are not allowed");
+      throw new DomainError("invalid_input", "Executable files are not allowed");
     }
     if (input.sizeBytes > ATTACHMENT_MAX_BYTES) {
-      throw new ApiError(400, "BAD_REQUEST", "File exceeds the 25 MiB limit");
+      throw new DomainError("invalid_input", "File exceeds the 25 MiB limit");
     }
     this.#attachmentStore();
     return runWorkspaceTransaction(this.pool, async (client) => {
@@ -160,22 +160,22 @@ export class WorkspaceAttachmentOperations {
       );
       const row = locked.rows[0];
       if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
-        throw new ApiError(404, "NOT_FOUND", "Upload not found");
+        throw new DomainError("not_found", "Upload not found");
       }
       if (row.status !== "pending") {
-        throw new ApiError(409, "CONFLICT", "This upload can no longer receive content");
+        throw new DomainError("conflict", "This upload can no longer receive content");
       }
       if (row.upload_expired) {
-        throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+        throw new DomainError("invalid_input", "This upload has expired");
       }
       if (row.content_type !== contentType.trim()) {
-        throw new ApiError(400, "BAD_REQUEST", "Content type must match the staged upload");
+        throw new DomainError("invalid_input", "Content type must match the staged upload");
       }
       if (Number(row.size_bytes) !== bytes.byteLength) {
-        throw new ApiError(400, "BAD_REQUEST", "File size must match the staged upload");
+        throw new DomainError("invalid_input", "File size must match the staged upload");
       }
       if (sha256Hex(bytes) !== row.content_sha256.toString("hex")) {
-        throw new ApiError(400, "BAD_REQUEST", "File hash must match the staged upload");
+        throw new DomainError("invalid_input", "File hash must match the staged upload");
       }
       await store.write(identity.currentUser.workspaceId, attachmentId, bytes);
       await client.query(
@@ -224,35 +224,33 @@ export class WorkspaceAttachmentOperations {
           );
           const row = locked.rows[0];
           if (row === undefined || row.uploaded_by !== identity.currentUser.user.id) {
-            throw new ApiError(404, "NOT_FOUND", "Upload not found");
+            throw new DomainError("not_found", "Upload not found");
           }
           if (row.status === "ready") {
             return completeFileUploadResponseSchema.parse({ attachment: mapAttachment(row) });
           }
           if (row.status !== "pending") {
-            throw new ApiError(409, "CONFLICT", "This upload can no longer be completed");
+            throw new DomainError("conflict", "This upload can no longer be completed");
           }
           if (row.upload_expired) {
-            throw new ApiError(400, "BAD_REQUEST", "This upload has expired");
+            throw new DomainError("invalid_input", "This upload has expired");
           }
           if (row.content_received_at === null) {
-            throw new ApiError(400, "BAD_REQUEST", "Upload the file before completing it");
+            throw new DomainError("invalid_input", "Upload the file before completing it");
           }
           if (
             Number(row.size_bytes) !== input.sizeBytes ||
             row.content_sha256.toString("hex") !== input.contentSha256
           ) {
-            throw new ApiError(
-              400,
-              "BAD_REQUEST",
+            throw new DomainError(
+              "invalid_input",
               "Completed file does not match the staged upload",
             );
           }
           const stored = await store.read(identity.currentUser.workspaceId, attachmentId);
           if (stored.byteLength !== input.sizeBytes || sha256Hex(stored) !== input.contentSha256) {
-            throw new ApiError(
-              400,
-              "BAD_REQUEST",
+            throw new DomainError(
+              "invalid_input",
               "Completed file does not match the staged upload",
             );
           }
@@ -283,7 +281,7 @@ export class WorkspaceAttachmentOperations {
       await requireVisibleConversation(client, identity, conversationId, false);
       const cursor = decodeFilesCursor(before);
       if (before !== undefined && cursor === null) {
-        throw new ApiError(400, "BAD_REQUEST", "Invalid files cursor");
+        throw new DomainError("invalid_input", "Invalid files cursor");
       }
       const result = await client.query<AttachmentRow>(
         `SELECT attachment.*
@@ -335,7 +333,7 @@ export class WorkspaceAttachmentOperations {
       ids.length !== messageIds.length ||
       ids.length > MESSAGE_HISTORY_MAX_LIMIT
     ) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid attachment message IDs");
+      throw new DomainError("invalid_input", "Invalid attachment message IDs");
     }
     const client = await this.pool.connect();
     try {
@@ -351,7 +349,7 @@ export class WorkspaceAttachmentOperations {
         [ids, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       if (visible.rows.length !== ids.length) {
-        throw new ApiError(404, "NOT_FOUND", "One or more messages were not found");
+        throw new DomainError("not_found", "One or more messages were not found");
       }
       const attachments = await attachmentsForMessages(client, ids);
       return listMessageAttachmentsResponseSchema.parse({ attachments });
@@ -407,14 +405,14 @@ export class WorkspaceAttachmentOperations {
         ],
       );
       const row = result.rows[0];
-      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "File not found");
+      if (row === undefined) throw new DomainError("not_found", "File not found");
       if (!supportsGroupDirectMessages && row.conversation_kind === "group_direct_message") {
         throw new GroupDirectClientUpgradeRequiredError();
       }
       const bytes = await store.read(identity.currentUser.workspaceId, attachmentId);
       const contentSha256 = row.content_sha256.toString("hex");
       if (bytes.byteLength !== Number(row.size_bytes) || sha256Hex(bytes) !== contentSha256) {
-        throw new ApiError(500, "INTERNAL_ERROR", "Stored file failed its integrity check");
+        throw new DomainError("integrity_failure", "Stored file failed its integrity check");
       }
       return {
         attachment: mapAttachment(row),
@@ -429,7 +427,7 @@ export class WorkspaceAttachmentOperations {
   #attachmentStore(): AttachmentStore {
     const store = this.hooks.attachmentStore;
     if (store === undefined) {
-      throw new ApiError(400, "BAD_REQUEST", "Attachments are not available yet");
+      throw new DomainError("invalid_input", "Attachments are not available yet");
     }
     return store;
   }

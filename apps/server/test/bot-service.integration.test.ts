@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 
 import type { CurrentUser } from "@hype-comms/contracts";
 
+import type { DomainError } from "../src/domain-errors.js";
 import type { ApiError } from "../src/errors.js";
 import { BotService } from "../src/modules/bots/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
@@ -138,10 +139,10 @@ describe("BotService", () => {
     ).resolves.toEqual({ tasks: [], nextCursor: null, hasMore: false });
     await expect(
       workspaceRepository.listConversationTasks(authenticated, otherId, undefined, 100),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
     await expect(
       workspaceRepository.listConversationTasks(authenticated, privateId, undefined, 100),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     expect(await service.grantChannels(ownerId, "release-bot", ["private"])).toBe(1);
     await expect(
@@ -149,7 +150,7 @@ describe("BotService", () => {
     ).resolves.toEqual({ tasks: [], nextCursor: null, hasMore: false });
     await expect(
       workspaceRepository.createDirectConversation(owner, { memberId: issued.bot.id }),
-    ).rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" } satisfies Partial<ApiError>);
+    ).rejects.toMatchObject({ kind: "not_found" } satisfies Partial<DomainError>);
 
     expect((await workspaceRepository.listMembers(owner)).members).toContainEqual(
       expect.objectContaining({ id: issued.bot.id, kind: "bot", username: "release-bot" }),

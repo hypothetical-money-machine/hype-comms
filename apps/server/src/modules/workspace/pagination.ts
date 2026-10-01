@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { TaskListFilters } from "@hype-comms/contracts";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import { iso } from "./records.js";
 import type { TaskRow } from "./task-records.js";
 import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
@@ -66,7 +66,7 @@ export function decodeTaskCursor(
       filterHash: expectedFilterHash,
     };
   } catch {
-    throw new ApiError(400, "BAD_REQUEST", "Invalid task cursor");
+    throw new DomainError("invalid_input", "Invalid task cursor");
   }
 }
 

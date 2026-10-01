@@ -1,6 +1,6 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
@@ -139,7 +139,7 @@ export async function requireVisibleConversation(
     ],
   );
   const row = result.rows[0];
-  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+  if (row === undefined) throw new DomainError("not_found", "Conversation not found");
   return row;
 }
 
@@ -160,7 +160,7 @@ export async function requireVisibleChannelBySlug(
     [identity.currentUser.workspaceId, channelSlug, identity.currentUser.user.id, requireWritable],
   );
   const row = result.rows[0];
-  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
+  if (row === undefined) throw new DomainError("not_found", "Channel not found");
   return row;
 }
 
@@ -183,7 +183,7 @@ export async function requireActivePrincipal(
   );
   const principal = result.rows[0];
   if (principal === undefined) {
-    throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    throw new DomainError("access_denied", "Workspace unavailable");
   }
   // Existing membership mutations take the membership row before the workspace sequence row.
   // This matches delivery and identity revocation, preventing a membership/workspace inversion.
@@ -535,7 +535,7 @@ export class WorkspaceAuthorization {
     );
     const principal = result.rows.find((row) => row.user_id === identity.currentUser.user.id);
     if (principal === undefined || principal.status !== "active") {
-      throw new ApiError(403, "FORBIDDEN", "Only humans can create humans-only channels");
+      throw new DomainError("access_denied", "Only humans can create humans-only channels");
     }
     await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
       identity.currentUser.workspaceId,
@@ -565,10 +565,10 @@ export class WorkspaceAuthorization {
     );
     const activeIds = new Set(result.rows.map((row) => row.id));
     if (!activeIds.has(actorId)) {
-      throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+      throw new DomainError("access_denied", "Workspace unavailable");
     }
     if (canonicalMemberIds.some((id) => !activeIds.has(id))) {
-      throw new ApiError(404, "NOT_FOUND", "One or more members were not found");
+      throw new DomainError("not_found", "One or more members were not found");
     }
     // Membership rows are locked in deterministic UUID order before the workspace row. Agent
     // disable and human membership revocation use the same membership-before-workspace order, so
@@ -622,11 +622,11 @@ export class WorkspaceAuthorization {
       conversation.channel_access !== "members" ||
       conversation.human_only
     ) {
-      throw new ApiError(404, "NOT_FOUND", "Managed channel not found");
+      throw new DomainError("not_found", "Managed channel not found");
     }
     const role = await this.membershipRole(client, identity, conversation);
     if (role !== "owner") {
-      throw new ApiError(403, "FORBIDDEN", "Only a channel owner can manage members");
+      throw new DomainError("access_denied", "Only a channel owner can manage members");
     }
     return conversation;
   }
@@ -651,7 +651,7 @@ export class WorkspaceAuthorization {
       [conversationId, excludedUserId],
     );
     if (result.rowCount !== 1) {
-      throw new ApiError(409, "CONFLICT", "A channel must retain at least one owner");
+      throw new DomainError("conflict", "A channel must retain at least one owner");
     }
   }
 

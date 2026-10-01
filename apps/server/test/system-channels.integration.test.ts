@@ -432,7 +432,7 @@ describe("seedSystemChannels", () => {
     );
 
     await expect(repository.archiveChannel(owner, channel?.id ?? "")).rejects.toMatchObject({
-      statusCode: 404,
+      kind: "not_found",
     });
   });
 
@@ -471,7 +471,7 @@ describe("seedSystemChannels", () => {
         attachmentIds: [],
       }),
     ).rejects.toMatchObject({
-      statusCode: 403,
+      kind: "access_denied",
       message: "Only Hype Comms posts in this channel",
     });
   });

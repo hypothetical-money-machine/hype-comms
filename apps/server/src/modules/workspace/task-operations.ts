@@ -19,7 +19,7 @@ import {
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import {
   conversationAudience,
   conversationVisibilitySql,
@@ -235,7 +235,7 @@ export class WorkspaceTaskOperations {
         [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
       );
       const row = result.rows[0];
-      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+      if (row === undefined) throw new DomainError("not_found", "Task not found");
       const conversation = await requireVisibleConversation(
         client,
         identity,
@@ -266,7 +266,7 @@ export class WorkspaceTaskOperations {
         [conversation.id, taskNumber],
       );
       const row = result.rows[0];
-      if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+      if (row === undefined) throw new DomainError("not_found", "Task not found");
       return taskRecordResponseSchema.parse({ task: mapTaskRecord(row) });
     } finally {
       client.release();
@@ -395,7 +395,7 @@ export class WorkspaceTaskOperations {
         },
         async () => {
           if (current.version !== input.expectedVersion) {
-            throw new ApiError(409, "CONFLICT", "The task changed on another device");
+            throw new DomainError("conflict", "The task changed on another device");
           }
           await this.#validateTaskReferences(client, identity, conversation, input);
           const updated = await client.query<TaskRow>(
@@ -460,7 +460,7 @@ export class WorkspaceTaskOperations {
         },
         async () => {
           if (current.version !== input.expectedVersion) {
-            throw new ApiError(409, "CONFLICT", "The task changed on another device");
+            throw new DomainError("conflict", "The task changed on another device");
           }
           const orderedResult = await client.query<TaskRow>(
             `SELECT *
@@ -478,7 +478,7 @@ export class WorkspaceTaskOperations {
               ? ordered.length
               : ordered.findIndex((task) => task.id === input.beforeTaskId);
           if (insertionIndex < 0) {
-            throw new ApiError(400, "BAD_REQUEST", "The Kanban destination is invalid");
+            throw new DomainError("invalid_input", "The Kanban destination is invalid");
           }
           const previousRank =
             insertionIndex === 0 ? 0n : BigInt(ordered[insertionIndex - 1]?.rank ?? "0");
@@ -564,7 +564,7 @@ export class WorkspaceTaskOperations {
     conversation: ConversationRow,
   ): void {
     if (conversation.kind === "channel" && conversation.channel_mode === "announcement") {
-      throw new ApiError(404, "NOT_FOUND", "Tasks are not available in this channel");
+      throw new DomainError("not_found", "Tasks are not available in this channel");
     }
     if (conversation.kind === "channel") return;
     if (
@@ -574,7 +574,7 @@ export class WorkspaceTaskOperations {
     ) {
       return;
     }
-    throw new ApiError(404, "NOT_FOUND", "Tasks are available in channels and self messages");
+    throw new DomainError("not_found", "Tasks are available in channels and self messages");
   }
 
   async #requireTaskTarget(
@@ -594,7 +594,7 @@ export class WorkspaceTaskOperations {
       [taskId, identity.currentUser.workspaceId, identity.currentUser.user.id],
     );
     const conversationId = located.rows[0]?.conversation_id;
-    if (conversationId === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+    if (conversationId === undefined) throw new DomainError("not_found", "Task not found");
     const conversation = await requireVisibleConversation(
       client,
       identity,
@@ -608,7 +608,7 @@ export class WorkspaceTaskOperations {
       [taskId, conversation.id],
     );
     const task = taskResult.rows[0];
-    if (task === undefined) throw new ApiError(404, "NOT_FOUND", "Task not found");
+    if (task === undefined) throw new DomainError("not_found", "Task not found");
     return { conversation, task };
   }
 
@@ -624,7 +624,7 @@ export class WorkspaceTaskOperations {
     if (input.assigneeId !== null) {
       const audience = new Set(await conversationAudience(client, conversation));
       if (!audience.has(input.assigneeId)) {
-        throw new ApiError(400, "BAD_REQUEST", "The assignee cannot access this task");
+        throw new DomainError("invalid_input", "The assignee cannot access this task");
       }
     }
     if (input.sourceMessageId !== undefined && input.sourceMessageId !== null) {
@@ -633,7 +633,7 @@ export class WorkspaceTaskOperations {
         [input.sourceMessageId, conversation.id],
       );
       if (source.rowCount !== 1) {
-        throw new ApiError(400, "BAD_REQUEST", "The source message is unavailable");
+        throw new DomainError("invalid_input", "The source message is unavailable");
       }
     }
     if (
@@ -641,7 +641,7 @@ export class WorkspaceTaskOperations {
       input.assigneeId !== null &&
       input.assigneeId !== identity.currentUser.user.id
     ) {
-      throw new ApiError(400, "BAD_REQUEST", "Personal tasks can only be assigned to you");
+      throw new DomainError("invalid_input", "Personal tasks can only be assigned to you");
     }
   }
 

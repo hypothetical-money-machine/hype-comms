@@ -10,6 +10,7 @@ import {
 } from "@hype-comms/contracts";
 import { routeModule, validateRequest } from "../../http/route-registrar.js";
 
+import { DomainError } from "../../domain-errors.js";
 import { ApiError } from "../../errors.js";
 import type { MetricsRegistry } from "../../metrics.js";
 import type {
@@ -269,7 +270,7 @@ export const realtimeRoutes = routeModule<RealtimeRoutesOptions>(
               sendConnected();
             } while (flushAgain && !closed);
           } catch (error) {
-            if (error instanceof ApiError && error.code === "CURSOR_EXPIRED") {
+            if (error instanceof DomainError && error.kind === "sync_position_expired") {
               if (socket.readyState === 1) {
                 socket.send(
                   JSON.stringify({

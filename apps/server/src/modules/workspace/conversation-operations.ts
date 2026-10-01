@@ -25,7 +25,7 @@ import {
 } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { ApiError } from "../../errors.js";
+import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import {
   conversationAudience,
@@ -409,7 +409,7 @@ export class WorkspaceConversationOperations {
       );
       const conversation = locked.rows[0];
       if (conversation === undefined) {
-        throw new ApiError(404, "NOT_FOUND", "Channel not found");
+        throw new DomainError("not_found", "Channel not found");
       }
       const principal = await requireActivePrincipal(client, identity);
       if (principal.kind === "human") {
@@ -480,7 +480,7 @@ export class WorkspaceConversationOperations {
           input.access === "humans" &&
           !(await this.#humansOnlyChannelsAvailable(client, identity.currentUser.workspaceId))
         ) {
-          throw new ApiError(403, "FORBIDDEN", "Humans-only channels are unavailable");
+          throw new DomainError("access_denied", "Humans-only channels are unavailable");
         }
         if (channelMode === "announcement") {
           const announcementChannelsAvailable = await this.events.announcementChannelsAvailable(
@@ -501,7 +501,10 @@ export class WorkspaceConversationOperations {
               correlationId,
               reason: "not_authorized",
             });
-            throw new ApiError(403, "FORBIDDEN", "Only workspace owners can create announcements");
+            throw new DomainError(
+              "access_denied",
+              "Only workspace owners can create announcements",
+            );
           }
         }
         const created = await client
@@ -526,7 +529,7 @@ export class WorkspaceConversationOperations {
           )
           .catch((error: unknown) => {
             if (error instanceof Error && "code" in error && error.code === "23505") {
-              throw new ApiError(409, "CONFLICT", "A channel with that slug already exists");
+              throw new DomainError("conflict", "A channel with that slug already exists");
             }
             throw error;
           });
@@ -602,7 +605,7 @@ export class WorkspaceConversationOperations {
         false,
       );
       if (conversation.kind !== "channel") {
-        throw new ApiError(404, "NOT_FOUND", "Channel not found");
+        throw new DomainError("not_found", "Channel not found");
       }
       return this.#channelMembers(client, identity, conversation);
     } finally {
@@ -628,7 +631,7 @@ export class WorkspaceConversationOperations {
             AND user_account.kind IN ('human', 'agent')`,
         [identity.currentUser.workspaceId, memberId],
       );
-      if (target.rowCount !== 1) throw new ApiError(404, "NOT_FOUND", "Member not found");
+      if (target.rowCount !== 1) throw new DomainError("not_found", "Member not found");
 
       await lockIdempotencyScope(client, `channel-membership:${conversationId}:${memberId}`);
 
@@ -782,12 +785,12 @@ export class WorkspaceConversationOperations {
       );
       const current = locked.rows[0];
       if (current === undefined) {
-        throw new ApiError(404, "NOT_FOUND", "Channel not found or cannot be archived");
+        throw new DomainError("not_found", "Channel not found or cannot be archived");
       }
       await this.hooks.afterArchiveConversationLocked?.();
       const principal = await requireActivePrincipal(client, identity);
       if (principal.kind !== "human" || principal.role !== "owner") {
-        throw new ApiError(403, "FORBIDDEN", "Only the workspace owner can archive channels");
+        throw new DomainError("access_denied", "Only the workspace owner can archive channels");
       }
       if (current.is_archived) {
         return conversationMutationResponseSchema.parse({
@@ -878,10 +881,10 @@ export class WorkspaceConversationOperations {
     const rawMemberIds = [...input.memberIds].sort();
     const memberIds = rawMemberIds.map((id) => id.toLowerCase()).sort();
     if (new Set(memberIds).size !== memberIds.length) {
-      throw new ApiError(400, "BAD_REQUEST", "Group participants must be unique");
+      throw new DomainError("invalid_input", "Group participants must be unique");
     }
     if (memberIds.includes(identity.currentUser.user.id.toLowerCase())) {
-      throw new ApiError(400, "BAD_REQUEST", "The caller is already a group participant");
+      throw new DomainError("invalid_input", "The caller is already a group participant");
     }
     return runWorkspaceTransaction(this.pool, async (client) => {
       return runIdempotentMutation(
@@ -1169,7 +1172,7 @@ export class WorkspaceConversationOperations {
       [workspaceId],
     );
     const workspace = result.rows[0];
-    if (workspace === undefined) throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
+    if (workspace === undefined) throw new DomainError("access_denied", "Workspace unavailable");
     return workspace.humans_only_channels_available;
   }
 }

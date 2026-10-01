@@ -7,7 +7,7 @@ import type { AgentCurrentPrincipal, CurrentUser } from "@hype-comms/contracts";
 
 import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
-import { ApiError } from "../src/errors.js";
+import { DomainError } from "../src/domain-errors.js";
 import type {
   AuthenticatedAgentIdentity,
   AuthenticatedIdentity,
@@ -108,11 +108,11 @@ const agent: AuthenticatedAgentIdentity = {
   agentTokenId,
 };
 
-async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> {
+async function rejectedDomainError(operation: Promise<unknown>): Promise<DomainError> {
   try {
     await operation;
   } catch (error) {
-    if (error instanceof ApiError) return error;
+    if (error instanceof DomainError) return error;
     throw error;
   }
   throw new Error("Expected the operation to reject");
@@ -1029,18 +1029,16 @@ describe("WorkspaceAuthorization", () => {
         await expect(
           authorization.requireVisibleConversation(client, member, archivedId, false),
         ).rejects.toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Conversation not found",
-        } satisfies Partial<ApiError>);
-        const writableArchived = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const writableArchived = await rejectedDomainError(
           authorization.requireVisibleConversation(client, owner, archivedId, true),
         );
         expect(writableArchived).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Conversation not found",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
@@ -1063,22 +1061,20 @@ describe("WorkspaceAuthorization", () => {
         [workspaceId, memberId],
       );
       await withClient(async (client) => {
-        const revoked = await rejectedApiError(
+        const revoked = await rejectedDomainError(
           authorization.requireActivePrincipal(client, member),
         );
         expect(revoked).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Workspace unavailable",
-        } satisfies Partial<ApiError>);
-        const missing = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const missing = await rejectedDomainError(
           authorization.requireActivePrincipal(client, outsider),
         );
         expect(missing).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Workspace unavailable",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
@@ -1090,22 +1086,20 @@ describe("WorkspaceAuthorization", () => {
           role: "owner",
           kind: "human",
         });
-        const agentDenied = await rejectedApiError(
+        const agentDenied = await rejectedDomainError(
           authorization.requireHumansOnlyCreator(client, agent),
         );
         expect(agentDenied).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Only humans can create humans-only channels",
-        } satisfies Partial<ApiError>);
-        const invitedDenied = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const invitedDenied = await rejectedDomainError(
           authorization.requireHumansOnlyCreator(client, invited),
         );
         expect(invitedDenied).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Only humans can create humans-only channels",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
@@ -1117,30 +1111,27 @@ describe("WorkspaceAuthorization", () => {
         await expect(
           authorization.requireActiveConversationParticipants(client, owner, [memberId, agentId]),
         ).resolves.toBeUndefined();
-        const missing = await rejectedApiError(
+        const missing = await rejectedDomainError(
           authorization.requireActiveConversationParticipants(client, owner, [randomUUID()]),
         );
         expect(missing).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "One or more members were not found",
-        } satisfies Partial<ApiError>);
-        const botMember = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const botMember = await rejectedDomainError(
           authorization.requireActiveConversationParticipants(client, owner, [botId]),
         );
         expect(botMember).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "One or more members were not found",
-        } satisfies Partial<ApiError>);
-        const invitedMember = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const invitedMember = await rejectedDomainError(
           authorization.requireActiveConversationParticipants(client, owner, [invitedId]),
         );
         expect(invitedMember).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "One or more members were not found",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
       await pool.query(
         `UPDATE workspace_memberships
@@ -1149,14 +1140,13 @@ describe("WorkspaceAuthorization", () => {
         [workspaceId, ownerId],
       );
       await withClient(async (client) => {
-        const actorGone = await rejectedApiError(
+        const actorGone = await rejectedDomainError(
           authorization.requireActiveConversationParticipants(client, owner, [memberId]),
         );
         expect(actorGone).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Workspace unavailable",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
@@ -1170,17 +1160,15 @@ describe("WorkspaceAuthorization", () => {
         await expect(
           authorization.requireVisibleChannelBySlug(client, owner, "missing", false),
         ).rejects.toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Channel not found",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
         await expect(
           authorization.requireVisibleChannelBySlug(client, owner, "archived-ops", true),
         ).rejects.toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Channel not found",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
         await expect(
           authorization.requireVisibleChannelBySlug(client, owner, "archived-ops", false),
         ).resolves.toMatchObject({ id: archivedId });
@@ -1204,30 +1192,27 @@ describe("WorkspaceAuthorization", () => {
         await expect(
           authorization.requireManagedChannel(client, owner, managedId),
         ).resolves.toMatchObject({ id: managedId, channel_access: "members" });
-        const memberDenied = await rejectedApiError(
+        const memberDenied = await rejectedDomainError(
           authorization.requireManagedChannel(client, member, managedId),
         );
         expect(memberDenied).toMatchObject({
-          statusCode: 403,
-          code: "FORBIDDEN",
+          kind: "access_denied",
           message: "Only a channel owner can manage members",
-        } satisfies Partial<ApiError>);
-        const publicDenied = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const publicDenied = await rejectedDomainError(
           authorization.requireManagedChannel(client, owner, generalId),
         );
         expect(publicDenied).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Managed channel not found",
-        } satisfies Partial<ApiError>);
-        const humansDenied = await rejectedApiError(
+        } satisfies Partial<DomainError>);
+        const humansDenied = await rejectedDomainError(
           authorization.requireManagedChannel(client, owner, humansId),
         );
         expect(humansDenied).toMatchObject({
-          statusCode: 404,
-          code: "NOT_FOUND",
+          kind: "not_found",
           message: "Managed channel not found",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
@@ -1235,14 +1220,13 @@ describe("WorkspaceAuthorization", () => {
       const managedId = randomUUID();
       await insertMembersChannel(managedId, "owners");
       await withClient(async (client) => {
-        const onlyOwner = await rejectedApiError(
+        const onlyOwner = await rejectedDomainError(
           authorization.requireAnotherChannelOwner(client, managedId, ownerId),
         );
         expect(onlyOwner).toMatchObject({
-          statusCode: 409,
-          code: "CONFLICT",
+          kind: "conflict",
           message: "A channel must retain at least one owner",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
       await pool.query(
         `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
@@ -1261,14 +1245,13 @@ describe("WorkspaceAuthorization", () => {
         [workspaceId, memberId],
       );
       await withClient(async (client) => {
-        const revokedOwner = await rejectedApiError(
+        const revokedOwner = await rejectedDomainError(
           authorization.requireAnotherChannelOwner(client, managedId, ownerId),
         );
         expect(revokedOwner).toMatchObject({
-          statusCode: 409,
-          code: "CONFLICT",
+          kind: "conflict",
           message: "A channel must retain at least one owner",
-        } satisfies Partial<ApiError>);
+        } satisfies Partial<DomainError>);
       });
     });
 
