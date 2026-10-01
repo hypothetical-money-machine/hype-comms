@@ -18,8 +18,8 @@ interface SystemRoutesOptions {
 
 function hasMetricsAccess(header: string | string[] | undefined, token: string): boolean {
   if (typeof header !== "string") return false;
-  // Metrics secrets may contain whitespace. Validate the scheme and separators without changing
-  // any bytes of the configured secret, including its leading or trailing whitespace.
+  // Metrics secrets may contain internal spaces or tabs. Configuration rejects boundary
+  // whitespace and invalid HTTP header characters; compare the remaining secret byte-for-byte.
   const secretOffset = header.length - token.length;
   const prefix = header.slice(0, secretOffset);
   if (/^Bearer[ \t]+/i.exec(prefix)?.[0] !== prefix) return false;
