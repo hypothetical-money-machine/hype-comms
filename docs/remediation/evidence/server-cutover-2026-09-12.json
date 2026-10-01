@@ -16,5 +16,5 @@
     "two realtime connections",
     "old endpoint rejection"
   ],
-  "limits": "Disposable synthetic PostgreSQL and Docker volumes. This does not prove the production backup destination, Kubernetes orchestration, installed desktop update, or Hermes framework lifecycle."
+  "limits": "Disposable synthetic PostgreSQL and Docker volumes. This does not prove the production backup destination, Kubernetes orchestration, installed desktop update, or Hermes framework lifecycle. The source database was seeded by the candidate image, so this run did not exercise migrations of previous-release data and cannot establish cutover migration acceptance."
 }

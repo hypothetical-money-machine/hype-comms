@@ -1,0 +1,35 @@
+{
+  "baselineImage": "sha256:df2dc1adea52e87208b8ebc8e1269a870cb493587131e9cbce1db74a07dfec0f",
+  "candidateImage": "sha256:a7bf4d12b94cd430090efef24282d8dee987d77d282e76843384e6f05cf61ba4",
+  "appliedMigrations": [
+    "0030_attachment_retention.sql",
+    "0031_system_channels.sql",
+    "0032_workspace_protocol_epoch.sql"
+  ],
+  "rollbackImage": "sha256:eef80ae937bbdfe27128f2fd24871cc58a409a8175e884bb53a184f538a8eb8c",
+  "completedAt": "2026-10-01T04:04:11.743Z",
+  "comparedTables": 34,
+  "passed": [
+    "previous-release protocol and pre-cutover schema",
+    "candidate migration of restored baseline rows",
+    "retained messages, tasks, attachments, credentials, receipts and events",
+    "all restored table fingerprints",
+    "stopped writer",
+    "repeat epoch activation",
+    "accepted send identity",
+    "wrong epoch rejection",
+    "attachment backup and authenticated download",
+    "post-cutover message across compatible rollback",
+    "human session and agent credential",
+    "task mutation after rollback",
+    "two realtime connections",
+    "old endpoint rejection"
+  ],
+  "limits": "Disposable synthetic PostgreSQL and Docker volumes. This does not prove the production backup destination, Kubernetes orchestration, installed desktop update, or Hermes framework lifecycle.",
+  "sourceRevisions": {
+    "baseline": "df4b170486c077a17b4c5c672de0057e27aa1672",
+    "candidate": "41dc176d277014d27bd5c040147d541f8b3e7ea1",
+    "compatibleRollback": "ff008fbdf4b279451c5bf35f78149f64920acca7"
+  },
+  "candidateBuildOverlay": "Narrow inherited dependency repair: API-client Vitest manifest/lock workspace entry4.1.10\u21924.1.11; product source unchanged."
+}

@@ -84,6 +84,9 @@ profile or a manifest-only check cannot substitute for this test. Keep productio
 the public update feed out of the rehearsal.
 
 Restore the actual maintenance backup procedure into an isolated database and attachment volume.
+The disposable server command requires three distinct images: the previous protocol-1 baseline,
+the candidate, and a protocol-2-compatible rollback. Seed and back up the baseline before applying
+the candidate migrations; a backup produced by the candidate does not test the cutover migration.
 Verify data, credentials and idempotency receipts before applying the additive migration. Activate
 its new epoch with writers stopped, then exercise login, send/reply, attachments, tasks, reconnect
 and retained outbox delivery against matching server, desktop, CLI and Hermes builds. Repeat with the

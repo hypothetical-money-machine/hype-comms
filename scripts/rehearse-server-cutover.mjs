@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID, createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -12,18 +12,27 @@ import {
   AttachmentClient,
   workspaceEndpoints as endpoints,
 } from "../packages/api-client/dist/index.js";
-import { productRealtimeEventSchema } from "../packages/contracts/dist/index.js";
+import { z } from "zod";
+
+import {
+  productRealtimeEventSchema,
+  entityIdSchema,
+  sequenceSchema,
+  sendConversationMessageRequestSchema,
+} from "../packages/contracts/dist/index.js";
+import { waitForReadiness } from "./rehearsal/wait-for-readiness.mjs";
 
 const { WebSocket } = createRequire(new URL("../apps/server/package.json", import.meta.url))("ws");
 const { values } = parseArgs({
   options: {
+    "baseline-image": { type: "string" },
     "candidate-image": { type: "string" },
     "rollback-image": { type: "string" },
   },
 });
 assert.ok(
-  values["candidate-image"] && values["rollback-image"],
-  "Supply --candidate-image and --rollback-image, both already built locally",
+  values["baseline-image"] && values["candidate-image"] && values["rollback-image"],
+  "Supply --baseline-image, --candidate-image and --rollback-image, all already built locally",
 );
 
 const prefix = `hype-cutover-rehearsal-${randomUUID()}`;
@@ -50,16 +59,12 @@ function docker(args, input) {
   }
 }
 
-async function eventually(check) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      if (await check()) return;
-    } catch {
-      /* Startup may still be pending. */
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+async function eventually(check, timeoutMs = 30_000) {
+  try {
+    await waitForReadiness(check, { timeoutMs });
+  } catch {
+    throw new Error(`Readiness timed out during ${stage}`);
   }
-  throw new Error(`Readiness timed out during ${stage}`);
 }
 
 function sql(database, statement) {
@@ -106,8 +111,15 @@ function fingerprint(database) {
 
 try {
   await rm(resultPath, { force: true });
+  const baseline = docker(["image", "inspect", values["baseline-image"], "--format", "{{.Id}}"]);
   const candidate = docker(["image", "inspect", values["candidate-image"], "--format", "{{.Id}}"]);
   const rollback = docker(["image", "inspect", values["rollback-image"], "--format", "{{.Id}}"]);
+  assert.notEqual(baseline, candidate, "The baseline must be the previous-release image");
+  assert.notEqual(
+    baseline,
+    rollback,
+    "The compatible rollback must differ from the previous release",
+  );
   assert.notEqual(candidate, rollback, "Use a separately built compatible rollback image");
   docker(["image", "inspect", "postgres:16-alpine", "--format", "{{.Id}}"]);
   docker(["network", "create", prefix]);
@@ -138,9 +150,17 @@ try {
   ]);
   containers.push(pg);
   await eventually(() =>
-    docker(["exec", pg, "pg_isready", "-U", "rehearsal", "-d", "rehearsal_source_test"]).includes(
-      "accepting connections",
-    ),
+    docker([
+      "exec",
+      pg,
+      "pg_isready",
+      "-h",
+      "127.0.0.1",
+      "-U",
+      "rehearsal",
+      "-d",
+      "rehearsal_source_test",
+    ]).includes("accepting connections"),
   );
 
   const envFiles = {};
@@ -202,31 +222,37 @@ try {
       timeoutMs: 15_000,
       ...(cookie ? { credentialHeaders: () => ({ cookie }) } : {}),
     });
-  stage = "candidate startup and synthetic login";
-  const source = await start(candidate, "source", "initial");
-  const invitation = docker([
-    "exec",
-    source.name,
-    "node",
-    "dist/modules/identity/invite-cli.js",
-    "--email",
-    "rehearsal@example.test",
-  ]);
-  const link = invitation.split("\n").find((line) => line.startsWith("https://"));
-  assert.ok(link);
-  const login = await clientFor(source.origin).requestWithResponse(
-    endpoints.verifyMagicLink({ token: new URL(link).searchParams.get("token") }),
-  );
-  const cookie = login.response.headers
-    .getSetCookie()
-    .map((value) => value.split(";")[0])
-    .join("; ");
-  assert.ok(cookie);
-  let human = clientFor(source.origin, cookie);
-  const initial = await human.request(endpoints.bootstrap());
-  const conversationId = initial.conversations.find((row) => row.conversation.slug === "general")
-    ?.conversation.id;
-  assert.ok(conversationId);
+  stage = "previous-release startup and synthetic fixtures";
+  const source = await start(baseline, "source", "initial");
+  const fixture = z
+    .object({
+      cookie: z.string().min(1).max(4096),
+      workspaceId: entityIdSchema,
+      conversationId: entityIdSchema,
+      syncSequence: sequenceSchema,
+      acceptedBody: sendConversationMessageRequestSchema,
+      acceptedMessageId: entityIdSchema,
+      taskId: entityIdSchema,
+      attachmentId: entityIdSchema,
+      agentToken: z.string().min(1).max(4096),
+    })
+    .strict()
+    .parse(
+      JSON.parse(
+        docker(
+          ["exec", "-i", source.name, "node", "--input-type=module"],
+          await readFile(
+            new URL("./rehearsal/server-cutover-baseline.mjs", import.meta.url),
+            "utf8",
+          ),
+        ),
+      ),
+    );
+  const { cookie, conversationId } = fixture;
+  const accepted = { message: { id: fixture.acceptedMessageId } };
+  const upload = { attachment: { id: fixture.attachmentId } };
+  const credential = { token: fixture.agentToken };
+  let human;
   const send = (body, attachmentIds = [], threadRootId = null) => {
     const id = randomUUID();
     return {
@@ -241,49 +267,47 @@ try {
       headers: { "idempotency-key": id },
     };
   };
-  stage = "attachment and retained credential fixtures";
+  const acceptedRequest = {
+    ...endpoints.sendMessage(conversationId, fixture.acceptedBody),
+    headers: { "idempotency-key": fixture.acceptedBody.clientMessageId },
+  };
   const bytes = new TextEncoder().encode("Synthetic attachment 😀\n");
-  const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-  const upload = await human.request({
-    ...endpoints.createUpload({
-      conversationId,
-      fileName: "rehearsal.txt",
-      contentType: "text/plain",
-      sizeBytes: bytes.length,
-      contentSha256,
-    }),
-    headers: { "idempotency-key": randomUUID() },
-  });
-  await new AttachmentClient(human).upload({
-    path: endpoints.attachmentContent(upload.attachment.id),
-    bytes,
-    headers: { "content-type": "text/plain" },
-  });
-  await human.request({
-    ...endpoints.completeUpload(upload.attachment.id, { sizeBytes: bytes.length, contentSha256 }),
-    headers: { "idempotency-key": randomUUID() },
-  });
-  const acceptedRequest = send("Accepted before backup 😀", [upload.attachment.id]);
-  const accepted = await human.request(acceptedRequest);
-  const task = await human.request({
-    ...endpoints.createTask(conversationId, {
-      title: "Retained task",
-      sourceMessageId: accepted.message.id,
-    }),
-    headers: { "idempotency-key": randomUUID() },
-  });
-  assert.ok(task.task.id);
-  const agent = await human.request(
-    endpoints.createAgent({ username: "rehearsal-agent", displayName: "Rehearsal agent" }),
-  );
-  const credential = await human.request(
-    endpoints.createAgentToken(agent.agent.user.id, { label: "rehearsal" }),
-  );
 
   stage = "stopped-writer database and attachment backup";
   docker(["stop", source.name]);
   assert.equal(docker(["inspect", source.name, "--format", "{{.State.Running}}"]), "false");
   const before = fingerprint("rehearsal_source_test");
+  const migrationsBefore = sql(
+    "rehearsal_source_test",
+    "SELECT filename FROM schema_migrations ORDER BY filename",
+  ).split("\n");
+  assert.equal(
+    sql(
+      "rehearsal_source_test",
+      "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'workspaces' AND column_name IN ('protocol_epoch', 'protocol_replay_floor')",
+    ),
+    "0",
+    "Baseline already has the cutover schema",
+  );
+  assert.ok(!migrationsBefore.includes("0032_workspace_protocol_epoch.sql"));
+  const stoppedSequence = sql(
+    "rehearsal_source_test",
+    `SELECT last_event_sequence FROM workspaces WHERE id = '${fixture.workspaceId}'::uuid`,
+  );
+  const preservedTables = [
+    "messages",
+    "tasks",
+    "attachments",
+    "device_sessions",
+    "agent_tokens",
+    "api_idempotency_records",
+    "sync_events",
+  ];
+  const preservedBefore = Object.fromEntries(preservedTables.map((name) => [name, before[name]]));
+  assert.ok(
+    Object.values(preservedBefore).every((value) => value !== undefined),
+    "Baseline preservation tables are missing",
+  );
   docker([
     "exec",
     pg,
@@ -328,7 +352,7 @@ try {
     "tar -C /source -cf /tmp/attachments.tar .; tar -C /restored -xf /tmp/attachments.tar",
   ]);
 
-  stage = "restartable epoch activation with writers stopped";
+  stage = "candidate migration of restored baseline";
   docker([
     "run",
     "--rm",
@@ -341,6 +365,22 @@ try {
     "node",
     "dist/db/migrate.js",
   ]);
+  const migrationsAfter = sql(
+    "rehearsal_restored_test",
+    "SELECT filename FROM schema_migrations ORDER BY filename",
+  ).split("\n");
+  const appliedMigrations = migrationsAfter.filter(
+    (filename) => !migrationsBefore.includes(filename),
+  );
+  assert.ok(
+    appliedMigrations.includes("0032_workspace_protocol_epoch.sql"),
+    "The candidate did not migrate a pre-cutover database",
+  );
+  const afterMigration = fingerprint("rehearsal_restored_test");
+  assert.deepEqual(
+    Object.fromEntries(preservedTables.map((name) => [name, afterMigration[name]])),
+    preservedBefore,
+  );
   const operator = (args) =>
     JSON.parse(
       docker([
@@ -357,12 +397,15 @@ try {
         ...args,
       ]),
     );
-  const inspected = operator(["inspect", "--workspace-id", initial.workspace.id]);
+  const inspected = operator(["inspect", "--workspace-id", fixture.workspaceId]);
+  assert.equal(inspected.epoch, null);
+  assert.equal(inspected.sequence, stoppedSequence);
+  stage = "restartable epoch activation with writers stopped";
   const epoch = randomUUID();
   const activation = [
     "activate",
     "--workspace-id",
-    initial.workspace.id,
+    fixture.workspaceId,
     "--expected-epoch",
     inspected.epoch ?? "none",
     "--expected-sequence",
@@ -383,7 +426,7 @@ try {
   assert.equal(retry.message.id, accepted.message.id);
   assert.equal(retry.syncCursor.epoch, epoch);
   await assert.rejects(
-    human.request(endpoints.sync(initial.syncCursor)),
+    human.request(endpoints.sync({ epoch: randomUUID(), sequence: fixture.syncSequence })),
     (error) => error.kind === "http" && error.body.error.code === "CURSOR_EXPIRED",
   );
   async function verifyAttachment() {
@@ -394,6 +437,16 @@ try {
     assert.deepEqual(downloaded.bytes, bytes);
   }
   await verifyAttachment();
+  assert.ok(
+    (await human.request(endpoints.tasks(conversationId, {}))).tasks.some(
+      (row) => row.id === fixture.taskId,
+    ),
+    "The previous-release task was not retained",
+  );
+  assert.equal(
+    (await fetch(`${restored.origin}/v1/bootstrap`, { headers: { cookie } })).status,
+    426,
+  );
   const postCutoverRequest = send("Retain this post-cutover reply", [], accepted.message.id);
   const postCutover = await human.request(postCutoverRequest);
   docker(["stop", restored.name]);
@@ -419,7 +472,7 @@ try {
   });
   assert.equal(
     (await agentClient.request(endpoints.bootstrap())).workspace.id,
-    initial.workspace.id,
+    fixture.workspaceId,
   );
   assert.equal((await fetch(`${rolledBack.origin}/v1/bootstrap`)).status, 426);
 
@@ -461,11 +514,16 @@ try {
     "1",
   );
   const result = {
+    baselineImage: baseline,
     candidateImage: candidate,
+    appliedMigrations,
     rollbackImage: rollback,
     completedAt: new Date().toISOString(),
     comparedTables: Object.keys(before).length,
     passed: [
+      "previous-release protocol and pre-cutover schema",
+      "candidate migration of restored baseline rows",
+      "retained messages, tasks, attachments, credentials, receipts and events",
       "all restored table fingerprints",
       "stopped writer",
       "repeat epoch activation",

@@ -78,20 +78,26 @@ The repository includes a disposable server rehearsal:
 
 ```sh
 npm run rehearse:server-cutover -- \
+  --baseline-image LOCAL_PRE_CUTOVER_IMAGE \
   --candidate-image LOCAL_CANDIDATE_IMAGE \
   --rollback-image LOCAL_PROTOCOL_2_ROLLBACK_IMAGE
 ```
 
-Build both images first with the root Dockerfile and make `postgres:16-alpine` available locally.
-The script resolves immutable local image IDs and requires two distinct builds. It creates its own
-network, PostgreSQL container and two attachment volumes. It exposes only loopback server ports.
+Build all three images first from their recorded revisions with the root Dockerfile and make
+`postgres:16-alpine` available locally. The baseline must be the previous protocol-1 release, not
+the protocol-2-compatible rollback. The script resolves immutable local image IDs and requires
+three distinct builds. It creates its own network, PostgreSQL container and two attachment volumes.
+It exposes only loopback server ports.
 It never accepts a production database URL or an existing volume. It removes only the resources it
 created, and reports its resource prefix if cleanup fails. Evidence has a unique filename under
 `.dev-data/rehearsal/server-cutover/`; no credentials or message data are written there.
 
-The rehearsal seeds a human session, agent credential, attachment, message and task. With its writer
+The rehearsal seeds a human session, agent credential, attachment, message and task through the
+baseline image's protocol-1 API and validates them with that image's contracts. It rejects a
+baseline that already has the cutover epoch columns or migration. With its writer
 stopped, it dumps and restores PostgreSQL, compares every public table, archives and restores the
-attachment volume, invokes the real migrator and repeats the same epoch activation. It then retries
+attachment volume, invokes the real candidate migrator, requires the cutover migration to have been
+applied, compares retained data and receipts, and repeats the same epoch activation. It then retries
 the accepted message, rejects the old cursor, downloads the restored attachment and accepts a new
 reply. It starts the rollback image against that same database and verifies the reply, original
 receipt, session, agent credential and attachment, then exercises two WebSocket connections. It
@@ -148,7 +154,79 @@ existing AuthKit encryption keys and credential secrets through their normal rec
 An attachment archive and database dump from different write periods are not a matching backup.
 
 Restore the dump into a new isolated PostgreSQL 16 database with `pg_restore --exit-on-error
---no-owner --no-privileges`; extract attachments into a new volume with their ownership and modes.
+--no-owner --no-privileges`. For attachments, set `restore_attachment_pvc` to a new unused claim name,
+`restore_attachment_size` to a size that holds the archive, `restore_attachment_storage_class` to
+the deployed attachment claim's storage class, and `candidate_image` to the recorded candidate digest.
+Confirm the access mode matches the deployed attachment claim.
+The following creates a separate volume and an operator pod with no database credentials. Confirm
+its labels do not match any public Service selector before creating the pod.
+
+```sh
+kubectl --context "$cutover_context" -n hmm-chat create -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${restore_attachment_pvc}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: "${restore_attachment_storage_class}"
+  resources:
+    requests:
+      storage: ${restore_attachment_size}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hmm-chat-attachment-restore
+  labels:
+    purpose: hype-comms-isolated-attachment-restore
+spec:
+  restartPolicy: Never
+  containers:
+    - name: restore
+      image: ${candidate_image}
+      command: [node, -e, "setInterval(() => {}, 60000)"]
+      securityContext:
+        runAsUser: 0
+      volumeMounts:
+        - name: restored
+          mountPath: /data
+  volumes:
+    - name: restored
+      persistentVolumeClaim:
+        claimName: ${restore_attachment_pvc}
+EOF
+kubectl --context "$cutover_context" -n hmm-chat wait --for=condition=Ready \
+  pod/hmm-chat-attachment-restore --timeout=120s
+kubectl --context "$cutover_context" -n hmm-chat exec -i hmm-chat-attachment-restore -- \
+  sh -ec 'tar -C /data -xzpf -; chown -R node:node /data/attachments; chmod 0700 /data/attachments' \
+  < "$cutover_dir/attachments.tar.gz"
+kubectl --context "$cutover_context" -n hmm-chat exec hmm-chat-attachment-restore -- \
+  su -s /bin/sh node -c 'node --input-type=module -e '\''
+    import { access, readdir, stat, writeFile, unlink } from "node:fs/promises";
+    import { constants } from "node:fs";
+    const root = "/data/attachments";
+    const owner = await stat(root);
+    if (owner.uid !== process.getuid() || (owner.mode & 0o777) !== 0o700) throw new Error("Attachment ownership or mode mismatch");
+    async function verify(directory) {
+      await access(directory, constants.R_OK | constants.W_OK | constants.X_OK);
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = `${directory}/${entry.name}`;
+        if (entry.isDirectory()) await verify(path);
+        else if (entry.isFile()) await access(path, constants.R_OK);
+        else throw new Error("Unexpected attachment entry type");
+      }
+    }
+    await verify(root);
+    const probe = `${root}/.restore-write-probe`;
+    await writeFile(probe, "restore validation", { flag: "wx", mode: 0o600 });
+    await unlink(probe);
+    console.log("Restored attachments are readable and writable by the candidate node user");
+  '\'''
+kubectl --context "$cutover_context" -n hmm-chat delete pod hmm-chat-attachment-restore
+```
+
+Keep the new claim for the isolated restored server; remove it after the restore evidence is saved.
 Do not use `--clean` against the production database. Compare per-table row counts and canonical
 row digests, credentials and idempotency records, and attachment digests. Exercise an authenticated
 download through the restored server. Record elapsed time and the complete restore result before
