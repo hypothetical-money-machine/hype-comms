@@ -76,6 +76,76 @@ describe("overlay ownership", () => {
     await waitFor(() => expect(document.activeElement).toBe(opener));
   });
 
+  it("restores the search opener outside a remaining nonmodal task detail", async () => {
+    const owner = new OverlayOwnership();
+    const opener = document.createElement("button");
+    const taskDetail = document.createElement("section");
+    const search = document.createElement("section");
+    const searchInput = document.createElement("input");
+    search.append(searchInput);
+    document.body.append(opener, taskDetail, search);
+    const closed = vi.fn();
+    const unsubscribe = owner.onClosed(closed);
+    const taskLease = owner.acquire(taskDetail, null, false);
+    try {
+      opener.focus();
+      const searchLease = owner.acquire(search, opener);
+      searchInput.focus();
+      searchLease.release(true);
+      search.remove();
+      await act(async () => undefined);
+      expect(document.activeElement).toBe(opener);
+      expect(closed).toHaveBeenCalledWith(true);
+      expect(owner.hasOpen()).toBe(true);
+      expect(owner.hasModalOpen()).toBe(false);
+    } finally {
+      unsubscribe();
+      taskLease.release(false);
+      opener.remove();
+      taskDetail.remove();
+      search.remove();
+    }
+  });
+
+  it.each(["inside", "outside"] as const)(
+    "fences restoration %s a remaining modal beneath a nonmodal overlay",
+    async (location) => {
+      const owner = new OverlayOwnership();
+      const modal = document.createElement("section");
+      const modalOpener = document.createElement("button");
+      modal.append(modalOpener);
+      const nonmodal = document.createElement("section");
+      const nonmodalOpener = document.createElement("button");
+      nonmodal.append(nonmodalOpener);
+      const search = document.createElement("section");
+      const searchInput = document.createElement("input");
+      search.append(searchInput);
+      document.body.append(modal, nonmodal, search);
+      const closed = vi.fn();
+      const unsubscribe = owner.onClosed(closed);
+      const modalLease = owner.acquire(modal, null);
+      const nonmodalLease = owner.acquire(nonmodal, null, false);
+      const target = location === "inside" ? modalOpener : nonmodalOpener;
+      try {
+        const searchLease = owner.acquire(search, target);
+        searchInput.focus();
+        searchLease.release(true);
+        search.remove();
+        await act(async () => undefined);
+        expect(document.activeElement).toBe(location === "inside" ? target : document.body);
+        expect(closed).toHaveBeenCalledWith(location === "inside");
+        expect(owner.hasModalOpen()).toBe(true);
+      } finally {
+        unsubscribe();
+        nonmodalLease.release(false);
+        modalLease.release(false);
+        modal.remove();
+        nonmodal.remove();
+        search.remove();
+      }
+    },
+  );
+
   it("does not restore into a removed parent or release the same lease twice", async () => {
     const owner = new OverlayOwnership();
     const opener = document.createElement("button");
