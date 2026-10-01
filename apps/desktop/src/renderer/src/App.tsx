@@ -16,6 +16,7 @@ import {
   type AuthCapabilities,
   type ChannelAccess,
   type ChannelMode,
+  type ConversationSummary,
   type ChatSessionState,
   type TimestampFormatPreference,
   type Message,
@@ -35,7 +36,9 @@ import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
+import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
+import { ConversationContextMenu } from "./conversation-context-menu";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
@@ -520,6 +523,7 @@ export function MessageRow({
   readonly timestampFormat?: TimestampFormatPreference;
 }) {
   const author = members.find((member) => member.id === message.authorId);
+  const authorName = author?.displayName ?? missingAuthorName(message.authorId);
   const participantId = message.authorId ?? "former-member";
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [retracting, setRetracting] = useState(false);
@@ -538,7 +542,7 @@ export function MessageRow({
       ? "Reply in thread"
       : `Open thread with ${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
   const threadSummaryLabel = `${String(replyCount)} ${replyCount === 1 ? "reply" : "replies"}`;
-  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${author?.displayName ?? "Former member"}`;
+  const threadSummaryAccessibilityLabel = `Open thread with ${threadSummaryLabel} for message from ${authorName}`;
   return (
     <article
       className={`message participant-color-${String(participantColorIndex(participantId))}${continuation ? " message-continuation" : ""}${
@@ -557,7 +561,7 @@ export function MessageRow({
       )}
       <div>
         <header className={continuation ? "sr-only" : undefined}>
-          <strong>{author?.displayName ?? "Former member"}</strong>
+          <strong>{authorName}</strong>
           {author?.title != null && <span className="message-author-title">{author.title}</span>}
           <time dateTime={message.createdAt}>
             {formatMessageTime(message.createdAt, timestampFormat)}
@@ -801,6 +805,52 @@ export function App({
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    conversationId: string;
+    position: { x: number; y: number };
+  } | null>(null);
+  const contextMenuTrigger = useRef<HTMLButtonElement | null>(null);
+
+  const openConversationContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>, conversationId: string): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      contextMenuTrigger.current = event.currentTarget;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position =
+        event.clientX === 0 && event.clientY === 0
+          ? {
+              x: rect.left + 16,
+              y: rect.bottom,
+            }
+          : { x: event.clientX, y: event.clientY };
+      setContextMenu({
+        conversationId,
+        position,
+      });
+    },
+    [],
+  );
+
+  const closeConversationContextMenu = useCallback((): void => {
+    setContextMenu(null);
+  }, []);
+
+  const activeContextMenuSummary = useMemo((): ConversationSummary | null => {
+    if (contextMenu === null) return null;
+    return (
+      runtimeState.bootstrap?.conversations.find(
+        (summary) => summary.conversation.id === contextMenu.conversationId,
+      ) ?? null
+    );
+  }, [contextMenu, runtimeState.bootstrap]);
+
+  const markConversationAsRead = useCallback(
+    (conversationId: string): void => {
+      runtime.markConversationAsRead(conversationId);
+    },
+    [runtime],
+  );
   const previousSelectedConversationId = useRef<string | null>(runtimeState.selectedConversationId);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
@@ -1122,10 +1172,13 @@ export function App({
     selectedSummary.participantIds.length === 1 &&
     selectedSummary.participantIds[0] === bootstrap?.currentUser.user.id;
   const selectedIsAnnouncement = selectedSummary?.conversation.channelMode === "announcement";
+  const selectedIsBuiltIn =
+    selectedSummary !== undefined && isBuiltInConversation(selectedSummary.conversation);
   const tasksAvailable =
     (selectedSummary?.conversation.kind === "channel" && !selectedIsAnnouncement) ||
     selectedIsPersonal === true;
-  const canPublishBulletins = selectedIsAnnouncement && bootstrap?.currentUser.role === "owner";
+  const canPublishBulletins =
+    selectedIsAnnouncement && !selectedIsBuiltIn && bootstrap?.currentUser.role === "owner";
   const conversationMessages = runtimeState.messages.filter(
     (message) =>
       message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
@@ -2144,9 +2197,15 @@ export function App({
     );
   }
 
-  const channels = bootstrap.conversations.filter(
+  const allChannels = bootstrap.conversations.filter(
     (summary) => summary.conversation.kind === "channel",
   );
+  // Built-in channels are server-owned and get their own sidebar section, so they are kept out of
+  // the member channel list rather than sorted among it.
+  const builtInChannels = allChannels.filter((summary) =>
+    isBuiltInConversation(summary.conversation),
+  );
+  const channels = allChannels.filter((summary) => !isBuiltInConversation(summary.conversation));
   const directMessages = bootstrap.conversations.filter(
     (summary) =>
       summary.conversation.kind === "direct_message" ||
@@ -2340,6 +2399,46 @@ export function App({
             </>
           )}
 
+          {builtInChannels.length > 0 && (
+            <>
+              <div className="nav-heading">
+                <span>Built-in</span>
+              </div>
+              {builtInChannels.map((summary) => (
+                <button
+                  className={
+                    destination === "workspace" &&
+                    summary.conversation.id === runtimeState.selectedConversationId
+                      ? "conversation active"
+                      : "conversation"
+                  }
+                  type="button"
+                  key={summary.conversation.id}
+                  onClick={() => selectConversation(summary.conversation.id)}
+                  onContextMenu={(event) =>
+                    openConversationContextMenu(event, summary.conversation.id)
+                  }
+                >
+                  <span
+                    className="conversation-label conversation-label-channel"
+                    title={summary.conversation.name ?? undefined}
+                  >
+                    <ChannelIcon
+                      access={summary.conversation.access}
+                      channelMode={summary.conversation.channelMode}
+                    />
+                    <span className="conversation-label-text">{summary.conversation.name}</span>
+                  </span>
+                  <span className="built-in-channel-badge">Built-in</span>
+                  <ConversationBadge
+                    unreadCount={summary.unreadCount}
+                    mentionCount={summary.mentionCount}
+                  />
+                </button>
+              ))}
+            </>
+          )}
+
           <div className="nav-heading">
             <span>Channels</span>
             <ChannelCreatePopover
@@ -2363,6 +2462,7 @@ export function App({
               type="button"
               key={summary.conversation.id}
               onClick={() => selectConversation(summary.conversation.id)}
+              onContextMenu={(event) => openConversationContextMenu(event, summary.conversation.id)}
             >
               <span
                 className="conversation-label conversation-label-channel"
@@ -2401,6 +2501,9 @@ export function App({
                 type="button"
                 key={summary.conversation.id}
                 onClick={() => selectConversation(summary.conversation.id)}
+                onContextMenu={(event) =>
+                  openConversationContextMenu(event, summary.conversation.id)
+                }
               >
                 <span
                   className="conversation-label conversation-label-direct-message"
@@ -2500,7 +2603,9 @@ export function App({
               )}
             {selectedIsAnnouncement && (
               <p className="announcement-participation">
-                Workspace owners post bulletins. Members can reply in threads and react.
+                {selectedIsBuiltIn
+                  ? "Hype Comms posts release notes here. Everyone can reply in threads and react."
+                  : "Workspace owners post bulletins. Members can reply in threads and react."}
               </p>
             )}
             <ConversationHealth
@@ -2561,6 +2666,7 @@ export function App({
                         : "Everyone"}
                   </button>
                   {selectedSummary.conversation.slug !== "general" &&
+                    !selectedIsBuiltIn &&
                     !selectedSummary.conversation.isArchived &&
                     bootstrap.currentUser.role === "owner" && (
                       <button
@@ -2591,7 +2697,7 @@ export function App({
             {selectedSummary.conversation.isArchived === true ? (
               <ArchivedConversationNotice />
             ) : selectedIsAnnouncement && !canPublishBulletins ? (
-              <AnnouncementPostingNotice />
+              <AnnouncementPostingNotice builtIn={selectedIsBuiltIn} />
             ) : (
               <MessageComposer
                 contextKey={selectedSummary.conversation.id}
@@ -2806,7 +2912,7 @@ export function App({
             {selectedSummary?.conversation.isArchived === true ? (
               <ArchivedConversationNotice />
             ) : selectedIsAnnouncement && !canPublishBulletins ? (
-              <AnnouncementPostingNotice />
+              <AnnouncementPostingNotice builtIn={selectedIsBuiltIn} />
             ) : (
               <MessageComposer
                 contextKey={runtimeState.selectedConversationId ?? undefined}
@@ -3091,6 +3197,16 @@ export function App({
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}
+        />
+      )}
+      {contextMenu !== null && activeContextMenuSummary !== null && (
+        <ConversationContextMenu
+          conversation={activeContextMenuSummary}
+          position={contextMenu.position}
+          triggerRef={contextMenuTrigger}
+          onClose={closeConversationContextMenu}
+          onMarkAsRead={markConversationAsRead}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
       )}
     </main>
