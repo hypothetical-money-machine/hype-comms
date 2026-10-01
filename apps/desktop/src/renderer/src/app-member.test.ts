@@ -10,6 +10,7 @@ import type {
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
+  SyncPosition,
   ThemeState,
   UpdateState,
   User,
@@ -281,7 +282,7 @@ function createClient(
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     advanceReadCursor: async () => undefined,
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },

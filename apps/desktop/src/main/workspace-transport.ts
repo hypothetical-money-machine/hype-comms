@@ -65,6 +65,7 @@ export class WorkspaceTransport {
   readonly #origin: string;
   readonly #http: HttpClient;
   readonly #attachments: AttachmentClient;
+  readonly #signOutVerdicts = new WeakMap<Response, boolean>();
   constructor(
     apiOrigin: string,
     private readonly session: Pick<ChatSession, "fetch" | "markSignedOut">,
@@ -74,12 +75,26 @@ export class WorkspaceTransport {
       origin: apiOrigin,
       fetch: async (url, init) => {
         const response = await session.fetch(url.href, init);
-        if (response.status === 401) await session.markSignedOut();
-        return response;
+        return this.#checkSessionResponse(response);
       },
       timeoutMs: 10_000,
     });
     this.#attachments = new AttachmentClient(this.#http);
+  }
+  async #checkSessionResponse(response: Response): Promise<Response> {
+    if (response.status === 401) {
+      const signedOut = await this.session.markSignedOut(response);
+      this.#signOutVerdicts.set(response, signedOut);
+      if (!signedOut) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new ApiClientError(
+          "http",
+          "Workspace request was interrupted. Please retry.",
+          response,
+        );
+      }
+    }
+    return response;
   }
   async #request<B = never, R = unknown>(request: ApiRequestOptions<B, R>): Promise<R> {
     try {
@@ -89,6 +104,17 @@ export class WorkspaceTransport {
     }
   }
   async #fail(error: unknown): Promise<never> {
+    if (
+      error instanceof ApiClientError &&
+      error.response?.status === 401 &&
+      this.#signOutVerdicts.get(error.response) === false
+    ) {
+      throw new WorkspaceRequestError(
+        "Workspace request was interrupted. Please retry.",
+        503,
+        null,
+      );
+    }
     if (error instanceof ApiClientError && error.kind === "http" && error.response !== undefined) {
       const envelope = apiErrorEnvelopeSchema.safeParse(error.body);
       throw new WorkspaceRequestError(
@@ -232,7 +258,10 @@ export class WorkspaceTransport {
       if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
       if (!(error instanceof ApiClientError)) throw error;
       const response = error.response;
-      if (response?.status === 401) return { status: "authentication_required" };
+      if (response?.status === 401)
+        return this.#signOutVerdicts.get(response) === true
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null };
       if (error.kind === "network")
         return { status: "retryable", reason: "network", retryAfterMs: null };
       if (error.kind !== "http" || response === undefined)
@@ -274,7 +303,10 @@ export class WorkspaceTransport {
       if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
       if (!(error instanceof ApiClientError)) throw error;
       const response = error.response;
-      if (response?.status === 401) return { status: "authentication_required" };
+      if (response?.status === 401)
+        return this.#signOutVerdicts.get(response) === true
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null };
       if (error.kind === "network")
         return { status: "retryable", reason: "network", retryAfterMs: null };
       if (error.kind !== "http" || response === undefined)
@@ -341,8 +373,7 @@ export class WorkspaceTransport {
           await response.body?.cancel().catch(() => undefined);
           throw error;
         }
-        if (response.status === 401) await this.session.markSignedOut();
-        return response;
+        return this.#checkSessionResponse(response);
       },
     });
     const files = new AttachmentClient(http);

@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   WorkspaceRealtimeClient,
   REALTIME_REPLAY_MAX_EVENTS,
+  REALTIME_REPLAY_MAX_BYTES,
   decodeRealtimeData,
   REALTIME_FRAME_MAX_BYTES,
   type RealtimeFailure,
@@ -221,6 +222,88 @@ describe("shared realtime delivery", () => {
       state.sockets[0]!.emit("message", Buffer.from(JSON.stringify(frame(0, true))), true);
       expect(state.events).toEqual([]);
       expect(state.failures).toContainEqual({ kind: "invalid_frame" });
+    } finally {
+      state.realtime.resetSession();
+    }
+  });
+
+  it.each(["events", "bytes"] as const)(
+    "keeps the unacknowledged %s budget across reconnects",
+    async (limit) => {
+      const state = setup();
+      const event = (sequence: number): ProductRealtimeEvent =>
+        limit === "events"
+          ? frame(sequence)
+          : productRealtimeEventSchema.parse({
+              ...frame(sequence),
+              type: "message.created",
+              conversationId: workspaceId,
+              conversationSequence: String(sequence),
+              payload: {
+                message: {
+                  id: userId,
+                  conversationId: workspaceId,
+                  conversationSequence: String(sequence),
+                  version: 1,
+                  clientMessageId: userId,
+                  authorId: userId,
+                  threadRootId: null,
+                  body: "a".repeat(4_000),
+                  bodyFormat: "hype_comms_markdown_v1",
+                  editedAt: null,
+                  deletedAt: null,
+                  createdAt: now,
+                  updatedAt: now,
+                },
+                mentionedUserIds: [],
+              },
+            });
+      const perConnection = limit === "events" ? 600 : 450;
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await vi.waitFor(() => expect(state.sockets).toHaveLength(attempt + 1));
+          const socket = state.sockets[attempt]!;
+          socket.frame(frame(0, true));
+          for (let sequence = 1; sequence <= perConnection; sequence++)
+            socket.frame(event(sequence));
+          if (attempt === 0) socket.emit("close", 1006);
+        }
+        expect(state.events.at(-1)).toMatchObject({
+          type: "system.resync_required",
+          position: position(0),
+          payload: { reason: "client_replay_overflow" },
+        });
+        const durable = state.events.filter(
+          (value) => value.type !== "system.connected" && value.type !== "system.resync_required",
+        );
+        expect(durable.length).toBeLessThanOrEqual(REALTIME_REPLAY_MAX_EVENTS);
+        expect(
+          durable.reduce(
+            (bytes, value) => bytes + new TextEncoder().encode(JSON.stringify(value)).byteLength,
+            0,
+          ),
+        ).toBeLessThanOrEqual(REALTIME_REPLAY_MAX_BYTES);
+      } finally {
+        state.realtime.resetSession();
+      }
+    },
+  );
+
+  it("frees retained delivery budget when output acknowledges a disconnected socket", async () => {
+    const state = setup();
+    try {
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(1));
+      state.sockets[0]!.frame(frame(0, true));
+      for (let sequence = 1; sequence <= 600; sequence++) state.sockets[0]!.frame(frame(sequence));
+      state.sockets[0]!.emit("close", 1006);
+      state.realtime.acknowledge({ scope: state.scope, cursor: position(600) });
+      await vi.waitFor(() => expect(state.sockets).toHaveLength(2));
+      state.sockets[1]!.frame(frame(600, true));
+      for (let sequence = 601; sequence <= 1_200; sequence++)
+        state.sockets[1]!.frame(frame(sequence));
+      expect(state.events.filter((event) => event.type === "member.updated")).toHaveLength(1_200);
+      expect(state.events.some((event) => event.type === "system.resync_required")).toBe(false);
+      expect(state.positions[1]).toEqual(position(600));
     } finally {
       state.realtime.resetSession();
     }
