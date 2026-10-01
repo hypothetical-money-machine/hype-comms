@@ -80,6 +80,10 @@ class FakeBasePlatformAdapter:
         self.fatal_error: Optional[tuple[str, str, bool]] = None
         self._fatal_error_handler: Optional[Any] = None
         self._authorization_check: Optional[Any] = None
+        self._active_sessions: dict[str, asyncio.Event] = {}
+        self._pending_messages: dict[str, FakeMessageEvent] = {}
+        self._busy_session_handler: Optional[Any] = None
+        self._message_handler: Optional[Any] = None
 
     def _acquire_platform_lock(self, scope: str, identity: str, description: str) -> bool:
         self.lock_calls.append((scope, identity, description))
@@ -102,6 +106,12 @@ class FakeBasePlatformAdapter:
 
     def set_authorization_check(self, callback: Any) -> None:
         self._authorization_check = callback
+
+    def set_busy_session_handler(self, callback: Any) -> None:
+        self._busy_session_handler = callback
+
+    def set_message_handler(self, callback: Any) -> None:
+        self._message_handler = callback
 
     def _is_sender_authorized(
         self,
@@ -158,6 +168,87 @@ class FakeBasePlatformAdapter:
         if isolate_user and source.user_id:
             parts.append(source.user_id)
         self.session_keys.append(":".join(parts))
+        if self._message_handler is not None:
+            await self._message_handler(event)
+
+
+def fake_build_session_key(
+    source: Any,
+    *,
+    group_sessions_per_user: bool,
+    thread_sessions_per_user: bool,
+) -> str:
+    parts = [source.platform.value, source.chat_type, source.chat_id]
+    if source.thread_id:
+        parts.append(source.thread_id)
+    isolate_user = group_sessions_per_user
+    if source.thread_id and not thread_sessions_per_user:
+        isolate_user = False
+    if isolate_user and source.user_id:
+        parts.append(source.user_id)
+    return ":".join(parts)
+
+
+class FakeBusyGateway:
+    _BUSY_QUEUE_MAX_PENDING = 32
+
+    def __init__(self, adapter: Any):
+        self.adapter = adapter
+        self._draining = False
+        self._queued_events: dict[str, list[FakeMessageEvent]] = {}
+
+    def _adapter_for_source(self, source: Any) -> Any:
+        return self.adapter
+
+    def _queue_depth(self, session_key: str, *, adapter: Any) -> int:
+        return len(self._queued_events.get(session_key, [])) + int(
+            session_key in adapter._pending_messages
+        )
+
+    def _enqueue_fifo(self, session_key: str, event: FakeMessageEvent, adapter: Any) -> None:
+        if session_key in adapter._pending_messages:
+            self._queued_events.setdefault(session_key, []).append(event)
+        else:
+            adapter._pending_messages[session_key] = event
+
+
+def _load_gateway_config() -> dict[str, Any]:
+    return {}
+
+
+def _preserve_queued_followup_history_offset(
+    current_result: dict[str, Any],
+    followup_result: dict[str, Any],
+) -> dict[str, Any]:
+    return followup_result
+
+
+class FakeTurnGateway(FakeBusyGateway):
+    def __init__(self, adapter: Any):
+        super().__init__(adapter)
+        self.configs: list[dict[str, Any]] = []
+        self.turns: list[str] = []
+        self.next_message_id: Optional[str] = None
+        self.results: dict[str, dict[str, Any]] = {}
+        self.other_adapter = object()
+
+    def _adapter_for_source(self, source: Any) -> Any:
+        return self.adapter if source.platform.value == "hype_comms" else self.other_adapter
+
+    async def _run_agent_inner(self, source: Any, event_message_id: str) -> dict[str, Any]:
+        self.configs.append(_load_gateway_config())
+        self.turns.append(event_message_id)
+        result = self.results.get(event_message_id, {"final_response": "NO_REPLY"})
+        next_message_id, self.next_message_id = self.next_message_id, None
+        if next_message_id is not None:
+            followup = await self._run_agent_inner(source=source, event_message_id=next_message_id)
+            return _preserve_queued_followup_history_offset(result, followup)
+        return result
+
+    async def _run_agent_via_proxy(self, source: Any, event_message_id: str) -> dict[str, Any]:
+        self.configs.append(_load_gateway_config())
+        self.turns.append(event_message_id)
+        return {"final_response": "a substantive final reply"}
 
 
 def _install_fake_hermes() -> None:
@@ -173,6 +264,7 @@ def _install_fake_hermes() -> None:
     base.MessageEvent = FakeMessageEvent
     base.MessageType = FakeMessageType
     base.SendResult = FakeSendResult
+    base.build_session_key = fake_build_session_key
     sys.modules.update(
         {
             "gateway": gateway,
@@ -766,7 +858,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 # either switch exported does not silently run a different
                 # suite from CI.
                 "HYPE_COMMS_THREAD_REPLIES": "true",
-                "HYPE_COMMS_THREAD_FOLLOWUPS": "false",
             },
         )
         self.env.start()
@@ -861,7 +952,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
             await adapter.disconnect()
 
-    async def test_dm_mentions_and_self_suppression_checkpoint_without_channel_leakage(self) -> None:
+    async def test_dm_and_channel_messages_reach_model_while_self_messages_do_not(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
@@ -883,14 +974,15 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             message_event("104", DM_ID, AGENT_ID, body="the adapter's own reply")
         )
 
-        self.assertEqual(len(adapter.handled_events), 2)
+        self.assertEqual(len(adapter.handled_events), 3)
         self.assertIn('"body":"dm"', adapter.handled_events[0].text)
-        self.assertIn('"body":"@hermes wake up"', adapter.handled_events[1].text)
+        self.assertIn('"body":"background channel traffic"', adapter.handled_events[1].text)
+        self.assertIn('"body":"@hermes wake up"', adapter.handled_events[2].text)
         self.assertEqual(adapter.handled_events[0].source.chat_type, "dm")
         self.assertEqual(adapter.handled_events[1].source.chat_type, "channel")
         self.assertEqual(adapter.handled_events[1].source.user_id, USER_ID)
         self.assertEqual(adapter.handled_events[1].source.user_name, "morgan")
-        self.assertEqual(len(context_calls(factory)), 2)
+        self.assertEqual(len(context_calls(factory)), 3)
         self.assertEqual(adapter._cursor, "104")
 
     async def test_context_is_fetched_once_only_after_every_wake_gate(self) -> None:
@@ -917,12 +1009,16 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         trigger = message_event("105", DM_ID, USER_ID, body="eligible DM")
         await adapter._accept_event(trigger)
 
-        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertEqual(len(adapter.handled_events), 3)
         self.assertEqual(
             [call["args"] for call in context_calls(factory)],
-            [context_args(DM_ID, message_id_for("105"))],
+            [
+                context_args(CHANNEL_ID, message_id_for("103")),
+                context_args(CHANNEL_ID, message_id_for("104")),
+                context_args(DM_ID, message_id_for("105")),
+            ],
         )
-        self.assertEqual(len(adapter.pre_gateway_dispatch_events), 1)
+        self.assertEqual(len(adapter.pre_gateway_dispatch_events), 3)
         self.assertEqual(adapter.pairing_events, [])
 
     async def test_profile_denied_dm_cannot_flip_into_trigger_only_inference(
@@ -972,6 +1068,745 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             [],
         )
         self.assertEqual(adapter._cursor, "101")
+
+    async def test_busy_ambient_channel_wakes_queue_separate_turns_without_interrupt_or_ack(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        active_guard = asyncio.Event()
+        adapter._active_sessions[session_key] = active_guard
+
+        async def interrupt_and_ack(event: Any) -> None:
+            active_guard.set()
+            await adapter.send(CHANNEL_ID, "Interrupting current task")
+
+        adapter.handle_message = interrupt_and_ack
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, body="ambient first")
+        )
+        await adapter._accept_event(
+            message_event("102", CHANNEL_ID, USER_ID, body="ambient second")
+        )
+
+        self.assertFalse(active_guard.is_set())
+        self.assertEqual(send_calls(factory), [])
+        queued = [adapter._pending_messages[session_key], *gateway._queued_events[session_key]]
+        self.assertEqual(
+            [event.message_id for event in queued],
+            [message_id_for("101"), message_id_for("102")],
+        )
+        self.assertIn('"body":"ambient first"', queued[0].text)
+        self.assertNotIn('"body":"ambient second"', queued[0].text)
+        self.assertIn('"body":"ambient second"', queued[1].text)
+        self.assertNotIn('"body":"ambient first"', queued[1].text)
+        self.assertTrue(all("NO_REPLY" in event.channel_prompt for event in queued))
+        self.assertEqual(adapter._cursor, "102")
+
+        # Once the active response is delivered, each queued pack gets its own
+        # model turn. A silent decision still produces no network message.
+        adapter._active_sessions.clear()
+        adapter._pending_messages.clear()
+        gateway._queued_events.clear()
+        turns: list[str] = []
+
+        async def choose_silence(event: Any) -> None:
+            turns.append(event.message_id)
+            await adapter.send(CHANNEL_ID, "NO_REPLY")
+
+        adapter.handle_message = choose_silence
+        for event in queued:
+            await adapter._handoff_message(event)
+        self.assertEqual(turns, [message_id_for("101"), message_id_for("102")])
+        self.assertEqual(send_calls(factory), [])
+
+    async def test_busy_ambient_queue_full_retries_without_checkpointing_or_losing_the_wake(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        gateway._BUSY_QUEUE_MAX_PENDING = 2
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[session_key] = asyncio.Event()
+        for cursor in ("101", "102"):
+            await adapter._accept_event(message_event(cursor, CHANNEL_ID, USER_ID))
+
+        trigger = message_event("103", CHANNEL_ID, USER_ID, body="must survive overflow")
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(trigger)
+        self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_FULL")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after, 1.0)
+        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._load_cursor(), "102")
+        self.assertEqual(gateway._queue_depth(session_key, adapter=adapter), 2)
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(send_calls(factory), [])
+
+        # A freed slot admits the same uncheckpointed event exactly once.
+        adapter._pending_messages.pop(session_key)
+        await adapter._accept_event(trigger)
+        self.assertEqual(adapter._cursor, "103")
+        queued = [adapter._pending_messages[session_key], *gateway._queued_events[session_key]]
+        self.assertEqual(sum(event.message_id == message_id_for("103") for event in queued), 1)
+
+    async def test_draining_gateway_retries_ambient_wake_before_handoff_and_checkpoint(
+        self,
+    ) -> None:
+        for busy in (False, True):
+            with self.subTest(busy=busy):
+                factory = FakeProcessFactory([])
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+                gateway = FakeBusyGateway(adapter)
+                gateway._draining = True
+                adapter.gateway_runner = gateway
+                if busy:
+                    session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+                    adapter._active_sessions[session_key] = asyncio.Event()
+                with self.assertRaises(adapter_module.CliFailure) as raised:
+                    await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+                self.assertEqual(raised.exception.code, "HERMES_GATEWAY_DRAINING")
+                self.assertTrue(raised.exception.retryable)
+                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter.handled_events, [])
+                self.assertEqual(adapter._pending_messages, {})
+                self.assertEqual(gateway._queued_events, {})
+                self.assertEqual(send_calls(factory), [])
+
+    async def test_busy_ambient_wake_refuses_missing_or_wrong_gateway_fifo(self) -> None:
+        for wrong_adapter in (False, True):
+            with self.subTest(wrong_adapter=wrong_adapter):
+                factory = FakeProcessFactory([])
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+                session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+                adapter._active_sessions[session_key] = asyncio.Event()
+                if wrong_adapter:
+                    adapter.gateway_runner = FakeBusyGateway(object())
+                with self.assertRaises(adapter_module.CliFailure) as raised:
+                    await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+                self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
+                self.assertTrue(raised.exception.retryable)
+                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter.handled_events, [])
+                self.assertEqual(send_calls(factory), [])
+
+    async def test_stale_busy_guard_does_not_trap_an_ambient_channel_wake(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[session_key] = asyncio.Event()
+        adapter._heal_stale_session_lock = adapter._active_sessions.pop
+
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+
+        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertEqual(adapter._cursor, "101")
+
+    async def test_busy_mentions_and_dms_keep_normal_gateway_handoff(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        channel_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[channel_key] = asyncio.Event()
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+        )
+        await adapter._accept_event(message_event("102", DM_ID, USER_ID))
+
+        self.assertEqual(
+            [event.message_id for event in adapter.handled_events],
+            [message_id_for("101"), message_id_for("102")],
+        )
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter._cursor, "102")
+
+    async def test_idle_to_busy_race_queues_ambient_wake_without_calling_busy_policy(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        interruptions: list[str] = []
+
+        async def busy_policy(event: Any, key: str) -> bool:
+            interruptions.append(event.message_id)
+            await adapter.send(CHANNEL_ID, "Interrupting current task")
+            return True
+
+        adapter.set_busy_session_handler(busy_policy)
+
+        async def race_into_busy(event: Any) -> None:
+            await asyncio.sleep(0)
+            adapter._active_sessions[session_key] = asyncio.Event()
+            self.assertTrue(await adapter._busy_session_handler(event, session_key))
+
+        adapter.handle_message = race_into_busy
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(interruptions, [])
+        self.assertEqual(send_calls(factory), [])
+        self.assertEqual(adapter._pending_messages[session_key].message_id, message_id_for("101"))
+        self.assertEqual(adapter._cursor, "101")
+
+    async def test_idle_to_busy_queue_failure_propagates_without_fallback_or_checkpoint(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(object())
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+
+        async def forbidden_fallback(event: Any, key: str) -> bool:
+            self.fail("Ambient traffic must never reach the interrupting busy policy")
+
+        adapter.set_busy_session_handler(forbidden_fallback)
+
+        async def race_into_busy(event: Any) -> None:
+            await asyncio.sleep(0)
+            adapter._active_sessions[session_key] = asyncio.Event()
+            self.assertTrue(await adapter._busy_session_handler(event, session_key))
+
+        adapter.handle_message = race_into_busy
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
+        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter._ambient_handoff_failures, {})
+        self.assertEqual(send_calls(factory), [])
+
+    async def test_queued_ambient_turns_recover_after_restart_with_fresh_context(self) -> None:
+        first = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(first)
+        first.gateway_runner = FakeBusyGateway(first)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        first._active_sessions[key] = asyncio.Event()
+        for cursor in ("101", "102"):
+            await first._accept_event(
+                message_event(cursor, CHANNEL_ID, USER_ID, body=f"server-only body {cursor}")
+            )
+        persisted = json.loads(first._cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["cursor"], "102")
+        self.assertEqual(
+            set(persisted["pendingAmbientWakes"]),
+            {message_id_for("101"), message_id_for("102")},
+        )
+        self.assertNotIn("server-only body", first._cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(stat.S_IMODE(first._cursor_path.stat().st_mode), 0o600)
+
+        # The old in-memory FIFO is gone. Startup must recover both model turns
+        # from durable anchors before it resumes watch after cursor 102.
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "102"), watch)]
+        )
+        restarted = self.new_adapter(factory)
+        decisions: list[tuple[str, str]] = []
+
+        async def decide(event: Any) -> str:
+            decisions.append((event.message_id, event.text))
+            return "NO_REPLY"
+
+        restarted.set_message_handler(decide)
+        self.assertTrue(await restarted.connect())
+        self.assertEqual(
+            [item[0] for item in decisions],
+            [message_id_for("101"), message_id_for("102")],
+        )
+        self.assertIn("server-only body 101", decisions[0][1])
+        self.assertIn("server-only body 102", decisions[1][1])
+        self.assertEqual(len(context_calls(factory)), 2)
+        self.assertEqual(restarted._pending_ambient_wakes, {})
+        self.assertEqual(restarted._cursor, "102")
+        self.assertEqual(json.loads(first._cursor_path.read_text())["pendingAmbientWakes"], {})
+        await restarted.disconnect()
+
+    async def test_recovered_ambient_authorization_denial_cannot_expose_context(self) -> None:
+        first = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(first)
+        first.gateway_runner = FakeBusyGateway(first)
+        first._active_sessions[f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"] = asyncio.Event()
+        await first._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "101"), watch)]
+        )
+        restarted = self.new_adapter(factory)
+        restarted.set_authorization_check(lambda *args: False)
+
+        self.assertTrue(await restarted.connect())
+        self.assertEqual(context_calls(factory), [])
+        self.assertEqual(restarted.handled_events, [])
+        self.assertEqual(restarted._pending_ambient_wakes, {})
+        self.assertEqual(restarted._cursor, "101")
+        await restarted.disconnect()
+
+    async def deferred_recovery_fixture(
+        self,
+        *,
+        count: int = 4,
+        capacity: int = 2,
+    ) -> tuple[Any, FakeTurnGateway, FakeProcessFactory, str, FakeWatchProcess]:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed)
+        seed.gateway_runner = FakeBusyGateway(seed)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        seed._active_sessions[key] = asyncio.Event()
+        for cursor in range(101, 101 + count):
+            await seed._accept_event(message_event(str(cursor), CHANNEL_ID, USER_ID))
+        last_cursor = str(100 + count)
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs("500")
+            + [ProcessSpec(("watch", "--json", "--after", last_cursor), watch)]
+        )
+        adapter = self.new_adapter(factory)
+        gateway = FakeTurnGateway(adapter)
+        gateway._BUSY_QUEUE_MAX_PENDING = capacity
+        adapter.gateway_runner = gateway
+        adapter._active_sessions[key] = asyncio.Event()
+        return adapter, gateway, factory, key, watch
+
+    async def finish_recovery_fifo(self, adapter: Any, gateway: FakeTurnGateway, key: str) -> None:
+        events = [adapter._pending_messages.pop(key)]
+        events.extend(gateway._queued_events.pop(key, []))
+        for event in events:
+            await gateway._run_agent_inner(source=event.source, event_message_id=event.message_id)
+
+    async def test_ambient_backlog_connects_and_recovers_without_new_watch_traffic(self) -> None:
+        adapter, gateway, factory, key, watch = await self.deferred_recovery_fixture()
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+        delays: list[Optional[float]] = []
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt
+            delays.append(retry_after)
+            sleeping.set()
+            await resume.wait()
+            resume.clear()
+
+        adapter._backoff = controlled_backoff
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            self.assertIsNotNone(task)
+            self.assertTrue(adapter._running)
+            self.assertIsNone(adapter.fatal_error)
+            self.assertFalse(watch.terminated)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 2)
+            self.assertEqual(len(adapter._pending_ambient_wakes), 4)
+            self.assertEqual(delays, [1.0])
+
+            # Later accepted watch traffic may advance the high cursor while
+            # older recovered anchors are still awaiting FIFO capacity.
+            await adapter._accept_event(message_event("200", DM_ID, USER_ID))
+            await self.finish_recovery_fifo(adapter, gateway, key)
+            resume.set()
+            await asyncio.wait_for(task, timeout=0.5)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 2)
+            await self.finish_recovery_fifo(adapter, gateway, key)
+
+            self.assertEqual(gateway.turns, [message_id_for(str(i)) for i in range(101, 105)])
+            self.assertEqual(adapter._pending_ambient_wakes, {})
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertEqual(adapter._cursor, "200")
+            persisted = json.loads(adapter._cursor_path.read_text())
+            self.assertEqual(persisted["cursor"], "200")
+            self.assertEqual(persisted["pendingAmbientWakes"], {})
+            self.assertEqual(factory.calls[6]["args"], ("watch", "--json", "--after", "104"))
+        finally:
+            await adapter.disconnect()
+
+    async def test_deferred_ambient_batch_does_not_reinfer_a_failed_model_turn(self) -> None:
+        adapter, gateway, factory, key, _watch = await self.deferred_recovery_fixture(
+            count=3, capacity=1
+        )
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await resume.wait()
+            resume.clear()
+            sleeping.clear()
+
+        adapter._backoff = controlled_backoff
+        failed_id = message_id_for("101")
+        gateway.results[failed_id] = {"failed": True, "final_response": ""}
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            await self.finish_recovery_fifo(adapter, gateway, key)
+            resume.set()
+
+            async def finish_second_turn() -> None:
+                while key not in adapter._pending_messages:
+                    await asyncio.sleep(0)
+                await self.finish_recovery_fifo(adapter, gateway, key)
+
+            await asyncio.wait_for(finish_second_turn(), timeout=0.5)
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            resume.set()
+            await asyncio.wait_for(task, timeout=0.5)
+            await self.finish_recovery_fifo(adapter, gateway, key)
+
+            self.assertEqual(gateway.turns, [message_id_for(str(i)) for i in range(101, 104)])
+            self.assertEqual(set(adapter._pending_ambient_wakes), {failed_id})
+            self.assertEqual(
+                len([call for call in context_calls(factory) if call["args"][5] == failed_id]),
+                1,
+            )
+        finally:
+            await adapter.disconnect()
+
+    async def test_disconnect_cancels_sleeping_ambient_recovery_without_losing_anchors(self) -> None:
+        adapter, _gateway, _factory, _key, watch = await self.deferred_recovery_fixture()
+        sleeping = asyncio.Event()
+
+        async def sleep_until_cancelled(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await asyncio.Future()
+
+        adapter._backoff = sleep_until_cancelled
+        self.assertTrue(await adapter.connect())
+        await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+        task = adapter._ambient_replay_task
+        before = adapter._cursor_path.read_bytes()
+
+        await asyncio.wait_for(adapter.disconnect(), timeout=0.5)
+
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(adapter._ambient_replay_task)
+        self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        self.assertTrue(watch.terminated)
+
+    async def test_disconnect_reaps_inflight_ambient_context_retry(self) -> None:
+        adapter, _gateway, factory, _key, _watch = await self.deferred_recovery_fixture()
+        child = FakeBlockingCommandProcess()
+        factory.specs.append(ProcessSpec(context_args(CHANNEL_ID, message_id_for("103")), child))
+
+        async def no_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+
+        adapter._backoff = no_backoff
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(child.started.wait(), timeout=0.5)
+            before = adapter._cursor_path.read_bytes()
+            await asyncio.wait_for(adapter.disconnect(), timeout=0.5)
+            self.assertTrue(child.killed)
+            self.assertTrue(child.reaped.is_set())
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        finally:
+            await adapter.disconnect()
+
+    async def test_fatal_ambient_recovery_hands_off_before_detached_disconnect(self) -> None:
+        adapter, _gateway, _factory, _key, _watch = await self.deferred_recovery_fixture()
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await resume.wait()
+
+        async def detached_disconnect(failed_adapter: Any) -> None:
+            await asyncio.shield(asyncio.create_task(failed_adapter.disconnect()))
+
+        adapter._backoff = controlled_backoff
+        adapter.set_fatal_error_handler(detached_disconnect)
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            failure = adapter_module.CliFailure(6, "INVALID_CONTEXT_PACK", "invalid", False)
+            with patch.object(adapter, "_dispatch_message", side_effect=failure):
+                resume.set()
+                await asyncio.wait_for(task, timeout=0.5)
+            self.assertFalse(task.cancelled())
+            self.assertFalse(adapter._running)
+            self.assertEqual(adapter.fatal_error[0], "INVALID_CONTEXT_PACK")
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertIsNone(adapter._watch_task)
+            self.assertEqual(len(adapter._pending_ambient_wakes), 4)
+        finally:
+            await adapter.disconnect()
+
+    async def test_failed_ambient_model_decision_retains_durable_anchor(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+
+        async def fail(event: Any) -> str:
+            raise RuntimeError("inference did not finish")
+
+        adapter.set_message_handler(fail)
+        with self.assertRaisesRegex(RuntimeError, "inference did not finish"):
+            await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(adapter._cursor, "100")
+        persisted = json.loads(adapter._cursor_path.read_text())
+        self.assertIn(message_id_for("101"), persisted["pendingAmbientWakes"])
+        self.assertEqual(persisted["cursor"], "100")
+
+    async def test_ambient_recovery_write_failure_prevents_volatile_handoff(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        failure = adapter_module.CliFailure(6, "CURSOR_STATE_WRITE_FAILED", "failed", False)
+        with patch.object(adapter, "_persist_cursor", side_effect=failure):
+            with self.assertRaises(adapter_module.CliFailure):
+                await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._pending_ambient_wakes, {})
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter.handled_events, [])
+
+    async def test_ambient_recovery_fsync_failure_prevents_volatile_handoff(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        before = adapter._cursor_path.read_bytes()
+        with patch.object(adapter_module.os, "fsync", side_effect=OSError("disk failed")):
+            with self.assertRaises(adapter_module.CliFailure) as raised:
+                await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(raised.exception.code, "CURSOR_STATE_WRITE_FAILED")
+        self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        self.assertEqual(adapter._pending_ambient_wakes, {})
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter._admitted_ambient_wakes, set())
+
+    async def test_ambient_completion_write_failure_restores_recovery_anchor(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        before = adapter._cursor_path.read_bytes()
+        with patch.object(adapter_module.os, "fsync", side_effect=OSError("disk failed")):
+            with self.assertRaises(adapter_module.CliFailure):
+                adapter._complete_ambient_wake(message_id_for("101"))
+        self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        self.assertIn(message_id_for("101"), adapter._pending_ambient_wakes)
+
+    async def test_reconnect_replay_does_not_admit_an_already_live_fifo_turn(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        calls = len(context_calls(factory))
+
+        await adapter._replay_pending_ambient_wakes()
+
+        self.assertEqual(len(context_calls(factory)), calls)
+        self.assertEqual(adapter.gateway_runner._queue_depth(key, adapter=adapter), 1)
+        self.assertEqual(adapter._admitted_ambient_wakes, {message_id_for("101")})
+
+    async def test_malformed_v3_ambient_anchor_is_rejected_before_recovery(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        valid = json.loads(adapter._cursor_path.read_text())
+        anchor_id = message_id_for("101")
+        malformed = [
+            {**valid, "pendingAmbientWakes": []},
+            {**valid, "pendingAmbientWakes": {"bad-id": valid["pendingAmbientWakes"][anchor_id]}},
+        ]
+        for field, value in (
+            ("workspaceSequence", "-1"),
+            ("conversationId", "bad-id"),
+            ("conversationSequence", True),
+            ("authorId", None),
+            ("threadRootId", "bad-id"),
+            ("createdAt", "yesterday"),
+            ("body", "must not persist message text"),
+        ):
+            target = {**valid["pendingAmbientWakes"][anchor_id], field: value}
+            malformed.append({**valid, "pendingAmbientWakes": {anchor_id: target}})
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                adapter._cursor_path.write_text(json.dumps(payload))
+                with self.assertRaises(adapter_module.CliFailure) as raised:
+                    adapter._load_cursor()
+                self.assertEqual(raised.exception.code, "CURSOR_STATE_INVALID")
+
+    async def test_ambient_recovery_bound_refuses_new_handoff_without_checkpoint(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(adapter)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        with patch.object(adapter_module, "MAX_PENDING_AMBIENT_WAKES", 1):
+            await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+            before = adapter._cursor_path.read_bytes()
+            with self.assertRaises(adapter_module.CliFailure) as raised:
+                await adapter._accept_event(message_event("102", CHANNEL_ID, USER_ID))
+            self.assertEqual(raised.exception.code, "AMBIENT_WAKE_STATE_FULL")
+            self.assertTrue(raised.exception.retryable)
+            self.assertEqual(adapter._cursor, "101")
+            self.assertEqual(adapter._cursor_path.read_bytes(), before)
+            self.assertEqual(adapter.gateway_runner._queue_depth(key, adapter=adapter), 1)
+
+    async def test_quiet_turn_policy_isolated_config_and_retires_recursive_anchors(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        gateway = FakeTurnGateway(adapter)
+        adapter.gateway_runner = gateway
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[key] = asyncio.Event()
+        for cursor in ("101", "102"):
+            await adapter._accept_event(message_event(cursor, CHANNEL_ID, USER_ID))
+        source = adapter._pending_messages[key].source
+        config = {
+            "agent": {"model": "example"},
+            "display": {
+                "interim_assistant_messages": True,
+                "platforms": {"slack": {"streaming": True}},
+            },
+        }
+        snapshot = json.loads(json.dumps(config))
+        with patch(f"{__name__}._load_gateway_config", return_value=config) as loader:
+            adapter._install_gateway_turn_policy()
+            gateway.next_message_id = message_id_for("102")
+            result = await gateway._run_agent_inner(
+                source=source, event_message_id=message_id_for("101")
+            )
+            self.assertEqual(result["final_response"], "NO_REPLY")
+            self.assertEqual(adapter._pending_ambient_wakes, {})
+            self.assertEqual(gateway.turns, [message_id_for("101"), message_id_for("102")])
+            for observed in gateway.configs:
+                self.assertFalse(
+                    observed["display"]["platforms"]["hype_comms"]["interim_assistant_messages"]
+                )
+                self.assertFalse(observed["display"]["platforms"]["hype_comms"]["streaming"])
+                self.assertIs(observed["agent"], config["agent"])
+                self.assertIs(
+                    observed["display"]["platforms"]["slack"],
+                    config["display"]["platforms"]["slack"],
+                )
+            other_source = types.SimpleNamespace(platform=FakePlatform("slack"))
+            await gateway._run_agent_inner(
+                source=other_source, event_message_id=message_id_for("103")
+            )
+            self.assertIs(gateway.configs[-1], config)
+            proxy = await gateway._run_agent_via_proxy(
+                source=source, event_message_id=message_id_for("104")
+            )
+            self.assertEqual(proxy["final_response"], "a substantive final reply")
+            self.assertFalse(gateway.configs[-1]["display"]["platforms"]["hype_comms"]["streaming"])
+            self.assertIs(sys.modules[__name__]._load_gateway_config, loader)
+        self.assertEqual(config, snapshot)
+
+    async def test_recursive_ambient_turns_retire_only_their_own_successful_decision(self) -> None:
+        for first_flag, second_flag in (
+            ("failed", None),
+            (None, "failed"),
+            ("interrupted", None),
+            (None, "interrupted"),
+        ):
+            with self.subTest(first_flag=first_flag, second_flag=second_flag):
+                adapter = self.new_adapter(FakeProcessFactory([]))
+                self.prepare_adapter(adapter)
+                gateway = FakeTurnGateway(adapter)
+                adapter.gateway_runner = gateway
+                key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+                adapter._active_sessions[key] = asyncio.Event()
+                for cursor in ("101", "102"):
+                    await adapter._accept_event(message_event(cursor, CHANNEL_ID, USER_ID))
+                source = adapter._pending_messages[key].source
+                first_id, second_id = message_id_for("101"), message_id_for("102")
+                if first_flag:
+                    gateway.results[first_id] = {first_flag: True, "final_response": ""}
+                if second_flag:
+                    gateway.results[second_id] = {second_flag: True, "final_response": ""}
+                gateway.next_message_id = second_id
+                adapter._install_gateway_turn_policy()
+
+                await gateway._run_agent_inner(source=source, event_message_id=first_id)
+
+                retained = first_id if first_flag else second_id
+                self.assertEqual(set(adapter._pending_ambient_wakes), {retained})
+                self.assertEqual(adapter._admitted_ambient_wakes, set())
+                persisted = json.loads(adapter._cursor_path.read_text())
+                self.assertEqual(set(persisted["pendingAmbientWakes"]), {retained})
+
+    async def test_native_handler_fallback_cannot_retire_a_failed_turn(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        gateway = FakeTurnGateway(adapter)
+        adapter.gateway_runner = gateway
+        adapter._install_gateway_turn_policy()
+        gateway.results[message_id_for("101")] = {"failed": True, "final_response": ""}
+
+        async def decide(event: Any) -> dict[str, Any]:
+            return await gateway._run_agent_inner(
+                source=event.source, event_message_id=event.message_id
+            )
+
+        adapter.set_message_handler(decide)
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+
+        self.assertIn(message_id_for("101"), adapter._pending_ambient_wakes)
+        self.assertEqual(adapter._admitted_ambient_wakes, set())
+        self.assertEqual(adapter._cursor, "101")
+
+    async def test_v2_cursor_migrates_to_v3_without_losing_read_targets(self) -> None:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed, cursor="77")
+        seed._cursor_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "cursor": "77",
+                    "pendingReadCursors": {
+                        DM_ID: {
+                            "messageId": message_id_for("101"),
+                            "conversationSequence": "101",
+                        }
+                    },
+                }
+            )
+        )
+        scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs("500", scopes)
+            + [
+                read_cursor_spec(DM_ID, message_id_for("101")),
+                ProcessSpec(("watch", "--json", "--after", "77"), watch),
+            ]
+        )
+        restarted = self.new_adapter(factory)
+        self.assertTrue(await restarted.connect())
+        persisted = json.loads(seed._cursor_path.read_text())
+        self.assertEqual(persisted["version"], 3)
+        self.assertEqual(persisted["cursor"], "77")
+        self.assertEqual(persisted["pendingReadCursors"], {})
+        self.assertEqual(persisted["pendingAmbientWakes"], {})
+        await restarted.disconnect()
 
     async def test_profile_denied_channel_is_checkpointed_without_handoff_or_context(
         self,
@@ -1230,7 +2065,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         adapter = self.new_adapter(
             factory,
-            env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"},
         )
         self.prepare_adapter(adapter)
 
@@ -1478,7 +2312,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 {
                     "version": adapter_module.CURSOR_FILE_VERSION,
                     "cursor": "1" + "0" * 4_300,
-                    "pendingReadCursors": {},
+                    "pendingReadCursors": {}, "pendingAmbientWakes": {},
                 }
             ),
             encoding="utf-8",
@@ -2261,8 +3095,9 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             await adapter._accept_event(message_event("101", DM_ID, USER_ID))
 
         pending = {
-            "version": 2,
+            "version": 3,
             "cursor": "101",
+            "pendingAmbientWakes": {},
             "pendingReadCursors": {
                 DM_ID: {
                     "messageId": anchor_id,
@@ -2270,7 +3105,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 }
             },
         }
-        cleared = {"version": 2, "cursor": "101", "pendingReadCursors": {}}
+        cleared = {"version": 3, "cursor": "101", "pendingReadCursors": {}, "pendingAmbientWakes": {}}
         self.assertEqual(writes, [pending, cleared])
         self.assertEqual(durable_state_seen_by_server, [pending])
 
@@ -2309,8 +3144,9 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 await adapter._accept_event(message_event("101", DM_ID, USER_ID))
 
             pending = {
-                "version": 2,
+                "version": 3,
                 "cursor": "101",
+                "pendingAmbientWakes": {},
                 "pendingReadCursors": {
                     DM_ID: {
                         "messageId": anchor_id,
@@ -2589,7 +3425,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first._cursor, "101")
         self.assertEqual(first._pending_read_cursors[DM_ID].message_id, anchor_id)
         persisted = json.loads(first._cursor_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 2)
+        self.assertEqual(persisted["version"], 3)
         self.assertEqual(persisted["cursor"], "101")
         self.assertEqual(
             persisted["pendingReadCursors"][DM_ID]["messageId"],
@@ -3283,8 +4119,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             writes,
             [
-                {"version": 2, "cursor": "101", "pendingReadCursors": {}},
-                {"version": 2, "cursor": "102", "pendingReadCursors": {}},
+                {"version": 3, "cursor": "101", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
+                {"version": 3, "cursor": "102", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
             ],
         )
         self.assertEqual(
@@ -3292,7 +4128,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
-    async def test_v1_cursor_state_migrates_to_v2_before_watch(self) -> None:
+    async def test_v1_cursor_state_migrates_to_v3_before_watch(self) -> None:
         seed = self.new_adapter(FakeProcessFactory([]))
         seed._api_origin = ORIGIN
         seed._agent_user_id = AGENT_ID
@@ -3310,7 +4146,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         migrated = json.loads(cursor_path.read_text(encoding="utf-8"))
         self.assertEqual(
             migrated,
-            {"version": 2, "cursor": "77", "pendingReadCursors": {}},
+            {"version": 3, "cursor": "77", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
         )
         await restarted.disconnect()
 
@@ -4275,14 +5111,16 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             send_calls(factory)[0]["args"], ("messages", "send", CHANNEL_ID, "--json")
         )
 
-    async def test_an_unmentioned_thread_follow_up_is_ignored_by_default(self) -> None:
-        # The shipped promise is that unmentioned channel traffic never reaches
-        # Hermes. Receiving the annotation is not the same as acting on it.
+    async def test_an_unmentioned_thread_follow_up_reaches_the_model_by_default(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
         seen: list[Any] = []
-        adapter.handle_message = lambda event: seen.append(event)
+
+        async def capture(event: Any) -> None:
+            seen.append(event)
+
+        adapter.handle_message = capture
 
         outcome = await adapter._accept_event(
             message_event(
@@ -4296,15 +5134,19 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(seen, [])
-        self.assertEqual(adapter._thread_roots, {})
+        self.assertEqual(len(seen), 1)
+        self.assertIn('"body":"still broken"', seen[0].text)
+        self.assertEqual(
+            adapter._thread_roots[message_id_for("101")],
+            (CHANNEL_ID, THREAD_ROOT_ID),
+        )
 
-    async def test_an_unmentioned_thread_follow_up_wakes_the_agent_when_enabled(self) -> None:
-        # With follow-ups on, a reply inside a thread this agent already spoke
+    async def test_an_unmentioned_thread_follow_up_keeps_its_reply_root_by_default(self) -> None:
+        # A reply inside a thread this agent already spoke
         # in wakes it without a mention, and the reply it writes still threads
         # under that thread's root rather than under the follow-up.
         factory = FakeProcessFactory([send_spec(CHANNEL_ID, thread_root_id=THREAD_ROOT_ID)])
-        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
         seen: list[Any] = []
 
@@ -4334,22 +5176,24 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", THREAD_ROOT_ID),
         )
 
-    async def test_unmentioned_top_level_channel_traffic_stays_ignored_when_enabled(self) -> None:
-        # The server only annotates thread replies, so an ordinary unmentioned
-        # channel message carries no reason and must stay out of Hermes even
-        # with follow-ups switched on.
+    async def test_unmentioned_top_level_channel_traffic_reaches_the_model(self) -> None:
         factory = FakeProcessFactory([])
-        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
         seen: list[Any] = []
-        adapter.handle_message = lambda event: seen.append(event)
+
+        async def capture(event: Any) -> None:
+            seen.append(event)
+
+        adapter.handle_message = capture
 
         outcome = await adapter._accept_event(
             message_event("101", CHANNEL_ID, USER_ID, body="unrelated chatter")
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(seen, [])
+        self.assertEqual(len(seen), 1)
+        self.assertIn('"body":"unrelated chatter"', seen[0].text)
 
     async def test_an_unrecognized_notification_reason_is_fatal(self) -> None:
         # Absence is the whole legacy shape and is accepted. Any other value
@@ -4373,17 +5217,19 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code, "INVALID_MESSAGE_EVENT")
 
-    async def test_the_channel_prompt_names_the_agent_only_when_follow_ups_are_on(self) -> None:
+    async def test_the_channel_prompt_always_names_the_agent_and_silence_contract(self) -> None:
         # metadata and raw_message reach no prompt, and platform_hint is fixed
         # at plugin registration, so channel_prompt is the only place this
-        # adapter can tell the model its own handle and the silence rule. The
-        # default configuration sets none of it.
+        # adapter can tell the model its own handle and the silence rule.
         quiet = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(quiet)
-        self.assertIsNone(quiet._channel_prompt())
+        quiet_prompt = quiet._channel_prompt()
+        self.assertIsNotNone(quiet_prompt)
+        self.assertIn("@hermes", quiet_prompt)
+        self.assertIn("NO_REPLY", quiet_prompt)
 
         adapter = self.new_adapter(
-            FakeProcessFactory([]), env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"}
+            FakeProcessFactory([])
         )
         self.prepare_adapter(adapter)
         prompt = adapter._channel_prompt()
@@ -4435,7 +5281,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # raw_message do not. Asserting it on the event, rather than on the
         # helper, is what keeps the wiring from being deleted silently.
         factory = FakeProcessFactory([])
-        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
 
         await adapter._accept_event(
@@ -4448,10 +5294,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@hermes", prompt)
         self.assertIn("NO_REPLY", prompt)
 
-    async def test_a_dispatched_event_carries_no_channel_prompt_by_default(self) -> None:
-        # The default configuration must leave the prompt exactly as it was
-        # before follow-ups existed, because a changed ephemeral prompt costs
-        # a fresh agent and a cold provider prompt cache.
+    async def test_a_dispatched_event_carries_the_channel_prompt_by_default(self) -> None:
         factory = FakeProcessFactory([])
         adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
@@ -4461,7 +5304,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(adapter.handled_events), 1)
-        self.assertIsNone(adapter.handled_events[0].channel_prompt)
+        prompt = adapter.handled_events[0].channel_prompt
+        self.assertIsNotNone(prompt)
+        self.assertIn("decide whether you need to reply", prompt)
+        self.assertIn("NO_REPLY", prompt)
 
     async def test_short_prose_naming_a_marker_is_still_delivered(self) -> None:
         # The long-prose case passes on the 64-character cap alone. This one is
@@ -4513,7 +5359,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # wake the agent, so the adapter refuses it too rather than trusting
         # that someone upstream checked.
         factory = FakeProcessFactory([])
-        adapter = self.new_adapter(factory, env={"HYPE_COMMS_THREAD_FOLLOWUPS": "true"})
+        adapter = self.new_adapter(factory)
         self.prepare_adapter(adapter)
 
         with self.assertRaises(adapter_module.CliFailure) as raised:
@@ -4622,13 +5468,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(callable(context.kwargs["standalone_sender_fn"]))
         # The hint is the agent's whole model of the platform. It has to say
-        # where a reply lands and, more importantly, that the agent goes deaf
-        # in the thread it just opened unless a follow-up mentions it again.
+        # where a reply lands and that every authorized message is a decision
+        # point where intentional silence is valid.
         hint = context.kwargs["platform_hint"]
         self.assertIn("context pack", hint)
         self.assertIn("threaded reply", hint)
         self.assertIn("one level deep", hint)
-        self.assertIn("mention", hint)
+        self.assertIn("Every authorized message", hint)
+        self.assertIn("NO_REPLY", hint)
         self.assertIn("4,000 characters", hint)
 
 

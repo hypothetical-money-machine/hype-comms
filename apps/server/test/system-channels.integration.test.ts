@@ -274,6 +274,62 @@ describe("seedSystemChannels", () => {
     );
   });
 
+  it("filters built-in channels before ranking search pages for legacy clients", async () => {
+    const repository = repositoryFor(true);
+    await repository.seedSystemChannels([definition]);
+    const systemChannel = await channelRow();
+    const ordinaryChannel = await repository.createChannel(owner, {
+      name: "Release discussion",
+      slug: "release-discussion",
+      topic: null,
+      access: "workspace",
+    });
+    const ordinary = await repository.sendMessage(
+      owner,
+      ordinaryChannel.conversation.conversation.id,
+      {
+        threadRootId: null,
+        body: "release",
+        bodyFormat: "hype_comms_markdown_v1",
+        clientMessageId: randomUUID(),
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    );
+
+    for (const includeSystemChannels of [undefined, false]) {
+      const legacy = await repository.searchMessages(
+        member,
+        "release",
+        undefined,
+        1,
+        true,
+        includeSystemChannels,
+      );
+      expect(legacy.results.map(({ message }) => message.id)).toEqual([ordinary.message.id]);
+      expect(legacy.nextCursor).toBeNull();
+    }
+
+    const stored = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE conversation_id = $1`,
+      [systemChannel?.id],
+    );
+    const capable = await repository.searchMessages(member, "release", undefined, 50, true, true);
+    expect(new Set(capable.results.map(({ message }) => message.id))).toEqual(
+      new Set([ordinary.message.id, ...stored.rows.map(({ id }) => id)]),
+    );
+    expect(capable.results).toHaveLength(3);
+    const pagedIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.searchMessages(member, "release", cursor, 1, true, true);
+      expect(page.results).toHaveLength(1);
+      pagedIds.push(page.results[0]!.message.id);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(pagedIds).toEqual(capable.results.map(({ message }) => message.id));
+  });
+
   it("withholds built-in channel events from sync until the client advertises support", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);
