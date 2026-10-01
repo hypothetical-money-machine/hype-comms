@@ -36,7 +36,10 @@ export async function measureOlderHistory(
     const error = await page
       .locator(".message-list")
       .evaluate((list) => list.querySelector("[role=alert]")?.textContent);
-    if (error) throw new Error(`Older history failed: ${error}`);
+    // The runtime bounds one action to 20 overlapping pages. Its continuation notice
+    // asks for another click; other alerts still report a failed history operation.
+    if (error && error !== "More history remains. Load older messages again to continue.")
+      throw new Error(`Older history failed: ${error}`);
     clicks.push({ ms: performance.now() - clickStarted, rows: await timelineCount(page) });
   }
   const ms = performance.now() - started;
