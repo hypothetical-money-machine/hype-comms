@@ -1768,7 +1768,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(0)
 
                 await asyncio.wait_for(wait_for_other(), timeout=0.5)
-                self.assertEqual([event.message_id for event in adapter.handled_events], [message_id_for("103")])
+                self.assertEqual(
+                    [event.message_id for event in adapter.handled_events],
+                    [message_id_for("103")],
+                )
                 self.assertEqual(len(context_calls(factory)), 3)
                 self.assertNotIn(other_id, adapter._ambient_replay_retries)
                 self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].attempt, 1)
@@ -1904,6 +1907,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter._active_sessions.clear()
         adapter._admitted_ambient_wakes.clear()
         adapter._pending_messages.clear()
+
         async def quiet(event: Any) -> str:
             return "NO_REPLY"
 
@@ -2001,7 +2005,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(adapter._pending_ambient_wakes), 4)
         finally:
             await adapter.disconnect()
-
 
     async def test_failed_ambient_model_decision_retains_durable_anchor(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
