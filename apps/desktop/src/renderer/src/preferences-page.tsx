@@ -15,6 +15,13 @@ import type { User } from "@hype-comms/contracts";
 import type { DesktopPlatform, NotificationTransport } from "../../shared/desktop-api";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
 import { CompactModeToggle } from "./compact-mode-toggle";
+import {
+  DeviceAccessibilityPreferences,
+  DeviceComposerPreferences,
+  DeviceLayoutPreferences,
+  DeviceMessagePreferences,
+  type DevicePreferencesControlRuntime,
+} from "./device-preferences-controls";
 import { FencedBlockquoteControl } from "./fenced-blockquote-control";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import { NotificationSettings } from "./notification-settings";
@@ -29,6 +36,7 @@ interface PreferencesPageProps {
   readonly active: boolean;
   readonly theme: ThemeRuntime;
   readonly compactMode: CompactModeRuntime;
+  readonly devicePreferences: DevicePreferencesControlRuntime;
   readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
   readonly notifications?: NotificationTransport;
@@ -57,6 +65,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
       active,
       theme,
       compactMode,
+      devicePreferences,
       fencedBlockquotes,
       sidebarPosition,
       notifications,
@@ -251,9 +260,6 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
               </button>
             )}
             <div>
-              <p className="eyebrow">
-                {view === "designer" ? "Workspace appearance" : "Workspace preferences"}
-              </p>
               <h2 id="preferences-title">
                 {view === "designer" ? "Theme designer" : "Preferences"}
               </h2>
@@ -287,11 +293,21 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
                   <section aria-labelledby="preferences-layout-title">
                     <h3 id="preferences-layout-title">Layout</h3>
                     <SidebarPositionControl sidebarPosition={sidebarPosition} />
+                    <DeviceLayoutPreferences runtime={devicePreferences} />
                     <CompactModeToggle compactMode={compactMode} platform={platform} />
                   </section>
                   <section aria-labelledby="preferences-messages-title">
                     <h3 id="preferences-messages-title">Messages</h3>
+                    <DeviceMessagePreferences runtime={devicePreferences} />
                     <FencedBlockquoteControl runtime={fencedBlockquotes} />
+                  </section>
+                  <section aria-labelledby="preferences-composer-title">
+                    <h3 id="preferences-composer-title">Composer</h3>
+                    <DeviceComposerPreferences runtime={devicePreferences} platform={platform} />
+                  </section>
+                  <section aria-labelledby="preferences-accessibility-title">
+                    <h3 id="preferences-accessibility-title">Accessibility</h3>
+                    <DeviceAccessibilityPreferences runtime={devicePreferences} />
                   </section>
                   <section aria-labelledby="preferences-notifications-title">
                     <h3 id="preferences-notifications-title">Notifications</h3>
@@ -315,9 +331,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
               >
                 <p className="eyebrow">Unsaved theme</p>
                 <h3 id="theme-discard-title">Discard your changes?</h3>
-                <p id="theme-discard-description">
-                  Your current app theme is still safe. Only this unsaved draft will be lost.
-                </p>
+                <p id="theme-discard-description">Your unsaved theme changes will be lost.</p>
                 <div>
                   <button ref={discardKeepEditingRef} type="button" onClick={cancelDiscard}>
                     Keep editing

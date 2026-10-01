@@ -8,6 +8,8 @@ import {
   AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
   AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_IPC_MAX_BYTES,
+  DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
   NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -28,6 +30,8 @@ import {
   compactModePreferenceSchema,
   createChannelOperationSchema,
   createTaskOperationSchema,
+  devicePreferencesPatchSchema,
+  devicePreferencesSchema,
   directConversationRequestSchema,
   entityIdSchema,
   listConversationsQuerySchema,
@@ -62,6 +66,8 @@ import {
   upsertChannelMemberOperationSchema,
   type AiChannelState,
   type ChatSessionState,
+  type DevicePreferences,
+  type DevicePreferencesPatch,
   type HumanWorkspaceBootstrapResponse,
   type NotificationContext,
   type NotificationState,
@@ -98,6 +104,7 @@ import {
 } from "../shared/attachment-upload";
 import { DESKTOP_CHANNELS } from "../shared/channels";
 import { createInitialCompactModeArgument } from "../shared/compact-mode";
+import { createInitialDevicePreferencesArgument } from "../shared/device-preferences";
 import {
   AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE,
   type RealtimeConnectionState,
@@ -122,17 +129,6 @@ import { CHECK_FOR_UPDATES_MENU_ITEM_ID, buildApplicationMenu } from "./applicat
 import { AiChannelController } from "./ai-channel-controller";
 import { AiChannelPreferenceStore } from "./ai-channel-preference-store";
 import {
-  loadAgentWakeConfiguration,
-  resolveAgentWakeConfigurationPath,
-} from "./agent-wake-configuration";
-import {
-  applyAgentWakeOperatorRequest,
-  loadAgentWakeOperatorRequest,
-  resolveAgentWakeOperatorRequestPath,
-  writeAgentWakeOperatorResponse,
-} from "./agent-wake-operator";
-import { startAgentWakeRuntime, type AgentWakeRuntimeSession } from "./agent-wake-runtime";
-import {
   attachmentUploadDialogOptions,
   uploadSelectedConversationFiles,
 } from "./attachment-upload";
@@ -142,6 +138,8 @@ import { CacheCrypto, cacheScopeForSession, scopesEqual } from "./cache-crypto";
 import { createClaudeAiAgentHost } from "./claude-ai-agent-host";
 import { CompactModeController } from "./compact-mode-controller";
 import { CompactModePreferenceStore } from "./compact-mode-preference-store";
+import { DevicePreferencesController } from "./device-preferences-controller";
+import { DevicePreferencesStore } from "./device-preferences-store";
 import {
   callbackForSignedOutSession,
   consumeDevelopmentAuthCallbackFile,
@@ -422,12 +420,10 @@ let stopThemeSubscription: (() => void) | null = null;
 let userUpdateCheckInFlight = false;
 let compactModeController: CompactModeController | null = null;
 let stopCompactModeSubscription: (() => void) | null = null;
+let devicePreferencesController: DevicePreferencesController | null = null;
+let stopDevicePreferencesSubscription: (() => void) | null = null;
 let aiChannelController: AiChannelController | null = null;
 let stopAiChannelSubscription: (() => void) | null = null;
-let agentWakeRuntime: AgentWakeRuntimeSession | null = null;
-let agentWakeStartup: Promise<void> | null = null;
-let agentWakeStartupAbort: AbortController | null = null;
-let agentWakeStopping = false;
 let notificationSettingsController: NotificationSettingsController | null = null;
 let stopNotificationSettingsSubscription: (() => void) | null = null;
 let pendingNotificationAuthorizationBarrier: PendingNotificationAuthorizationBarrier | null = null;
@@ -490,105 +486,6 @@ function createNotificationPresenter(): NotificationPresenter {
     },
   });
   return captureNotificationPresenter;
-}
-
-async function initializeAgentWakeRuntime(): Promise<void> {
-  let filePath: string | null;
-  let operatorRequestPath: string | null;
-  try {
-    filePath = resolveAgentWakeConfigurationPath({
-      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
-      env: process.env,
-    });
-    operatorRequestPath = resolveAgentWakeOperatorRequestPath({
-      compiledIn: __HYPE_COMMS_AGENT_WAKE_ENABLED__,
-      env: process.env,
-    });
-  } catch {
-    reportMainProcessError("Agent wake startup configuration is invalid");
-    return;
-  }
-  if (filePath === null) {
-    if (operatorRequestPath !== null) {
-      reportMainProcessError("Agent wake operator request has no configured enrollment");
-    }
-    return;
-  }
-  const startupAbort = new AbortController();
-  agentWakeStartupAbort = startupAbort;
-  try {
-    const configuration = await loadAgentWakeConfiguration({
-      filePath,
-      expectedApiOrigin: __HYPE_COMMS_API_ORIGIN__,
-    });
-    const runtime = await startAgentWakeRuntime({
-      configuration,
-      userDataPath: app.getPath("userData"),
-      environment: process.env,
-      startupSignal: startupAbort.signal,
-      onStartupRetry: (notice) => {
-        reportMainProcessEvent("agent_wake_startup_retry", {
-          enrollmentId: notice.enrollmentId,
-          code: notice.code,
-          attempt: String(notice.attempt),
-          delayMs: String(notice.delayMs),
-        });
-      },
-      onNotice: (notice) => {
-        reportMainProcessEvent("agent_wake_notice", {
-          enrollmentId: notice.enrollmentId,
-          code: notice.code,
-          ...(notice.wakeId === null ? {} : { wakeId: notice.wakeId }),
-        });
-      },
-    });
-    let startedStatus = runtime.initialStatus;
-    if (operatorRequestPath !== null) {
-      try {
-        const request = await loadAgentWakeOperatorRequest({
-          filePath: operatorRequestPath,
-        });
-        const response = await applyAgentWakeOperatorRequest({
-          broker: runtime.broker,
-          enrollmentId: configuration.enrollmentId,
-          request,
-        });
-        await writeAgentWakeOperatorResponse(
-          path.join(app.getPath("userData"), "agent-wake-operator"),
-          response,
-        );
-        startedStatus = response.status ?? startedStatus;
-        reportMainProcessEvent("agent_wake_operator_request", {
-          enrollmentId: configuration.enrollmentId,
-          requestId: request.requestId,
-          action: request.action,
-          ok: response.ok ? "true" : "false",
-          ...(response.errorCode === null ? {} : { code: response.errorCode }),
-          phase: response.status?.phase ?? "unavailable",
-        });
-      } catch {
-        reportMainProcessError("Agent wake operator request failed");
-      }
-    }
-    if (agentWakeStopping) {
-      await runtime.dispose();
-      return;
-    }
-    agentWakeRuntime = runtime;
-    reportMainProcessEvent("agent_wake_started", {
-      enrollmentId: startedStatus.enrollmentId,
-      adapterId: startedStatus.adapterId,
-      phase: startedStatus.phase,
-      cursor: startedStatus.cursor,
-    });
-  } catch {
-    // Wake configuration and adapters may fail while resolving credential-backed bindings.
-    // Keep startup diagnostics body- and credential-free; detailed repair is represented by
-    // stable broker notices and the durable enrollment state.
-    if (!agentWakeStopping) reportMainProcessError("Agent wake runtime failed to initialize");
-  } finally {
-    if (agentWakeStartupAbort === startupAbort) agentWakeStartupAbort = null;
-  }
 }
 
 function createUpdateSource(): UpdateSource {
@@ -669,7 +566,7 @@ interface IpcPayloadSchema<T> {
   readonly parse: (value: unknown) => T;
 }
 
-function parseBoundedNotificationIpc<T>(
+function parseBoundedIpcPayload<T>(
   schema: IpcPayloadSchema<T>,
   value: unknown,
   maximumBytes: number,
@@ -678,16 +575,16 @@ function parseBoundedNotificationIpc<T>(
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new Error("Notification IPC payload is not JSON-serializable");
+    throw new Error("IPC payload is not JSON-serializable");
   }
   if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > maximumBytes) {
-    throw new Error("Notification IPC payload exceeds its byte limit");
+    throw new Error("IPC payload exceeds its byte limit");
   }
   return schema.parse(value);
 }
 
 function boundedAiChannelState(value: unknown): AiChannelState {
-  return parseBoundedNotificationIpc(aiChannelStateSchema, value, AI_CHANNEL_STATE_IPC_MAX_BYTES);
+  return parseBoundedIpcPayload(aiChannelStateSchema, value, AI_CHANNEL_STATE_IPC_MAX_BYTES);
 }
 
 function deliverAiChannelState(state: AiChannelState): void {
@@ -1022,6 +919,13 @@ function deliverCompactModeState(enabled: boolean): void {
   sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, enabled);
 }
 
+function deliverDevicePreferences(preferences: DevicePreferences): void {
+  sendToRenderer(
+    DESKTOP_CHANNELS.devicePreferencesChanged,
+    parseBoundedIpcPayload(devicePreferencesSchema, preferences, DEVICE_PREFERENCES_IPC_MAX_BYTES),
+  );
+}
+
 function flushPendingRendererEvents(): void {
   if (chatSession !== null) {
     sendToRenderer(DESKTOP_CHANNELS.sessionChanged, chatSession.state);
@@ -1034,6 +938,9 @@ function flushPendingRendererEvents(): void {
   }
   if (compactModeController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.compactModeChanged, compactModeController.enabled);
+  }
+  if (devicePreferencesController !== null) {
+    deliverDevicePreferences(devicePreferencesController.state);
   }
   if (notificationSettingsController !== null) {
     sendToRenderer(DESKTOP_CHANNELS.notificationStateChanged, notificationSettingsController.state);
@@ -1292,6 +1199,50 @@ function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesState);
+  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesState, (event): DevicePreferences => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted device-preferences-state IPC sender");
+    }
+    if (devicePreferencesController === null) {
+      throw new Error("Device preferences are unavailable");
+    }
+    return parseBoundedIpcPayload(
+      devicePreferencesSchema,
+      devicePreferencesController.state,
+      DEVICE_PREFERENCES_IPC_MAX_BYTES,
+    );
+  });
+
+  ipcMain.removeHandler(DESKTOP_CHANNELS.devicePreferencesUpdate);
+  ipcMain.handle(DESKTOP_CHANNELS.devicePreferencesUpdate, async (event, value: unknown) => {
+    if (!isTrustedIpcSender(event)) {
+      throw new Error("Untrusted device-preferences-update IPC sender");
+    }
+    if (devicePreferencesController === null) {
+      throw new Error("Device preferences are unavailable");
+    }
+    let patch: DevicePreferencesPatch;
+    try {
+      patch = parseBoundedIpcPayload(
+        devicePreferencesPatchSchema,
+        value,
+        DEVICE_PREFERENCES_PATCH_IPC_MAX_BYTES,
+      );
+    } catch (error) {
+      throw new Error("Invalid device preference update", { cause: error });
+    }
+    try {
+      return parseBoundedIpcPayload(
+        devicePreferencesSchema,
+        await devicePreferencesController.update(patch),
+        DEVICE_PREFERENCES_IPC_MAX_BYTES,
+      );
+    } catch (error) {
+      throw new Error("Could not save the device preferences", { cause: error });
+    }
+  });
+
   ipcMain.removeHandler(DESKTOP_CHANNELS.aiChannelState);
   ipcMain.handle(DESKTOP_CHANNELS.aiChannelState, (event): AiChannelState => {
     if (!isTrustedIpcSender(event)) {
@@ -1310,7 +1261,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1357,7 +1308,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1372,7 +1323,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelPromptRequestSchema,
       value,
       AI_CHANNEL_PROMPT_IPC_MAX_BYTES,
@@ -1387,7 +1338,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelGenerationRequestSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1402,7 +1353,7 @@ function registerIpcHandlers(): void {
     }
     const controller = aiChannelController;
     if (controller === null) throw new Error("AI Channel is unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       aiChannelPermissionResponseSchema,
       value,
       AI_CHANNEL_PERMISSION_RESPONSE_IPC_MAX_BYTES,
@@ -1566,13 +1517,13 @@ function registerIpcHandlers(): void {
       scope === null ||
       notificationActiveGeneration !== scope.sessionGeneration
     ) {
-      return parseBoundedNotificationIpc(
+      return parseBoundedIpcPayload(
         notificationContextSchema,
         inactiveNotificationContext(),
         NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
       );
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationContextSchema,
       controller.bindRenderer(event.sender.id, rendererSessionGeneration),
       NOTIFICATION_CONTEXT_IPC_MAX_BYTES,
@@ -1586,7 +1537,7 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const activity = parseBoundedNotificationIpc(
+    const activity = parseBoundedIpcPayload(
       notificationActivityUpdateSchema,
       input,
       NOTIFICATION_ACTIVITY_IPC_MAX_BYTES,
@@ -1603,12 +1554,12 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       notificationActionDrainRequestSchema,
       input,
       NOTIFICATION_ACTION_DRAIN_REQUEST_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationActionDrainResponseSchema,
       controller.rendererReadyAndDrain(event.sender.id, request),
       NOTIFICATION_ACTION_DRAIN_RESPONSE_IPC_MAX_BYTES,
@@ -1622,7 +1573,7 @@ function registerIpcHandlers(): void {
     }
     const controller = notificationController;
     if (controller === null) throw new Error("Native notifications are unavailable");
-    const acknowledgement = parseBoundedNotificationIpc(
+    const acknowledgement = parseBoundedIpcPayload(
       notificationActionAcknowledgementSchema,
       input,
       NOTIFICATION_ACTION_ACKNOWLEDGEMENT_IPC_MAX_BYTES,
@@ -1636,7 +1587,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       notificationSettingsController.state,
       NOTIFICATION_STATE_IPC_MAX_BYTES,
@@ -1652,12 +1603,12 @@ function registerIpcHandlers(): void {
       throw new Error("Notification settings are unavailable");
     }
     const controller = notificationSettingsController;
-    const preference = parseBoundedNotificationIpc(
+    const preference = parseBoundedIpcPayload(
       notificationPreferenceSchema,
       input,
       NOTIFICATION_PREFERENCE_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       await setNotificationPreferenceWithAuthorization({
         authorization: macosNotificationAuthorization,
@@ -1678,7 +1629,7 @@ function registerIpcHandlers(): void {
     if (notificationSettingsController === null) {
       throw new Error("Notification settings are unavailable");
     }
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationStateSchema,
       await notificationSettingsController.refreshCapability(),
       NOTIFICATION_STATE_IPC_MAX_BYTES,
@@ -1693,12 +1644,12 @@ function registerIpcHandlers(): void {
     if (headlessDesktopConfiguration === null || captureNotificationPresenter === null) {
       throw new Error("Notification capture activation is unavailable");
     }
-    const request = parseBoundedNotificationIpc(
+    const request = parseBoundedIpcPayload(
       notificationCaptureActivationRequestSchema,
       input,
       NOTIFICATION_CAPTURE_ACTIVATION_IPC_MAX_BYTES,
     );
-    return parseBoundedNotificationIpc(
+    return parseBoundedIpcPayload(
       notificationCaptureActivationResponseSchema,
       {
         version: 1,
@@ -2237,7 +2188,11 @@ async function createMainWindow(): Promise<BrowserWindow> {
   if (compactModeController === null) {
     throw new Error("Compact mode must be initialized before creating a window");
   }
+  if (devicePreferencesController === null) {
+    throw new Error("Device preferences must be initialized before creating a window");
+  }
   const compactModeEnabled = compactModeController.enabled;
+  const devicePreferences = devicePreferencesController.state;
   const window = new BrowserWindow({
     width: headlessDesktopConfiguration?.contentWidth ?? 1_280,
     height: headlessDesktopConfiguration?.contentHeight ?? 800,
@@ -2257,6 +2212,7 @@ async function createMainWindow(): Promise<BrowserWindow> {
       additionalArguments: [
         createInitialThemeStateArgument(themeController.state),
         createInitialCompactModeArgument(compactModeEnabled),
+        createInitialDevicePreferencesArgument(devicePreferences),
       ],
       contextIsolation: true,
       sandbox: true,
@@ -2658,6 +2614,12 @@ if (!hasSingleInstanceLock) {
       compactModeController = new CompactModeController({
         persistence: new CompactModePreferenceStore({ userDataPath: app.getPath("userData") }),
       });
+      devicePreferencesController = new DevicePreferencesController({
+        persistence: new DevicePreferencesStore({ userDataPath: app.getPath("userData") }),
+        reportListenerError: () => {
+          reportMainProcessError("Device preferences listener failed");
+        },
+      });
       aiChannelController = new AiChannelController({
         preferenceStore: new AiChannelPreferenceStore({ userDataPath: app.getPath("userData") }),
         hostFactory: createClaudeAiAgentHost,
@@ -2675,6 +2637,7 @@ if (!hasSingleInstanceLock) {
       await Promise.all([
         themeController.initialize(),
         compactModeController.initialize(),
+        devicePreferencesController.initialize(),
         aiChannelController.initialize().catch(() => {
           reportMainProcessError("Failed to restore the local AI Channel preference");
           return aiChannelController?.state;
@@ -2684,6 +2647,8 @@ if (!hasSingleInstanceLock) {
       const initializedNotificationSettings = notificationSettingsController;
       stopThemeSubscription = themeController.subscribe(deliverThemeState);
       stopCompactModeSubscription = compactModeController.subscribe(deliverCompactModeState);
+      stopDevicePreferencesSubscription =
+        devicePreferencesController.subscribe(deliverDevicePreferences);
       stopAiChannelSubscription = aiChannelController.subscribe(deliverAiChannelState);
       stopNotificationSettingsSubscription =
         notificationSettingsController.subscribe(deliverNotificationState);
@@ -2824,9 +2789,6 @@ if (!hasSingleInstanceLock) {
       chatSession.subscribe(deliverSessionState);
       updateController = new UpdateController({
         updater: createUpdateSource(),
-        // A signed Wake evidence artifact must remain byte-for-byte stable throughout its soak.
-        // Ordinary production builds compile this to true and retain automatic updates.
-        updatesAllowed: __HYPE_COMMS_UPDATES_ALLOWED__,
         isProductionBuild: IS_PRODUCTION_BUILD,
         isPackaged: app.isPackaged,
         apiOrigin: __HYPE_COMMS_API_ORIGIN__,
@@ -2887,10 +2849,6 @@ if (!hasSingleInstanceLock) {
       }
 
       await createMainWindow();
-
-      // Agent wake has its own agent-authenticated source and durable main-process inbox. It starts
-      // beside human session restore so an unavailable provider cannot delay the interactive UI.
-      agentWakeStartup = initializeAgentWakeRuntime();
 
       // Show the window before an upgraded enabled preference can prompt. The request runs beside
       // session/auth/realtime startup; the controller-only barrier remains fail-closed until both
@@ -3007,32 +2965,15 @@ if (!hasSingleInstanceLock) {
   });
 
   let quittingAiChannel: AiChannelController | null = null;
-  let quittingAgentWakeRuntime: AgentWakeRuntimeSession | null = null;
   const beforeQuitCoordinator = new BeforeQuitCoordinator({
     cleanup: () => {
-      agentWakeStopping = true;
-      agentWakeStartupAbort?.abort();
-      agentWakeStartupAbort = null;
-      quittingAgentWakeRuntime = agentWakeRuntime;
-      agentWakeRuntime = null;
       quittingAiChannel = aiChannelController;
       aiChannelController = null;
     },
     teardown: async () => {
       const localAiChannel = quittingAiChannel;
-      const localAgentWakeRuntime = quittingAgentWakeRuntime;
-      const pendingAgentWakeStartup = agentWakeStartup;
       quittingAiChannel = null;
-      quittingAgentWakeRuntime = null;
-      agentWakeStartup = null;
-      await pendingAgentWakeStartup;
-      const lateAgentWakeRuntime = agentWakeRuntime;
-      agentWakeRuntime = null;
-      await Promise.all([
-        localAiChannel?.dispose(),
-        localAgentWakeRuntime?.dispose(),
-        lateAgentWakeRuntime?.dispose(),
-      ]);
+      await localAiChannel?.dispose();
     },
     reportCleanupFailure: () => {
       reportMainProcessError("Failed to prepare application cleanup before quitting");
@@ -3091,6 +3032,10 @@ if (!hasSingleInstanceLock) {
       stopCompactModeSubscription?.();
       stopCompactModeSubscription = null;
       compactModeController?.dispose();
+      stopDevicePreferencesSubscription?.();
+      stopDevicePreferencesSubscription = null;
+      devicePreferencesController?.dispose();
+      devicePreferencesController = null;
       stopAiChannelSubscription?.();
       stopAiChannelSubscription = null;
     },

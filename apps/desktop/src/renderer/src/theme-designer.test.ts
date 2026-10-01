@@ -124,12 +124,12 @@ describe("ThemeDesigner", () => {
     const { container, client, theme } = await renderDesigner();
 
     expect(screen.getByRole("radio", { name: /System Match this device/ })).toBeTruthy();
-    expect(screen.getByRole("radio", { name: /Light Bright and crisp/ })).toBeTruthy();
-    expect(screen.getByRole("radio", { name: /Dark Calm and focused/ })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Light Light background/ })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Dark Dark background/ })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Accent presets" })).toBeTruthy();
     expect(screen.getByLabelText("Choose a custom accent")).toBeTruthy();
     expect(screen.getByLabelText("Accent hex value")).toBeTruthy();
-    expect(screen.getByRole("complementary", { name: "System foundation" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "System theme" })).toBeTruthy();
 
     const rootBefore = document.documentElement.style.getPropertyValue(
       themeCssVariable("actionPrimary"),
@@ -150,7 +150,7 @@ describe("ThemeDesigner", () => {
   it("saves and applies a validated foundation and accent", async () => {
     const { client, onSaved, theme } = await renderDesigner();
 
-    fireEvent.click(screen.getByRole("radio", { name: /Light Bright and crisp/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Light Light background/ }));
     fireEvent.click(screen.getByRole("button", { name: "Teal accent" }));
     fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
 
@@ -175,7 +175,7 @@ describe("ThemeDesigner", () => {
     fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
 
     await waitFor(() => {
-      expect(screen.getByRole("complementary", { name: "System foundation" })).toBeTruthy();
+      expect(screen.getByRole("complementary", { name: "System theme" })).toBeTruthy();
       expect((screen.getByLabelText("Accent hex value") as HTMLInputElement).value).toBe(
         getThemeDefinition("light").tokens.borderAccent,
       );
@@ -240,7 +240,7 @@ describe("ThemeDesigner", () => {
     const { onSaved, theme } = await renderDesigner(client);
 
     fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
-    await screen.findByRole("complementary", { name: "System foundation" });
+    await screen.findByRole("complementary", { name: "System theme" });
     client.getSystemState = () => Promise.reject(new Error("native appearance unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "Save & apply" }));
 
@@ -263,16 +263,16 @@ describe("ThemeDesigner", () => {
 
     fireEvent.click(screen.getByRole("radio", { name: /System Match this device/ }));
     expect(screen.getByText("Matching this device…")).toBeTruthy();
-    fireEvent.click(screen.getByRole("radio", { name: /Light Bright and crisp/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Light Light background/ }));
     resolveSystem?.(client.systemState);
 
     await waitFor(() => {
       expect(
-        (screen.getByRole("radio", { name: /Light Bright and crisp/ }) as HTMLInputElement).checked,
+        (screen.getByRole("radio", { name: /Light Light background/ }) as HTMLInputElement).checked,
       ).toBe(true);
     });
     expect(screen.queryByText("Matching this device…")).toBeNull();
-    expect(screen.getByRole("complementary", { name: "light foundation" })).toBeTruthy();
+    expect(screen.getByRole("complementary", { name: "Light theme" })).toBeTruthy();
     theme.dispose();
   });
 

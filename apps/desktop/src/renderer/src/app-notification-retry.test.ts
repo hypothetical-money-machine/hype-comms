@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
 import type { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -454,6 +455,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
@@ -491,6 +493,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
@@ -540,6 +543,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
@@ -588,6 +592,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
@@ -633,6 +638,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),
@@ -663,6 +669,7 @@ describe("App notification session recovery", () => {
         client: harness.client,
         theme: createTheme(),
         compactMode: createCompactMode(),
+        devicePreferences: createTestDevicePreferencesRuntime(),
         fencedBlockquotes: createFencedBlockquotes(),
         sidebarPosition: createSidebarPosition(),
       }),

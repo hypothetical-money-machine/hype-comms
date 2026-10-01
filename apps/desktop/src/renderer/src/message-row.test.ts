@@ -8,11 +8,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OutboxItem } from "./workspace-cache";
 
 import {
+  formatMessageTime,
   MessageRow,
   participantColorIndex,
   PendingMessageRow,
   visibleTimelineMessages,
 } from "./App";
+
+describe("message time formatting", () => {
+  const localAfternoon = new Date(2026, 0, 2, 17, 5).toISOString();
+
+  it("supports an explicit 12-hour or 24-hour clock", () => {
+    expect(formatMessageTime(localAfternoon, "12-hour", "en-US")).toBe("5:05 PM");
+    expect(formatMessageTime(localAfternoon, "24-hour", "en-US")).toBe("17:05");
+  });
+
+  it("keeps the locale's clock when the preference follows the system", () => {
+    expect(formatMessageTime(localAfternoon, "system", "en-US")).toBe("5:05 PM");
+  });
+});
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000002";
