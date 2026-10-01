@@ -372,8 +372,9 @@ checkpoints restart from a fresh bootstrap position; validated read targets and
 ambient identities remain pending. The old scalar sequence is retained as
 `legacyWorkspaceSequence` provenance and orders only the initial migrated anchors
 when assigning their durable ordinals.
-Recovery then uses `recoveryOrder` across all epochs; newly retained anchors follow
-the maximum pending ordinal. Epoch UUID spelling and legacy scalars are never
+Recovery uses `recoveryOrder` to preserve each channel's chronology across epochs;
+other channels can progress while it waits for a retry. Newly retained anchors
+follow the maximum pending ordinal. Epoch UUID spelling and legacy scalars are never
 compared with current checkpoint sequences. Epoch checkpoints retain their position
 when the bootstrap epoch matches, and use the fresh bootstrap position when it changes. Unknown, mixed or
 malformed state fails startup. Version 1 and 2 scalar formats also use a fresh
@@ -398,7 +399,10 @@ messages retain their normal busy-input policy.
 A transient context failure or draining gateway also defers recovery without
 keeping the adapter offline. The task preserves Retry-After within the capped
 backoff policy and makes progress when capacity frees even without new watch
-traffic. Disconnect and fatal shutdown cancel and await this task, including
+traffic. Retry attempts and deadlines are tracked per conversation, so a longer
+Retry-After in one channel cannot postpone another channel's available FIFO slot.
+New pending work wakes the same worker without shortening an existing channel
+deadline. Disconnect and fatal shutdown cancel and await this task, including
 any in-flight context CLI child. A deleted or
 inaccessible anchor, or an author denied by the current policy, is retired
 without inference. Recovery never rewinds the accepted workspace cursor.
