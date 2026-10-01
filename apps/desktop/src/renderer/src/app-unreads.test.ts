@@ -12,6 +12,7 @@ import type {
   ProductRealtimeEvent,
   RealtimeSessionScope,
   ScopedProductRealtimeEvent,
+  SyncPosition,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -349,10 +350,10 @@ function createClient(
           lastReadAt: NOW,
           updatedAt: NOW,
         },
-        syncCursor: "1",
+        syncCursor: testPosition("1"),
       };
     },
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },

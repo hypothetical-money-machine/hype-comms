@@ -3,7 +3,7 @@ import { deferred } from "./test-support/deferred";
 import { serverResponse } from "./test-support/server-response";
 import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
 import { scopedWorkspaceSession } from "./scoped-workspace-session";
-import { WorkspaceSessionOwner } from "./workspace-session-owner";
+import { OwnedWorkspaceSession, WorkspaceSessionOwner } from "./workspace-session-owner";
 import { WorkspaceTransport } from "./workspace-transport";
 
 import type {
@@ -1212,7 +1212,7 @@ describe("ChatSession renewal", () => {
       if (productCredentials.length === 1) {
         firstStarted.release();
         await firstCanFinish.promise;
-        return new Response(
+        return serverResponse(
           new ReadableStream({
             async cancel() {
               cancellationStarted.release();
@@ -1498,7 +1498,7 @@ describe("ChatSession request lifetime", () => {
     let current = true;
     const session = createSession(
       async (url) => {
-        if (url === API_ORIGIN + "/v2/bootstrap") return new Response(null, { status: 401 });
+        if (url === API_ORIGIN + "/v2/bootstrap") return emptyResponse(401);
         if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
         entered.resolve();
         await release.promise;
@@ -1508,18 +1508,76 @@ describe("ChatSession request lifetime", () => {
       "production",
       contexts,
     );
-    await session.restore();
-    const response = await session.fetch(API_ORIGIN + "/v2/bootstrap");
-    const exchange = session.exchangeMagicLink(TOKEN);
-    await entered.promise;
-    const oldRejection = session.markSignedOut(response, () => current);
-    current = false;
-    release.resolve();
-    await exchange;
-    await oldRejection;
-    expect(session.state).toMatchObject({ status: "signed-in", userId: OTHER_USER.user.id });
-    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
-    expect(contexts.session?.userId).toBe(OTHER_USER.user.id);
-    await session.signOut();
+    try {
+      await session.restore();
+      const response = await session.fetch(API_ORIGIN + "/v2/bootstrap");
+      const exchange = session.exchangeMagicLink(TOKEN);
+      await entered.promise;
+      const oldRejection = session.markSignedOut(response, () => current);
+      current = false;
+      release.resolve();
+      await exchange;
+      await expect(oldRejection).resolves.toBe(false);
+      expect(session.state).toMatchObject({ status: "signed-in", userId: OTHER_USER.user.id });
+      expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+      expect(contexts.session?.userId).toBe(OTHER_USER.user.id);
+    } finally {
+      release.resolve();
+      session.stop();
+    }
+  });
+
+  it("ignores a queued rejection after its lifetime retires without a credential rotation", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const session = createSession(
+      async (url) => {
+        if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+        if (url === SESSION_REFRESH_URL) {
+          entered.resolve();
+          await release.promise;
+          return emptyResponse(503);
+        }
+        return emptyResponse(401);
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+    const lifetime = new OwnedWorkspaceSession({
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+      generation: 1,
+    });
+    const scoped = scopedWorkspaceSession(session, lifetime);
+    try {
+      await session.restore();
+      const response = await scoped.fetch(API_ORIGIN + "/v2/product");
+      const renewal = session.renewSession();
+      await entered.promise;
+      const oldRejection = scoped.markSignedOut(response);
+      await lifetime.dispose();
+      release.resolve();
+      await renewal;
+      await expect(oldRejection).resolves.toBe(false);
+      expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
+      expect(cookies.removals).toEqual([]);
+      expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+      expect(contexts.session?.userId).toBe(CURRENT_USER.user.id);
+
+      const currentLifetime = new OwnedWorkspaceSession({ ...lifetime.scope, generation: 2 });
+      const current = scopedWorkspaceSession(session, currentLifetime);
+      const currentResponse = await current.fetch(API_ORIGIN + "/v2/product");
+      await expect(current.markSignedOut(currentResponse)).resolves.toBe(true);
+      expect(session.state).toEqual({ status: "signed-out" });
+      expect(cookies.values.has("hype_comms_session")).toBe(false);
+      await currentLifetime.dispose();
+    } finally {
+      release.resolve();
+      session.stop();
+      await lifetime.dispose();
+    }
   });
 });

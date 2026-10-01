@@ -156,7 +156,19 @@ export class WorkspaceTransport {
   }
   async #payload(response: Response): Promise<unknown> {
     if (response.ok) return response.json();
-    if (response.status === 401) await this.session.markSignedOut(response);
+    if (response.status === 401) {
+      const signedOut = await this.session.markSignedOut(response);
+      if (!signedOut) {
+        // A later session change can supersede even fetch's one credential retry. Discard that
+        // rejection instead of reporting an authentication failure for the current credential.
+        await response.body?.cancel().catch(() => undefined);
+        throw new WorkspaceRequestError(
+          "Workspace request was interrupted. Please retry.",
+          503,
+          null,
+        );
+      }
+    }
     let message = `Workspace request failed (${response.status})`;
     try {
       const parsed = apiErrorEnvelopeSchema.safeParse(await response.json());

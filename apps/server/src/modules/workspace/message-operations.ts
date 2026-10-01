@@ -283,8 +283,8 @@ export class WorkspaceMessageOperations {
       WorkspaceRepositoryHooks,
       | "afterConversationLocked"
       | "afterMessageAuthorizationLocked"
-      | "afterSearchVisibilityRead"
       | "onAnnouncementAudit"
+      | "afterSearchVisibilityRead"
     > = {},
   ) {}
   async history(

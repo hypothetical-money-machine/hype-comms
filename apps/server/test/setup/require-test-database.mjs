@@ -1,17 +1,7 @@
-// Global Vitest setup for the server workspace: hard-fail when HYPE_COMMS_REQUIRE_TEST_DATABASE
-// is set but HYPE_COMMS_TEST_DATABASE_URL is not, instead of letting each test file silently skip
-// its PostgreSQL-backed tests.
-//
-// This is opt-in through HYPE_COMMS_REQUIRE_TEST_DATABASE, not through CI: `npm run check` runs
-// `npm test` (and therefore this workspace's Vitest suite) with CI set and without a database, so
-// keying the guard on CI alone would fail that step. scripts/test-postgres.mjs sets
-// HYPE_COMMS_REQUIRE_TEST_DATABASE for `npm run test:postgres`, and
-// .github/workflows/ci.yml sets it for the "Run the complete PostgreSQL suite" step, which
-// already provides the URL. If a future change drops the URL from that step, this guard turns
-// the resulting silent skip into a hard failure instead.
-//
-// This module has no third-party imports (in particular, no `pg`), so every server test worker
-// can load it cheaply as a Vitest setup file.
+// Vitest setup for both server projects: an explicit required-database flag must never
+// allow a missing URL. The integration project also validates its URL unconditionally in
+// test/support/require-database.ts. scripts/test-postgres.mjs forces the flag for its child,
+// and CI sets it for the database-backed full check. DB-free unit checks leave the flag unset.
 
 export function hardFailWithoutRequiredTestDatabase(environment = process.env) {
   const required =

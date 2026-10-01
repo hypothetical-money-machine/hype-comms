@@ -1,6 +1,8 @@
 import { type AttachmentStore } from "./file-store.js";
 
 export interface WorkspaceRepositoryHooks {
+  /** Test hook after search establishes its access and message snapshot. */
+  readonly afterSearchVisibilityRead?: () => Promise<void>;
   /**
    * Test seam for deterministically interleaving a committed write after bootstrap establishes
    * its transaction snapshot.
