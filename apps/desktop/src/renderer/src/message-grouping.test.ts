@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isMessageContinuation, type MessageGroupCandidate } from "./message-grouping";
+import {
+  isMessageContinuation,
+  messageGroupFlags,
+  type MessageGroupCandidate,
+} from "./message-grouping";
 
 const MORGAN_ID = "10000000-0000-4000-8000-000000000001";
 const DAN_ID = "10000000-0000-4000-8000-000000000002";
@@ -54,5 +58,30 @@ describe("message grouping", () => {
     const current = candidate(null, "2026-07-27T19:19:00.000Z", "42");
 
     expect(isMessageContinuation(current, previous, "UTC")).toBe(false);
+  });
+
+  it("derives separators and continuations for a timeline", () => {
+    const messages = [
+      candidate(MORGAN_ID, "2026-07-27T19:18:00.000Z", "41"),
+      candidate(MORGAN_ID, "2026-07-27T19:19:00.000Z", "42"),
+      candidate(MORGAN_ID, "2026-07-28T19:19:00.000Z", "43"),
+      candidate(MORGAN_ID, "2026-07-28T19:20:00.000Z", null),
+      candidate(DAN_ID, "2026-07-28T19:21:00.000Z", "44"),
+    ];
+
+    expect(messageGroupFlags(messages, true, "UTC")).toEqual([
+      { showDateSeparator: true, continuation: false },
+      { showDateSeparator: false, continuation: true },
+      { showDateSeparator: true, continuation: false },
+      { showDateSeparator: false, continuation: true },
+      { showDateSeparator: false, continuation: false },
+    ]);
+    expect(messageGroupFlags(messages, false, "UTC")).toEqual([
+      { showDateSeparator: true, continuation: false },
+      { showDateSeparator: false, continuation: false },
+      { showDateSeparator: true, continuation: false },
+      { showDateSeparator: false, continuation: false },
+      { showDateSeparator: false, continuation: false },
+    ]);
   });
 });
