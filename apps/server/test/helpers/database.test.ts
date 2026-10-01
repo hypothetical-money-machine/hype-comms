@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { escapeIdentifier, type Pool } from "pg";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
+
+import * as poolModule from "../../src/db/pool.js";
 
 import {
   createTestSchema,
@@ -16,6 +25,49 @@ describeWithPostgres("resetDatabase discovery", () => {
 
   afterAll(async () => {
     await schema.drop();
+  });
+
+  it("closes both pools and removes its schema when migrations fail during setup", async () => {
+    const migrations = await mkdtemp(path.join(tmpdir(), "failed-test-migrations-"));
+    const prefix = `setup_fail_${randomUUID().slice(0, 8)}`;
+    const pools: Pool[] = [];
+    const originalCreatePool = poolModule.createPool;
+    const createPoolSpy = vi.spyOn(poolModule, "createPool").mockImplementation((options) => {
+      const pool = originalCreatePool(options);
+      pools.push(pool);
+      return pool;
+    });
+    try {
+      await writeFile(path.join(migrations, "0001_invalid.sql"), "SELECT missing_setup_table");
+      await expect(
+        createTestSchema({
+          prefix,
+          poolSize: 1,
+          migrationsDirectory: pathToFileURL(`${migrations}${path.sep}`),
+        }),
+      ).rejects.toThrow(/missing_setup_table/);
+      const remaining = await schema.adminPool.query<{ nspname: string }>(
+        "SELECT nspname FROM pg_namespace WHERE starts_with(nspname, $1)",
+        [prefix],
+      );
+      expect({ schemas: remaining.rows, endedPools: pools.map((pool) => pool.ended) }).toEqual({
+        schemas: [],
+        endedPools: [true, true],
+      });
+    } finally {
+      createPoolSpy.mockRestore();
+      for (const pool of pools) {
+        if (!pool.ending) await pool.end();
+      }
+      const remaining = await schema.adminPool.query<{ nspname: string }>(
+        "SELECT nspname FROM pg_namespace WHERE starts_with(nspname, $1)",
+        [prefix],
+      );
+      for (const { nspname } of remaining.rows) {
+        await schema.adminPool.query(`DROP SCHEMA ${escapeIdentifier(nspname)} CASCADE`);
+      }
+      await rm(migrations, { recursive: true, force: true });
+    }
   });
 
   it("truncates every migrated table in the scoped schema without touching schema_migrations", async () => {
