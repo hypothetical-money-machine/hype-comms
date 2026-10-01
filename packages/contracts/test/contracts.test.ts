@@ -1474,6 +1474,47 @@ describe("transport contracts", () => {
     ).toThrow();
   });
 
+  it.each(["history", "thread"] as const)(
+    "validates bundled %s reactions against the page",
+    (kind) => {
+      const root = {
+        id: MESSAGE_ID,
+        conversationId: CONVERSATION_ID,
+        conversationSequence: "1",
+        version: 1,
+        clientMessageId: MESSAGE_ID,
+        authorId: USER_ID,
+        threadRootId: null,
+        body: "Root",
+        bodyFormat: "hype_comms_markdown_v1",
+        editedAt: null,
+        deletedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      } as const;
+      const reaction = {
+        id: REACTION_ID,
+        messageId: MESSAGE_ID,
+        userId: USER_ID,
+        emoji: "👍",
+        createdAt: NOW,
+      };
+      const page = kind === "history" ? { messages: [root] } : { root, replies: [] };
+      const schema =
+        kind === "history" ? messageHistoryResponseSchema : messageThreadResponseSchema;
+      const common = { ...page, snapshotPosition: testPosition("0"), nextCursor: null };
+      expect(schema.safeParse({ ...common, reactions: [reaction] }).success).toBe(true);
+      expect(schema.safeParse({ ...common, reactions: [reaction, reaction] }).success).toBe(false);
+      expect(
+        schema.safeParse({ ...common, reactions: [reaction, { ...reaction, id: REPLY_ID }] })
+          .success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({ ...common, reactions: [{ ...reaction, messageId: REPLY_ID }] }).success,
+      ).toBe(false);
+    },
+  );
+
   it("validates the initial realtime handshake event", () => {
     const event = {
       version: 1,

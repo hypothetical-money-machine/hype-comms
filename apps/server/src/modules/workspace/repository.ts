@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { WorkspaceAttachmentOperations } from "./attachment-operations.js";
+import { WorkspaceAuthorization } from "./authorization.js";
 import { ConversationEventWriter } from "./conversation-events.js";
 import { WorkspaceConversationOperations } from "./conversation-operations.js";
 import { WorkspaceMessageOperations } from "./message-operations.js";
@@ -9,9 +10,11 @@ import { WorkspaceTaskOperations } from "./task-operations.js";
 import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import { enableDefaultAgentAgency } from "./workspace-initialization.js";
 import { WorkspaceRetention } from "./workspace-retention.js";
-export type { ConsumedRealtimeTicket, WorkspacePrincipal } from "./sync-operations.js";
+export type { ConsumedRealtimeTicket } from "./authorization.js";
+export type { WorkspacePrincipal } from "./sync-operations.js";
 export type { AnnouncementAuditRecord, WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 export type { AttachmentCleanupFailure } from "./workspace-retention.js";
+
 export class WorkspaceRepository {
   private readonly retention: WorkspaceRetention;
   private readonly systemChannelSeeder: SystemChannelSeeder;
@@ -20,17 +23,20 @@ export class WorkspaceRepository {
   private readonly conversations: WorkspaceConversationOperations;
   private readonly messages: WorkspaceMessageOperations;
   private readonly tasks: WorkspaceTaskOperations;
+  private readonly events: ConversationEventWriter;
+  private readonly authz: WorkspaceAuthorization;
 
   constructor(
     private readonly pool: Pool,
     private readonly hooks: WorkspaceRepositoryHooks = {},
   ) {
-    const events = new ConversationEventWriter(this.announcementChannelsEnabled);
-    this.tasks = new WorkspaceTaskOperations(pool, events);
-    this.messages = new WorkspaceMessageOperations(pool, events, hooks);
-    this.conversations = new WorkspaceConversationOperations(pool, events, hooks);
+    this.events = new ConversationEventWriter(this.announcementChannelsEnabled);
+    this.tasks = new WorkspaceTaskOperations(pool, this.events);
+    this.messages = new WorkspaceMessageOperations(pool, this.events, hooks);
+    this.authz = new WorkspaceAuthorization(pool);
+    this.syncOperations = new WorkspaceSyncOperations(pool, hooks, this.authz);
+    this.conversations = new WorkspaceConversationOperations(pool, this.events, hooks, this.authz);
     this.attachments = new WorkspaceAttachmentOperations(pool, hooks);
-    this.syncOperations = new WorkspaceSyncOperations(pool, hooks);
     this.retention = new WorkspaceRetention(pool, hooks);
     this.systemChannelSeeder = new SystemChannelSeeder(pool, hooks);
   }
@@ -63,12 +69,32 @@ export class WorkspaceRepository {
     return this.conversations.listMembers(...args);
   }
 
+  /** Uses current workspace membership and canonical visibility for ephemeral delivery. */
   canViewConversation(
-    ...args: Parameters<WorkspaceConversationOperations["canViewConversation"]>
-  ): ReturnType<WorkspaceConversationOperations["canViewConversation"]> {
-    return this.conversations.canViewConversation(...args);
+    ...args: Parameters<WorkspaceAuthorization["canViewConversation"]>
+  ): ReturnType<WorkspaceAuthorization["canViewConversation"]> {
+    return this.authz.canViewConversation(...args);
   }
 
+  /**
+   * Owner-only administration: every undirected communication link between two distinct active
+   * human or agent members, aggregated from committed messages and memberships. Message bodies
+   * are never read; only counts and timestamps leave the database. Owner authorization happens
+   * at the route, where the authenticated principal's role is already resolved per request.
+   *
+   * Deliberate scope decisions:
+   * - Bots are excluded. They are integrations rather than members: their channel access comes
+   *   from `bot_channel_grants` rather than membership semantics, so treating them as pair
+   *   endpoints would fabricate links no human recognizes.
+   * - Deactivated members are excluded from both endpoints of every path, so revoked members'
+   *   DM history does not resurface in the owner's report.
+   * - Pairs that share channels but have exchanged no messages are still reported (as potential
+   *   paths), but sort strictly below pairs with actual message volume.
+   *
+   * Both reads run in one repeatable-read snapshot so `members` and `paths` can never disagree,
+   * and the result is bounded by the contract's path cap -- with endpoints restricted to active
+   * human/agent members the pair count is at most C(25,2), which equals the cap exactly.
+   */
   communicationPaths(
     ...args: Parameters<WorkspaceConversationOperations["communicationPaths"]>
   ): ReturnType<WorkspaceConversationOperations["communicationPaths"]> {
