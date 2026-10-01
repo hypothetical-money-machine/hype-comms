@@ -1,0 +1,12 @@
+{
+  // Solution-style root: no files of its own, just orchestrates `tsc --build` across the
+  // composite workspace projects so shared dependencies (starting with packages/contracts)
+  // build once instead of once per consumer's npm pre-hook.
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "apps/server" },
+    { "path": "apps/desktop" },
+    { "path": "packages/cli" }
+  ]
+}
