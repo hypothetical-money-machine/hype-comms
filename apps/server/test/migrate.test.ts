@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import {
   agentCurrentPrincipalSchema,
   agentTokenSchema,
   listAgentTokensResponseSchema,
+  SYSTEM_USER_ID,
   workspaceEventSchema,
 } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
@@ -19,6 +20,7 @@ import { createPool } from "../src/db/pool.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
+import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
 import { describeWithPostgres, schemaScopedUrl, testDatabaseUrl } from "./helpers/database.js";
 
@@ -1802,6 +1804,192 @@ describeWithPostgres("runMigrations", () => {
           [channelId, memberId],
         ),
       ).resolves.toMatchObject({ rows: [{ role: "member" }] });
+    });
+  });
+
+  it("upgrades when existing accounts own the system publisher username and suffixes", async () => {
+    await withFreshSchema(async (pool) => {
+      const ownerId = randomUUID();
+      const botId = randomUUID();
+      const agentId = randomUUID();
+      const workspaceId = randomUUID();
+      const existingIds = [ownerId, botId, agentId];
+      await withoutMigration("0031_system_channels.sql", async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+      await pool.query(
+        `INSERT INTO users (id, email, kind, username, display_name)
+         VALUES ($1, 'system-name-owner@example.test', 'human', 'hype-comms-system', 'Owner'),
+                ($2, NULL, 'bot', 'hype-comms-system-1', 'Existing Bot'),
+                ($3, NULL, 'agent', 'hype-comms-system-2', 'Existing Agent')`,
+        existingIds,
+      );
+      const existingUsers = await pool.query(
+        "SELECT * FROM users WHERE id = ANY($1::uuid[]) ORDER BY username",
+        [existingIds],
+      );
+      await pool.query(
+        `INSERT INTO workspaces (id, name, slug, created_by)
+         VALUES ($1, 'System Migration', 'system-migration', $2)`,
+        [workspaceId, ownerId],
+      );
+      await pool.query(
+        `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'owner', 'active')`,
+        [workspaceId, ownerId],
+      );
+
+      await expect(runMigrations(pool)).resolves.toEqual({
+        applied: ["0031_system_channels.sql"],
+      });
+      await expect(
+        pool.query("SELECT * FROM users WHERE id = ANY($1::uuid[]) ORDER BY username", [
+          existingIds,
+        ]),
+      ).resolves.toMatchObject({ rows: existingUsers.rows });
+      await expect(
+        pool.query("SELECT kind, username, display_name FROM users WHERE id = $1", [
+          SYSTEM_USER_ID,
+        ]),
+      ).resolves.toMatchObject({
+        rows: [{ kind: "bot", username: "hype-comms-system-3", display_name: "Hype Comms" }],
+      });
+
+      const repository = new WorkspaceRepository(pool, { systemChannelsEnabled: true });
+      const definitions = [
+        {
+          slug: "hype/release-notes" as const,
+          name: "Release notes",
+          topic: "Upgrade evidence",
+          loadBulletins: async () => [{ key: "v0.1.1", body: "Upgraded bulletin" }],
+        },
+      ];
+      const errors: unknown[] = [];
+      await repository.seedSystemChannels(definitions, (error) => errors.push(error));
+      await repository.seedSystemChannels(definitions, (error) => errors.push(error));
+      expect(errors).toEqual([]);
+      await expect(
+        pool.query("SELECT author_id, body FROM messages WHERE workspace_id = $1", [workspaceId]),
+      ).resolves.toMatchObject({
+        rows: [{ author_id: SYSTEM_USER_ID, body: "Upgraded bulletin" }],
+      });
+      await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
+    });
+  });
+
+  it("accepts the original system-channel migration without replaying or rewriting its checksum", async () => {
+    await withFreshSchema(async (pool) => {
+      const original = await readFile(
+        new URL("./fixtures/0031_system_channels.original.sql", import.meta.url),
+        "utf8",
+      );
+      const originalChecksum = createHash("sha256").update(original).digest("hex");
+      expect(originalChecksum).toBe(
+        "5b4ef577525807a65e5cb827ab6db87914eb3dff2bf38b99ac1089f086914770",
+      );
+      await withoutMigration("0031_system_channels.sql", async (migrationsDirectory) => {
+        await writeFile(new URL("0031_system_channels.sql", migrationsDirectory), original);
+        await runMigrations(pool, migrationsDirectory);
+      });
+      const originalPublisher = await pool.query("SELECT * FROM users WHERE id = $1", [
+        SYSTEM_USER_ID,
+      ]);
+
+      await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
+      await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
+      await expect(
+        pool.query("SELECT checksum FROM schema_migrations WHERE filename = $1", [
+          "0031_system_channels.sql",
+        ]),
+      ).resolves.toMatchObject({ rows: [{ checksum: originalChecksum }] });
+      await expect(
+        pool.query("SELECT * FROM users WHERE id = $1", [SYSTEM_USER_ID]),
+      ).resolves.toMatchObject({ rows: originalPublisher.rows });
+    });
+  });
+
+  it.each(["original", "corrected"] as const)(
+    "rejects an unknown stored checksum after applying the %s system-channel migration",
+    async (version) => {
+      await withFreshSchema(async (pool) => {
+        await withoutMigration("0031_system_channels.sql", async (migrationsDirectory) => {
+          const source =
+            version === "original"
+              ? new URL("./fixtures/0031_system_channels.original.sql", import.meta.url)
+              : new URL("../src/db/migrations/0031_system_channels.sql", import.meta.url);
+          await writeFile(
+            new URL("0031_system_channels.sql", migrationsDirectory),
+            await readFile(source, "utf8"),
+          );
+          await runMigrations(pool, migrationsDirectory);
+        });
+        await pool.query("UPDATE schema_migrations SET checksum = $1 WHERE filename = $2", [
+          "f".repeat(64),
+          "0031_system_channels.sql",
+        ]);
+
+        await expect(runMigrations(pool)).rejects.toThrow(
+          /Migration checksum mismatch for 0031_system_channels\.sql/,
+        );
+      });
+    },
+  );
+
+  it.each(["original", "corrected"] as const)(
+    "rejects modified corrected SQL after applying the %s system-channel migration",
+    async (version) => {
+      await withFreshSchema(async (pool) => {
+        await withoutMigration("0031_system_channels.sql", async (migrationsDirectory) => {
+          const corrected = await readFile(
+            new URL("../src/db/migrations/0031_system_channels.sql", import.meta.url),
+            "utf8",
+          );
+          const installed =
+            version === "original"
+              ? await readFile(
+                  new URL("./fixtures/0031_system_channels.original.sql", import.meta.url),
+                  "utf8",
+                )
+              : corrected;
+          const migrationUrl = new URL("0031_system_channels.sql", migrationsDirectory);
+          await writeFile(migrationUrl, installed);
+          await runMigrations(pool, migrationsDirectory);
+          await writeFile(migrationUrl, `${corrected}\n-- edited\n`);
+
+          await expect(runMigrations(pool, migrationsDirectory)).rejects.toThrow(
+            /Migration checksum mismatch for 0031_system_channels\.sql/,
+          );
+        });
+      });
+    },
+  );
+
+  it("rejects an existing account with the fixed system publisher id without changing it", async () => {
+    await withFreshSchema(async (pool) => {
+      await withoutMigration("0031_system_channels.sql", async (migrationsDirectory) => {
+        await runMigrations(pool, migrationsDirectory);
+      });
+      await pool.query(
+        `INSERT INTO users (id, email, username, display_name)
+         VALUES ($1, 'fixed-system-id@example.test', 'existing-system-id', 'Existing Account')`,
+        [SYSTEM_USER_ID],
+      );
+      const existingAccount = await pool.query("SELECT * FROM users WHERE id = $1", [
+        SYSTEM_USER_ID,
+      ]);
+
+      await expect(runMigrations(pool)).rejects.toMatchObject({
+        code: "23505",
+        constraint: "users_pkey",
+      });
+      await expect(
+        pool.query("SELECT * FROM users WHERE id = $1", [SYSTEM_USER_ID]),
+      ).resolves.toMatchObject({ rows: existingAccount.rows });
+      await expect(
+        pool.query("SELECT 1 FROM schema_migrations WHERE filename = $1", [
+          "0031_system_channels.sql",
+        ]),
+      ).resolves.toMatchObject({ rowCount: 0 });
     });
   });
 

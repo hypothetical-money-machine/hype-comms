@@ -57,26 +57,10 @@ ALTER TABLE workspaces
   ADD COLUMN system_channels_available boolean NOT NULL DEFAULT false;
 
 -- The auditable publisher for server-authored bulletins. A bot principal keeps it out of the
--- human-owner authorization paths, and the fixed id lets the seeder reference it without a lookup.
--- Existing accounts can own this username. Keep their identities unchanged and select the first
--- free numeric suffix; ON CONFLICT also handles an account claiming a candidate concurrently.
-DO $$
-DECLARE
-  publisher_username text := 'hype-comms-system';
-  suffix bigint := 0;
-BEGIN
-  LOOP
-    INSERT INTO users (id, email, kind, username, display_name, avatar_url)
-    VALUES (
-      'a0000000-0000-4000-8000-00000000c001', NULL, 'bot', publisher_username, 'Hype Comms', NULL
-    )
-    ON CONFLICT (username) DO NOTHING;
-    EXIT WHEN FOUND;
-    suffix := suffix + 1;
-    publisher_username := 'hype-comms-system-' || suffix;
-  END LOOP;
-END
-$$;
+-- human-owner authorization paths; the fixed id lets the seeder reference it without a lookup, and
+-- a username collision fails this migration loudly rather than at first seed.
+INSERT INTO users (id, email, kind, username, display_name, avatar_url)
+VALUES ('a0000000-0000-4000-8000-00000000c001', NULL, 'bot', 'hype-comms-system', 'Hype Comms', NULL);
 
 -- One row per delivered bulletin. The primary key is the idempotency claim that keeps restarts and
 -- concurrent nodes from posting a release note twice.
