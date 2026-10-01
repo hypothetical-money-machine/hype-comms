@@ -1,6 +1,6 @@
 # Used API of NousResearch/hermes-agent f34a69b1cd7c5a6f73c2f7573634be07f666fc60.
 # These stubs are verification inputs, never imported by the runtime plugin.
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, ClassVar
 from gateway.config import Platform, PlatformConfig
@@ -20,6 +20,8 @@ class MessageSource:
     message_id: str | None
 
 class MessageEvent:
+    raw_message: object
+    timestamp: datetime | None
     text: str
     source: MessageSource
     message_id: str | None
@@ -58,6 +60,11 @@ class BasePlatformAdapter:
     def build_source(self, *, chat_id: str, chat_name: str, chat_type: str, user_id: str,
                      user_name: str, thread_id: str | None = ..., chat_topic: str | None = ...,
                      scope_id: str | None = ..., message_id: str | None = ...) -> MessageSource: ...
+    def set_message_handler(self, handler: Callable[[MessageEvent], Awaitable[Any]]) -> None: ...
+    def set_busy_session_handler(self, handler: Callable[[MessageEvent, str], Awaitable[bool]] | None) -> None: ...
     async def handle_message(self, event: MessageEvent) -> None: ...
     async def send(self, chat_id: str, content: str, reply_to: str | None = ...,
                    metadata: dict[str, Any] | None = ...) -> SendResult: ...
+
+def build_session_key(source: MessageSource, *, group_sessions_per_user: bool = ...,
+                      thread_sessions_per_user: bool = ...) -> str: ...

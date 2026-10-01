@@ -14,7 +14,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc --build",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -22,11 +22,12 @@
   "engines": {
     "node": ">=24"
   },
-  "dependencies": {
+  "peerDependencies": {
     "zod": "4.4.3"
   },
   "devDependencies": {
     "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "zod": "4.4.3"
   }
 }
