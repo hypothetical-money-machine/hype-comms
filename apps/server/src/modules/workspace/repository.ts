@@ -3156,33 +3156,29 @@ export class WorkspaceRepository {
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), MESSAGE_SEARCH_MAX_LIMIT);
     return this.#transaction(
       async (client) => {
-        // Keep access and messages in one snapshot. Passing the resolved IDs lets PostgreSQL
-        // rank messages in parallel without a worker-restricted access CTE in the ranking plan.
-        const visible = await client.query<{ id: string }>(
-          `SELECT conversation.id
+        if (this.hooks.afterSearchVisibilityRead !== undefined) {
+          // Establish the repeatable-read snapshot before the test interleaves committed writes.
+          await client.query("SELECT 1");
+          await this.hooks.afterSearchVisibilityRead();
+        }
+        // Keep the access set in the database and compute it once before ranking. Sort only
+        // IDs and rank/sequence, then fetch bodies for the page to avoid sorting full messages.
+        const result = await client.query<SearchMessageRow>(
+          `WITH search_query AS (SELECT websearch_to_tsquery('simple', $2) AS value),
+         visible_conversations AS MATERIALIZED (
+           SELECT conversation.id
              FROM conversations AS conversation
             WHERE conversation.workspace_id = $1
-              AND ${conversationVisibilitySql("conversation", "$2")}
-              AND ($3::boolean OR conversation.kind <> 'group_direct_message')
-              AND ($4::boolean OR NOT conversation.is_system)`,
-          [
-            identity.currentUser.workspaceId,
-            identity.currentUser.user.id,
-            includeGroupDirectMessages,
-            includeSystemChannels,
-          ],
-        );
-        await this.hooks.afterSearchVisibilityRead?.();
-        // Sort only IDs and rank/sequence, then fetch bodies for the page. Sorting full
-        // messages spills common-term searches to disk.
-        const result = await client.query<SearchMessageRow>(
-          `WITH search_query AS (SELECT websearch_to_tsquery('simple', $2) AS value), search_page AS (
+              AND ${conversationVisibilitySql("conversation", "$7")}
+              AND ($8::boolean OR conversation.kind <> 'group_direct_message')
+              AND ($9::boolean OR NOT conversation.is_system)
+         ), search_page AS (
            SELECT message.id, message.committed_workspace_sequence,
                   ts_rank_cd(message.search_vector, search_query.value) AS search_rank
              FROM messages AS message
+             JOIN visible_conversations AS visible ON visible.id = message.conversation_id
             CROSS JOIN search_query
             WHERE message.workspace_id = $1
-              AND message.conversation_id = ANY($7::uuid[])
               AND message.deleted_at IS NULL
               AND message.search_vector @@ search_query.value
               AND (
@@ -3211,7 +3207,9 @@ export class WorkspaceRepository {
             cursor?.workspaceSequence ?? null,
             cursor?.id ?? null,
             pageLimit + 1,
-            visible.rows.map((row) => row.id),
+            identity.currentUser.user.id,
+            includeGroupDirectMessages,
+            includeSystemChannels,
           ],
         );
         const hasMore = result.rows.length > pageLimit;

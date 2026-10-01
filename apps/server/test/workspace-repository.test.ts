@@ -2800,6 +2800,54 @@ describeWithPostgres("WorkspaceRepository", () => {
     }
   });
 
+  it("keeps database results bounded when searching thousands of visible conversations", async () => {
+    await pool.query(
+      `INSERT INTO conversations (id, workspace_id, kind, name, slug, channel_access, created_by)
+       SELECT gen_random_uuid(), $1, 'channel', 'Empty channel', 'empty-' || ordinal,
+              'workspace', $2
+         FROM generate_series(1, 5000) AS ordinal`,
+      [workspaceId, ownerId],
+    );
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "boundedrank result"),
+      mentionedUserIds: [],
+    });
+    const client = await pool.connect();
+    const query = vi.spyOn(client, "query");
+    const release = vi.spyOn(client, "release").mockImplementation(() => undefined);
+    const connect = vi.spyOn(pool, "connect").mockResolvedValue(client);
+    try {
+      const matched = await repository.searchMessages(member, "boundedrank", undefined, 1);
+      expect(matched.results.map(({ message: result }) => result.id)).toEqual([sent.message.id]);
+      expect(matched.nextCursor).toBeNull();
+      const empty = await repository.searchMessages(member, "no-boundedrank-match", undefined, 1);
+      expect(empty.results).toEqual([]);
+      expect(empty.nextCursor).toBeNull();
+
+      const responses: readonly unknown[] = await Promise.all(
+        query.mock.results.map((result) => result.value),
+      );
+      expect(responses.length).toBeGreaterThan(0);
+      for (const response of responses) {
+        if (
+          typeof response !== "object" ||
+          response === null ||
+          !("rows" in response) ||
+          !Array.isArray(response.rows)
+        ) {
+          throw new Error("Expected a database query result");
+        }
+        // Include the pagination look-ahead row, but never transfer the complete access set.
+        expect(response.rows.length).toBeLessThanOrEqual(2);
+      }
+    } finally {
+      connect.mockRestore();
+      query.mockRestore();
+      release.mockRestore();
+      client.release();
+    }
+  });
+
   it("searches access and message contents from one snapshot during membership revocation", async () => {
     const created = await repository.createChannel(owner, {
       name: "Search snapshot",
