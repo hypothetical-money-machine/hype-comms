@@ -16,7 +16,11 @@ import { DomainError } from "../../domain-errors.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
-import { conversationVisibilitySql } from "./conversation-access.js";
+import {
+  conversationVisibilitySql,
+  WorkspaceAuthorization,
+  type ConsumedRealtimeTicket,
+} from "./authorization.js";
 import { readConversationPage } from "./conversation-page-reader.js";
 import { iso } from "./records.js";
 import { runWorkspaceTransaction } from "./transaction.js";
@@ -53,37 +57,7 @@ interface EventRow extends QueryResultRow {
   conversation_human_only: boolean;
 }
 
-interface TicketRow extends QueryResultRow {
-  workspace_id: string;
-  user_id: string;
-  device_session_id: string | null;
-  agent_token_id: string | null;
-  reaction_events: boolean;
-  read_state_events: boolean;
-  task_events: boolean;
-  announcement_channels: boolean;
-  participated_thread_notifications: boolean;
-  message_retract_events: boolean;
-  member_profiles: boolean;
-  ephemeral_activity: boolean;
-  group_direct_messages: boolean;
-  humans_only_channels: boolean;
-  system_channels: boolean;
-}
-
-interface RealtimeSessionRow extends QueryResultRow {
-  revoked: boolean;
-  expired: boolean;
-  membership_inactive: boolean;
-}
-
-interface RealtimeAgentRow extends QueryResultRow {
-  revoked: boolean;
-  disabled: boolean;
-  membership_inactive: boolean;
-}
-
-export type ConsumedRealtimeTicket = RealtimePrincipal;
+export type { ConsumedRealtimeTicket } from "./authorization.js";
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
@@ -102,6 +76,16 @@ export interface WorkspacePrincipal {
 }
 
 export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
+
+// Preserve id::text equality: PostgreSQL prints UUIDs in canonical lowercase form. Guard the
+// payload cast so malformed or noncanonical stored references stay invisible instead of failing
+// the whole sync page, while allowing the message primary-key index to serve each lookup.
+function canonicalUuidSql(expression: string): string {
+  return `CASE
+    WHEN ${expression} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN (${expression})::uuid
+  END`;
+}
 
 function mapWorkspace(row: WorkspaceRow) {
   return workspaceSchema.parse({
@@ -122,6 +106,7 @@ export class WorkspaceSyncOperations {
       WorkspaceRepositoryHooks,
       "announcementChannelsEnabled" | "humansOnlyChannelsEnabled" | "afterBootstrapCursorRead"
     > = {},
+    private readonly authz: WorkspaceAuthorization = new WorkspaceAuthorization(pool),
   ) {}
   get announcementChannelsEnabled(): boolean {
     return this.hooks.announcementChannelsEnabled ?? false;
@@ -305,7 +290,7 @@ export class WorkspaceSyncOperations {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS created_message
-                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                       WHERE created_message.id = ${canonicalUuidSql("event.payload #>> '{message,id}'")}
                          AND created_message.workspace_id = event.workspace_id
                          AND created_message.deleted_at IS NULL
                     )
@@ -315,7 +300,7 @@ export class WorkspaceSyncOperations {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS reaction_message
-                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                       WHERE reaction_message.id = ${canonicalUuidSql("event.payload #>> '{reaction,messageId}'")}
                          AND reaction_message.workspace_id = event.workspace_id
                          AND reaction_message.deleted_at IS NULL
                     )
@@ -448,182 +433,15 @@ export class WorkspaceSyncOperations {
     });
   }
 
-  async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
-    const hash = hashToken(token);
-    const result = await this.pool.query<TicketRow>(
-      `WITH consumed_ticket AS (
-         UPDATE realtime_tickets AS ticket
-            SET consumed_at = clock_timestamp()
-          WHERE ticket.token_hash = $1
-            AND ticket.consumed_at IS NULL
-            AND ticket.expires_at > clock_timestamp()
-         RETURNING ticket.workspace_id,
-                   ticket.user_id,
-                   ticket.device_session_id,
-                   ticket.agent_token_id,
-                   ticket.reaction_events,
-                   ticket.read_state_events,
-                   ticket.task_events,
-                   ticket.announcement_channels,
-                   ticket.participated_thread_notifications,
-                   ticket.message_retract_events,
-                   ticket.member_profiles,
-                   ticket.ephemeral_activity,
-                   ticket.group_direct_messages,
-                   ticket.humans_only_channels,
-                   ticket.system_channels
-       )
-       SELECT ticket.workspace_id,
-              ticket.user_id,
-              ticket.device_session_id,
-              ticket.agent_token_id,
-              ticket.reaction_events,
-              ticket.read_state_events,
-              ticket.task_events,
-              ticket.announcement_channels,
-              ticket.participated_thread_notifications,
-              ticket.message_retract_events,
-              ticket.member_profiles,
-              ticket.ephemeral_activity,
-              ticket.group_direct_messages,
-              ticket.humans_only_channels,
-              ticket.system_channels
-         FROM consumed_ticket AS ticket
-         JOIN workspace_memberships AS membership
-           ON membership.workspace_id = ticket.workspace_id
-          AND membership.user_id = ticket.user_id
-          AND membership.status = 'active'
-        WHERE (
-            (
-              ticket.device_session_id IS NOT NULL
-              AND ticket.agent_token_id IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM device_sessions AS session
-                 WHERE session.id = ticket.device_session_id
-                   AND session.user_id = ticket.user_id
-                   AND session.revoked_at IS NULL
-                   AND session.expires_at > clock_timestamp()
-              )
-            )
-            OR
-            (
-              ticket.device_session_id IS NULL
-              AND ticket.agent_token_id IS NOT NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM agent_tokens AS agent_token
-                  JOIN agents AS agent
-                    ON agent.user_id = agent_token.agent_user_id
-                   AND agent.workspace_id = agent_token.workspace_id
-                 WHERE agent_token.id = ticket.agent_token_id
-                   AND agent_token.workspace_id = ticket.workspace_id
-                   AND agent_token.agent_user_id = ticket.user_id
-                   AND agent_token.revoked_at IS NULL
-                   AND agent.disabled_at IS NULL
-              )
-            )
-          )`,
-      [hash],
-    );
-    const row = result.rows[0];
-    if (row === undefined) return null;
-    if (row.device_session_id !== null && row.agent_token_id === null) {
-      return {
-        workspaceId: row.workspace_id,
-        userId: row.user_id,
-        deviceSessionId: row.device_session_id,
-        agentTokenId: null,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
-      };
-    }
-    if (row.device_session_id === null && row.agent_token_id !== null) {
-      return {
-        workspaceId: row.workspace_id,
-        userId: row.user_id,
-        deviceSessionId: null,
-        agentTokenId: row.agent_token_id,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
-      };
-    }
-    throw new Error("Consumed realtime ticket has an invalid credential binding");
+  consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
+    return this.authz.consumeRealtimeTicket(token);
   }
 
-  /**
-   * Re-check a live realtime connection's bound credential and workspace membership.
-   *
-   * This is a read-only counterpart to {@link consumeRealtimeTicket}: it consumes nothing and
-   * mutates nothing, so the realtime heartbeat can call it repeatedly. A socket authorized
-   * minutes ago must not outlive a revoked/expired credential or a revoked membership.
-   */
-  async revalidateRealtimePrincipal(
+  /** Re-check the connection's bound credential and current workspace membership. */
+  revalidateRealtimePrincipal(
     principal: RealtimePrincipal,
   ): Promise<RealtimePrincipalRevalidation> {
-    if (principal.agentTokenId !== null) {
-      const result = await this.pool.query<RealtimeAgentRow>(
-        `SELECT token.revoked_at IS NOT NULL AS revoked,
-                agent.disabled_at IS NOT NULL AS disabled,
-                coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
-           FROM agent_tokens AS token
-           LEFT JOIN agents AS agent
-             ON agent.user_id = token.agent_user_id
-            AND agent.workspace_id = token.workspace_id
-           LEFT JOIN workspace_memberships AS membership
-             ON membership.user_id = token.agent_user_id
-            AND membership.workspace_id = token.workspace_id
-          WHERE token.id = $1
-            AND token.workspace_id = $2
-            AND token.agent_user_id = $3`,
-        [principal.agentTokenId, principal.workspaceId, principal.userId],
-      );
-      const row = result.rows[0];
-      if (row === undefined) return { status: "invalid", reason: "unknown_agent_token" };
-      if (row.revoked) return { status: "invalid", reason: "agent_token_revoked" };
-      if (row.disabled) return { status: "invalid", reason: "agent_disabled" };
-      if (row.membership_inactive) {
-        return { status: "invalid", reason: "membership_inactive" };
-      }
-      return { status: "valid" };
-    }
-
-    const result = await this.pool.query<RealtimeSessionRow>(
-      `SELECT session.revoked_at IS NOT NULL AS revoked,
-              session.expires_at <= clock_timestamp() AS expired,
-              coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
-         FROM device_sessions AS session
-         LEFT JOIN workspace_memberships AS membership
-           ON membership.user_id = session.user_id
-          AND membership.workspace_id = $2
-        WHERE session.id = $1
-          AND session.user_id = $3`,
-      [principal.deviceSessionId, principal.workspaceId, principal.userId],
-    );
-    const row = result.rows[0];
-    if (row === undefined) return { status: "invalid", reason: "unknown_session" };
-    if (row.revoked) return { status: "invalid", reason: "session_revoked" };
-    if (row.expired) return { status: "invalid", reason: "session_expired" };
-    if (row.membership_inactive) return { status: "invalid", reason: "membership_inactive" };
-    return { status: "valid" };
+    return this.authz.revalidateRealtimePrincipal(principal);
   }
 
   #mapEvent(

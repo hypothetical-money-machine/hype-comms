@@ -20,7 +20,7 @@ export function scopedWorkspaceSession(
       }
       return response;
     },
-    markSignedOut: (isCurrent = () => true) =>
-      chat.markSignedOut(() => !lifetime.signal.aborted && isCurrent()),
+    markSignedOut: (response, isCurrent = () => true) =>
+      chat.markSignedOut(response, () => !lifetime.signal.aborted && isCurrent()),
   };
 }

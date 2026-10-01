@@ -19,6 +19,7 @@ import {
 
 import type { Attachment } from "@hype-comms/contracts";
 import type { DesktopPlatform } from "../../shared/desktop-api";
+import { useComposerAutosize } from "./composer-autosize";
 import {
   applyComposerFormat,
   composerFormatShortcut,
@@ -27,8 +28,8 @@ import {
 } from "./composer-formatting";
 import { filterMentionMembers, insertMention, mentionQueryAt, segmentMentions } from "./mentions";
 
-const MIN_COMPOSER_HEIGHT = 44;
-const MAX_COMPOSER_HEIGHT = 132;
+const MESSAGE_COMPOSER_SIZE = { minHeight: 44, maxHeight: 132 } as const;
+
 function ToolbarIcon({ children }: { readonly children: ReactNode }) {
   return (
     <svg
@@ -118,6 +119,34 @@ function ComposerMentionHighlight({
   );
 }
 
+function revealComposerCaret(
+  element: HTMLTextAreaElement,
+  content: HTMLDivElement,
+  cursor: number,
+): void {
+  content.scrollTop = element.scrollTop;
+  const walker = content.ownerDocument.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+  let offset = cursor;
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const length = node.textContent?.length ?? 0;
+    if (offset > length) {
+      offset -= length;
+      continue;
+    }
+    const range = content.ownerDocument.createRange();
+    range.setStart(node, offset);
+    range.collapse(true);
+    const caret = range.getBoundingClientRect();
+    if (caret.height === 0) return;
+    const top = content.getBoundingClientRect().top + content.clientTop;
+    const bottom = top + content.clientHeight;
+    if (caret.bottom > bottom) element.scrollTop += Math.ceil(caret.bottom - bottom);
+    else if (caret.top < top) element.scrollTop -= Math.ceil(top - caret.top);
+    content.scrollTop = element.scrollTop;
+    return;
+  }
+}
+
 export function MessageComposer({
   contextKey,
   conversationName,
@@ -169,13 +198,22 @@ export function MessageComposer({
   readonly onRemoveAttachment?: (attachmentId: string) => void;
   readonly onSubmit: () => Promise<void>;
 }) {
-  const input = useRef<HTMLTextAreaElement>(null);
+  const {
+    ref: input,
+    assign: assignComposer,
+    style: composerSizeStyle,
+  } = useComposerAutosize(draft, MESSAGE_COMPOSER_SIZE);
   const highlight = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLDivElement>(null);
   const selectedOption = useRef<HTMLButtonElement | null>(null);
   const submitting = useRef(false);
   const attaching = useRef(false);
-  const pendingSelection = useRef<{ readonly start: number; readonly end: number } | null>(null);
+  const pendingSelection = useRef<{
+    readonly start: number;
+    readonly end: number;
+    readonly scrollTop: number;
+    readonly revealCaret?: boolean;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAttaching, setIsAttaching] = useState(false);
   const [cursor, setCursor] = useState(draft.length);
@@ -196,24 +234,20 @@ export function MessageComposer({
   const pickerOpen = mentionQuery !== null && !dismissed && members.length > 0;
   const listboxId = `${inputId}-mention-picker`;
 
-  useEffect(() => {
-    const element = input.current;
-    if (element === null) return;
-    element.style.height = "auto";
-    const height = Math.min(
-      Math.max(element.scrollHeight, MIN_COMPOSER_HEIGHT),
-      MAX_COMPOSER_HEIGHT,
-    );
-    element.style.height = `${String(height)}px`;
-    element.style.overflowY = element.scrollHeight > MAX_COMPOSER_HEIGHT ? "auto" : "hidden";
-  }, [draft]);
-
   useLayoutEffect(() => {
     const element = input.current;
     const nextSelection = pendingSelection.current;
     if (element === null || nextSelection === null) return;
     pendingSelection.current = null;
     element.setSelectionRange(nextSelection.start, nextSelection.end);
+    // Updating the controlled value temporarily puts the caret at the end, so autosizing can
+    // scroll there before this effect restores the selected text. Restore its viewport too.
+    element.scrollTop = nextSelection.scrollTop;
+    if (nextSelection.revealCaret === true && highlight.current !== null) {
+      // The highlight uses the textarea's text metrics, including wrapping. Reveal the inserted
+      // caret if a longer mention moved it outside the saved viewport, without jumping to the end.
+      revealComposerCaret(element, highlight.current, nextSelection.end);
+    }
     setCursor(nextSelection.end);
   }, [draft]);
 
@@ -252,7 +286,12 @@ export function MessageComposer({
     (member: User): void => {
       if (mentionQuery === null) return;
       const next = insertMention(draft, mentionQuery, member.username);
-      pendingSelection.current = { start: next.cursor, end: next.cursor };
+      pendingSelection.current = {
+        start: next.cursor,
+        end: next.cursor,
+        scrollTop: input.current?.scrollTop ?? 0,
+        revealCaret: true,
+      };
       setDismissed(true);
       onDraftChange(next.text);
     },
@@ -267,7 +306,11 @@ export function MessageComposer({
       const end = element.selectionEnd ?? start;
       const result = applyComposerFormat(draft, start, end, action);
       if (result.text.length > MESSAGE_BODY_MAX_LENGTH) return;
-      pendingSelection.current = { start: result.selectionStart, end: result.selectionEnd };
+      pendingSelection.current = {
+        start: result.selectionStart,
+        end: result.selectionEnd,
+        scrollTop: element.scrollTop,
+      };
       onDraftChange(result.text);
       if (document.activeElement !== element) element.focus();
     },
@@ -353,11 +396,11 @@ export function MessageComposer({
 
   const assignInputRef = useCallback(
     (element: HTMLTextAreaElement | null) => {
-      input.current = element;
+      assignComposer(element);
       if (typeof inputRef === "function") inputRef(element);
       else if (inputRef !== undefined && inputRef !== null) inputRef.current = element;
     },
-    [inputRef],
+    [assignComposer, inputRef],
   );
 
   const hintId = `${inputId}-hint`;
@@ -421,7 +464,11 @@ export function MessageComposer({
             </Fragment>
           ))}
         </div>
-        <div className={draft === "" ? "composer-field" : "composer-field has-draft"} ref={field}>
+        <div
+          className={draft === "" ? "composer-field" : "composer-field has-draft"}
+          ref={field}
+          style={composerSizeStyle}
+        >
           <ComposerMentionHighlight draft={draft} members={members} highlightRef={highlight} />
           <textarea
             ref={assignInputRef}
