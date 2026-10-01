@@ -587,8 +587,10 @@ export class WorkspaceTransport {
         });
       }
       if (response.status === 401) {
-        await this.session.markSignedOut(response);
-        return { status: "authentication_required" };
+        const signedOut = await this.session.markSignedOut(response);
+        return signedOut
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null };
       }
       if (response.status === 429) {
         return {
@@ -658,8 +660,10 @@ export class WorkspaceTransport {
       return accepted.data;
     }
     if (response.status === 401) {
-      await this.session.markSignedOut(response);
-      return { status: "authentication_required" };
+      const signedOut = await this.session.markSignedOut(response);
+      return signedOut
+        ? { status: "authentication_required" }
+        : { status: "retryable", reason: "server", retryAfterMs: null };
     }
     if (response.status === 410) {
       return { status: "reset_required", reason: "cursor_expired" };

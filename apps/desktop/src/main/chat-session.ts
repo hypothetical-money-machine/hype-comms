@@ -912,8 +912,11 @@ export class ChatSession {
     });
   }
 
-  /** Ends only the session whose credential the server rejected, checking after queued changes. */
-  markSignedOut(response: Response): Promise<void> {
+  /**
+   * Ends only the session whose credential the server rejected, checking after queued changes.
+   * Returns false when the response was superseded, so callers can retry instead of requiring login.
+   */
+  markSignedOut(response: Response): Promise<boolean> {
     const credential = this.#responseCredentials.get(response);
     return this.#runMutation(async () => {
       if (
@@ -922,7 +925,7 @@ export class ChatSession {
         credential.sessionEpoch !== this.#sessionEpoch ||
         credential.credentialGeneration !== this.#credentialGeneration
       ) {
-        return;
+        return false;
       }
       this.#stopRenewal();
       this.#revokeCacheAuthorization();
@@ -932,6 +935,7 @@ export class ChatSession {
       if (this.#state.status !== "signed-out") {
         this.#setState({ status: "signed-out" });
       }
+      return true;
     });
   }
 }
