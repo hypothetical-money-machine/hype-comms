@@ -1,3 +1,4 @@
+import { notifyStateListeners } from "./state-listeners";
 import path from "node:path";
 
 import {
@@ -1358,17 +1359,7 @@ export class AiChannelController {
     const current = this.#requireState();
     const next = aiChannelStateSchema.parse({ ...current, ...patch });
     this.#state = next;
-    for (const listener of this.#listeners) {
-      try {
-        listener(next);
-      } catch (error) {
-        try {
-          this.#reportListenerError(error);
-        } catch {
-          // Listener reporting cannot prevent other renderer subscribers from receiving state.
-        }
-      }
-    }
+    notifyStateListeners(this.#listeners, next, this.#reportListenerError);
     return next;
   }
 

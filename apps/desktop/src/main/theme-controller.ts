@@ -1,3 +1,4 @@
+import { notifyStateListeners } from "./state-listeners";
 import {
   themeDesignSchema,
   themePreferenceSchema,
@@ -322,17 +323,7 @@ export class ThemeController {
       return previous;
     }
     this.#state = state;
-    for (const listener of this.#listeners) {
-      try {
-        listener(state);
-      } catch (error) {
-        try {
-          this.#reportListenerError(error);
-        } catch {
-          // Error reporting cannot change an already committed preference or block other listeners.
-        }
-      }
-    }
+    notifyStateListeners(this.#listeners, state, this.#reportListenerError);
     return state;
   }
 
