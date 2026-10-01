@@ -326,6 +326,56 @@ describe("desktop session lifecycle", () => {
     await lifecycle.dispose();
   });
 
+  it("discards a completed local result after authentication replacement", async () => {
+    const source = new Source();
+    source.state = SIGNED_IN;
+    const lifecycle = new DesktopSessionLifecycle({
+      source,
+      sessions: new WorkspaceSessionOwner(() => ({})),
+      publish: vi.fn(),
+      reportFailure: vi.fn(),
+    });
+    await lifecycle.readState();
+    const result = deferred<string>();
+    const operation = lifecycle.run(async () => result.promise);
+    const rejected = expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await lifecycle.replaceAuthentication(async () => {
+      source.set({ ...SIGNED_IN, userId: "bob" });
+    });
+    result.resolve("Alice's result");
+    await rejected;
+    await expect(lifecycle.readState()).resolves.toMatchObject({ userId: "bob" });
+    await expect(lifecycle.run(async () => "Bob's result")).resolves.toBe("Bob's result");
+    await lifecycle.dispose();
+  });
+
+  it("reports failed state publication and keeps the session unavailable until retry", async () => {
+    const source = new Source();
+    source.state = SIGNED_IN;
+    const failure = new Error("Publication failed");
+    const publish = vi.fn<(state: ChatSessionState) => void>().mockImplementationOnce(() => {
+      throw failure;
+    });
+    const reportFailure = vi.fn();
+    const lifecycle = new DesktopSessionLifecycle({
+      source,
+      sessions: new WorkspaceSessionOwner(() => ({})),
+      publish,
+      reportFailure,
+    });
+    await expect(lifecycle.readState()).rejects.toBe(failure);
+    expect(lifecycle.publishedState).toBeNull();
+    expect(reportFailure).toHaveBeenCalledOnce();
+    expect(reportFailure).toHaveBeenCalledWith(failure);
+    await expect(lifecycle.run(async () => "unpublished result")).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    await lifecycle.refresh();
+    await expect(lifecycle.readState()).resolves.toEqual(SIGNED_IN);
+    expect(publish).toHaveBeenCalledTimes(2);
+    await lifecycle.dispose();
+  });
+
   it("does not publish a session whose resources failed to initialize", async () => {
     const source = new Source();
     source.state = SIGNED_IN;

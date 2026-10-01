@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, memo, useMemo, type ComponentProps } from "react";
 import type {
   Attachment,
   Message,
@@ -8,7 +8,7 @@ import type {
 } from "@hype-comms/contracts";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-separator";
-import { isMessageContinuation } from "./message-grouping";
+import { isMessageContinuation, messageGroupFlags } from "./message-grouping";
 import { MessageRow, PendingMessageRow } from "./message-row";
 import { UnreadDivider } from "./unread-divider";
 import type { OutboxItem } from "./workspace-cache";
@@ -31,8 +31,50 @@ export interface MessageTimelineContext {
     | "retractMessage"
     | "retryMessage"
     | "discardMessage"
+    | "openThread"
   >;
 }
+
+const NO_REACTIONS: readonly Reaction[] = [];
+const NO_ATTACHMENTS: readonly Attachment[] = [];
+
+type TimelineMessageRowProps = Omit<
+  ComponentProps<typeof MessageRow>,
+  | "onAddReaction"
+  | "onRemoveReaction"
+  | "onOpenAttachment"
+  | "onCreateTask"
+  | "onRetract"
+  | "onOpenThread"
+> & {
+  readonly runtime: Pick<
+    WorkspaceRuntime,
+    "addReaction" | "removeReaction" | "openFile" | "retractMessage" | "openThread"
+  >;
+  readonly onCreateTask?: ((message: Message) => Promise<void>) | undefined;
+  readonly threadAvailable: boolean;
+};
+
+// Bind row actions inside the memo boundary so composer and scroll state changes do not
+// rerender unchanged message bodies and controls. All data and capability props stay compared.
+export const TimelineMessageRow = memo(function TimelineMessageRow({
+  runtime,
+  onCreateTask,
+  threadAvailable,
+  ...props
+}: TimelineMessageRowProps) {
+  return (
+    <MessageRow
+      {...props}
+      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
+      onAddReaction={(emoji) => runtime.addReaction(props.message.id, emoji)}
+      onRemoveReaction={(emoji) => runtime.removeReaction(props.message.id, emoji)}
+      onCreateTask={onCreateTask === undefined ? undefined : () => onCreateTask(props.message)}
+      onRetract={() => runtime.retractMessage(props.message.id)}
+      onOpenThread={threadAvailable ? () => void runtime.openThread(props.message.id) : undefined}
+    />
+  );
+});
 
 export function WorkspaceMessageRow({
   context,
@@ -49,21 +91,18 @@ export function WorkspaceMessageRow({
   readonly continuation?: boolean;
   readonly domIdPrefix?: "message" | "thread-message" | undefined;
   readonly onCreateTask?: ((message: Message) => Promise<void>) | undefined;
-  readonly reply?: { readonly count: number; readonly open: (() => void) | undefined } | undefined;
+  readonly reply?: { readonly count: number; readonly available: boolean } | undefined;
 }) {
   return (
-    <MessageRow
+    <TimelineMessageRow
       message={message}
+      runtime={context.actions}
       members={context.members}
-      reactions={context.reactions.get(message.id) ?? []}
-      attachments={context.attachments.get(message.id) ?? []}
+      reactions={context.reactions.get(message.id) ?? NO_REACTIONS}
+      attachments={context.attachments.get(message.id) ?? NO_ATTACHMENTS}
       currentUserId={context.currentUser.id}
-      onOpenAttachment={(id) => context.actions.openFile(id)}
       reactionsDisabled={context.archived}
-      onAddReaction={(emoji) => context.actions.addReaction(message.id, emoji)}
-      onRemoveReaction={(emoji) => context.actions.removeReaction(message.id, emoji)}
-      onRetract={() => context.actions.retractMessage(message.id)}
-      onCreateTask={onCreateTask === undefined ? undefined : () => onCreateTask(message)}
+      onCreateTask={onCreateTask}
       highlighted={message.id === highlightedId}
       continuation={continuation}
       timestampFormat={context.timestampFormat}
@@ -71,7 +110,7 @@ export function WorkspaceMessageRow({
       channelReferences={context.channelReferences}
       onOpenChannel={context.onOpenChannel}
       replyCount={reply?.count}
-      onOpenThread={reply?.open}
+      threadAvailable={reply?.available ?? false}
     />
   );
 }
@@ -104,15 +143,19 @@ export function MessageTimeline({
   readonly onCreateTask?: ((message: Message) => Promise<void>) | undefined;
   readonly replyFor?: (message: Message) => {
     readonly count: number;
-    readonly open: (() => void) | undefined;
+    readonly available: boolean;
   };
   readonly pendingTimestampFallback?: string | null;
 }) {
+  const timelineGrouping = useMemo(
+    () => messageGroupFlags(messages, groupConsecutive),
+    [messages, groupConsecutive],
+  );
   return (
     <>
       {messages.map((message, index) => (
         <Fragment key={message.id}>
-          {shouldShowDateSeparator(message.createdAt, messages[index - 1]?.createdAt ?? null) && (
+          {timelineGrouping[index]?.showDateSeparator === true && (
             <MessageDateSeparator value={message.createdAt} />
           )}
           {unread?.messageId === message.id && (
@@ -122,9 +165,7 @@ export function MessageTimeline({
             context={context}
             message={message}
             highlightedId={highlightedId}
-            continuation={
-              groupConsecutive && isMessageContinuation(message, messages[index - 1] ?? null)
-            }
+            continuation={timelineGrouping[index]?.continuation === true}
             domIdPrefix={domIdPrefix}
             onCreateTask={onCreateTask}
             reply={replyFor?.(message)}

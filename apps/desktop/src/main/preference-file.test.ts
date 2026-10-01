@@ -1,4 +1,4 @@
-import { constants, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, constants, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
 
 import path from "node:path";
 
@@ -12,6 +12,35 @@ import {
 import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 describe("JSON preference persistence", () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "uses its default for an unreadable file when strict reads are not requested",
+    async () => {
+      const filePath = path.join(
+        await createTemporaryDirectory("hype-comms-preference-read-policy-"),
+        "value.json",
+      );
+      const file = new JsonPreferenceFile({
+        filePath,
+        maxBytes: 128,
+        defaultValue: "default",
+        codec: {
+          decode: (value) => (typeof value === "string" ? value : null),
+          encode: (value: string) => value,
+        },
+      });
+      await file.save("retained");
+      await chmod(filePath, 0o000);
+      try {
+        await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "EACCES" });
+        await expect(file.load()).resolves.toBe("default");
+      } finally {
+        await chmod(filePath, 0o600);
+      }
+      await expect(file.load()).resolves.toBe("retained");
+      expect(await readFile(filePath, "utf8")).toBe('"retained"\n');
+    },
+  );
+
   it("rejects an oversized Unicode write without replacing the last durable value", async () => {
     const filePath = path.join(
       await createTemporaryDirectory("hype-comms-preference-limit-"),

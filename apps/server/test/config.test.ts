@@ -122,6 +122,35 @@ describe("loadConfig", () => {
     });
   });
 
+  it.each([" ", "\t", "\r", "\n", "\u00a0"])(
+    "rejects metrics secrets with boundary whitespace %j instead of trimming them",
+    (whitespace) => {
+      const secret = "metrics-token-that-is-at-least-32-characters";
+      for (const token of [whitespace + secret, secret + whitespace]) {
+        expect(() => loadConfig({ HYPE_COMMS_METRICS_TOKEN: token })).toThrow(ConfigError);
+        expect(() => loadConfig({ HYPE_COMMS_METRICS_TOKEN: token })).toThrow(
+          "HYPE_COMMS_METRICS_TOKEN must not start or end with whitespace",
+        );
+      }
+    },
+  );
+
+  it.each(["\r", "\n", "\r\n", "\0", "\u007f", "\u0100"])(
+    "rejects metrics secrets containing invalid HTTP header characters %j",
+    (invalid) => {
+      expect(() =>
+        loadConfig({ HYPE_COMMS_METRICS_TOKEN: `metrics${invalid}token-at-least-32-characters` }),
+      ).toThrow("HYPE_COMMS_METRICS_TOKEN must contain only valid HTTP header characters");
+    },
+  );
+
+  it.each([
+    "metrics token that is at least 32 characters",
+    "metrics\ttoken-that-is-at-least-32-characters",
+  ])("preserves allowed internal whitespace in metrics secrets %j", (token) => {
+    expect(loadConfig({ HYPE_COMMS_METRICS_TOKEN: token }).metricsToken).toBe(token);
+  });
+
   it("requires a safe, environment-appropriate public API origin", () => {
     expect(() =>
       loadConfig({ HYPE_COMMS_PUBLIC_API_URL: "http://example.com/path?secret=value" }),

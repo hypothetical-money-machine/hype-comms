@@ -10,8 +10,11 @@ API client references contracts; server references contracts. CLI and both deskt
 projects reference their shared dependencies. Their standalone commands build dependencies with
 `tsc -b`, which skips unchanged projects. There are no npm pre-hooks rebuilding contracts indirectly.
 
-CLI is a no-emit compiler project. Its build metadata remains beside its configuration, while
-esbuild replaces `dist` with self-contained command and download-worker bundles. Desktop still
+Emitting contracts, API client and server projects keep their build metadata in `dist/.tsbuildinfo`,
+so removing an output directory also removes its incremental record. The route declaration checker
+uses its own `dist/.route-declarations.tsbuildinfo` marker. CLI is a no-emit compiler project and
+keeps its metadata beside its configuration because esbuild replaces `dist` with self-contained
+command and download-worker bundles. Desktop still
 builds through electron-vite. Server copies migrations and release notes after its compiler build.
 Root builds run the shared graph before these asset and bundle steps. Typechecking emitting
 projects also prepares their declarations, so it cannot leave a no-emit build record that suppresses
