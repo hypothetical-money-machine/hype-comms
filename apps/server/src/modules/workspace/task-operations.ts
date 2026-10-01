@@ -1,3 +1,4 @@
+import { readWorkspacePosition } from "./workspace-sequence.js";
 import type { SyncPosition } from "@hype-comms/contracts";
 import {
   POSTGRES_BIGINT_MAX,
@@ -59,17 +60,18 @@ export class WorkspaceTaskOperations {
     const filterHash = taskFilterHash(filters);
     const cursor = decodeTaskCursor(after, filterHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const conversation = await requireVisibleConversation(
-        client,
-        identity,
-        conversationId,
-        false,
-      );
-      this.#requireTaskConversation(identity, conversation);
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        const conversation = await requireVisibleConversation(
+          client,
+          identity,
+          conversationId,
+          false,
+        );
+        this.#requireTaskConversation(identity, conversation);
+        const result = await client.query<TaskRow>(
+          `SELECT task.*
            FROM tasks AS task
           WHERE task.conversation_id = $1
             AND (
@@ -79,28 +81,29 @@ export class WorkspaceTaskOperations {
             ${taskListFilterSql("task", 4)}
           ORDER BY task.created_at DESC, task.id DESC
           LIMIT $13`,
-        [
-          conversationId,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskListResponseSchema.parse({
-        tasks: rows.map(mapTask),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+          [
+            conversationId,
+            cursor?.createdAt ?? null,
+            cursor?.id ?? null,
+            ...taskListFilterParameters(identity, filters),
+            pageLimit + 1,
+          ],
+        );
+        const rows = result.rows.slice(0, pageLimit);
+        const last = rows.at(-1);
+        const nextCursor =
+          result.rows.length > pageLimit && last !== undefined
+            ? encodeTaskCursor(last, filterHash)
+            : null;
+        return taskListResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          tasks: rows.map(mapTask),
+          nextCursor,
+          hasMore: nextCursor !== null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listMyTasks(
@@ -112,10 +115,11 @@ export class WorkspaceTaskOperations {
     const filterHash = taskFilterHash(filters);
     const cursor = decodeTaskCursor(after, filterHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        const result = await client.query<TaskRow>(
+          `SELECT task.*
            FROM tasks AS task
            JOIN conversations AS conversation
              ON conversation.id = task.conversation_id
@@ -139,29 +143,30 @@ export class WorkspaceTaskOperations {
             ${taskListFilterSql("task", 5)}
           ORDER BY task.created_at DESC, task.id DESC
           LIMIT $14`,
-        [
-          identity.currentUser.workspaceId,
-          identity.currentUser.user.id,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskListResponseSchema.parse({
-        tasks: rows.map(mapTask),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+          [
+            identity.currentUser.workspaceId,
+            identity.currentUser.user.id,
+            cursor?.createdAt ?? null,
+            cursor?.id ?? null,
+            ...taskListFilterParameters(identity, filters),
+            pageLimit + 1,
+          ],
+        );
+        const rows = result.rows.slice(0, pageLimit);
+        const last = rows.at(-1);
+        const nextCursor =
+          result.rows.length > pageLimit && last !== undefined
+            ? encodeTaskCursor(last, filterHash)
+            : null;
+        return taskListResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          tasks: rows.map(mapTask),
+          nextCursor,
+          hasMore: nextCursor !== null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async listChannelTasks(
@@ -174,12 +179,18 @@ export class WorkspaceTaskOperations {
     const filterHash = taskFilterHash(filters);
     const cursor = decodeTaskCursor(after, filterHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), TASK_PAGE_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const conversation = await requireVisibleChannelBySlug(client, identity, channelSlug, false);
-      this.#requireTaskConversation(identity, conversation);
-      const result = await client.query<TaskRow>(
-        `SELECT task.*
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        const conversation = await requireVisibleChannelBySlug(
+          client,
+          identity,
+          channelSlug,
+          false,
+        );
+        this.#requireTaskConversation(identity, conversation);
+        const result = await client.query<TaskRow>(
+          `SELECT task.*
            FROM tasks AS task
           WHERE task.conversation_id = $1
             AND (
@@ -189,28 +200,29 @@ export class WorkspaceTaskOperations {
             ${taskListFilterSql("task", 4)}
           ORDER BY task.created_at DESC, task.id DESC
           LIMIT $13`,
-        [
-          conversation.id,
-          cursor?.createdAt ?? null,
-          cursor?.id ?? null,
-          ...taskListFilterParameters(identity, filters),
-          pageLimit + 1,
-        ],
-      );
-      const rows = result.rows.slice(0, pageLimit);
-      const last = rows.at(-1);
-      const nextCursor =
-        result.rows.length > pageLimit && last !== undefined
-          ? encodeTaskCursor(last, filterHash)
-          : null;
-      return taskRecordListResponseSchema.parse({
-        tasks: rows.map(mapTaskRecord),
-        nextCursor,
-        hasMore: nextCursor !== null,
-      });
-    } finally {
-      client.release();
-    }
+          [
+            conversation.id,
+            cursor?.createdAt ?? null,
+            cursor?.id ?? null,
+            ...taskListFilterParameters(identity, filters),
+            pageLimit + 1,
+          ],
+        );
+        const rows = result.rows.slice(0, pageLimit);
+        const last = rows.at(-1);
+        const nextCursor =
+          result.rows.length > pageLimit && last !== undefined
+            ? encodeTaskCursor(last, filterHash)
+            : null;
+        return taskRecordListResponseSchema.parse({
+          snapshotPosition: await readWorkspacePosition(client, identity.currentUser.workspaceId),
+          tasks: rows.map(mapTaskRecord),
+          nextCursor,
+          hasMore: nextCursor !== null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async getTask(identity: AuthenticatedTaskIdentity, taskId: string): Promise<TaskRecordResponse> {

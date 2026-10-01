@@ -194,6 +194,8 @@ class FakeWorkspaceRepository {
     syncCursor: testPosition("3"),
   }));
   readonly history = vi.fn(async () => ({
+    reactions: [],
+    snapshotPosition: testPosition("0"),
     messages: [
       {
         id: messageId,
@@ -273,6 +275,8 @@ class FakeWorkspaceRepository {
     },
   }));
   readonly thread = vi.fn(async () => ({
+    reactions: [],
+    snapshotPosition: testPosition("0"),
     root: {
       id: messageId,
       conversationId,
@@ -378,16 +382,23 @@ class FakeWorkspaceRepository {
   );
   readonly removeReaction = vi.fn(async () => ({ removed: true, syncCursor: testPosition("8") }));
   readonly listConversationTasks = vi.fn(async () => ({
+    snapshotPosition: testPosition("0"),
     tasks: [],
     nextCursor: null,
     hasMore: false,
   }));
   readonly listChannelTasks = vi.fn(async () => ({
+    snapshotPosition: testPosition("0"),
     tasks: [],
     nextCursor: null,
     hasMore: false,
   }));
-  readonly listMyTasks = vi.fn(async () => ({ tasks: [], nextCursor: null, hasMore: false }));
+  readonly listMyTasks = vi.fn(async () => ({
+    snapshotPosition: testPosition("0"),
+    tasks: [],
+    nextCursor: null,
+    hasMore: false,
+  }));
   readonly getTask = vi.fn(async () => ({ task: { id: taskId } }));
   readonly getChannelTaskByNumber = vi.fn(async () => ({ task: { id: taskId } }));
   readonly createTask = vi.fn(async () => ({
@@ -1307,6 +1318,8 @@ describe("message thread routes", () => {
 
     expect(legacy.statusCode).toBe(200);
     expect(legacy.json()).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: expect.any(Array),
       threadSummaries: [expect.objectContaining({ threadRootId: messageId, replyCount: 1 })],
       threadsSupported: true,
@@ -1314,6 +1327,8 @@ describe("message thread routes", () => {
     });
     expect(capable.statusCode).toBe(200);
     expect(capable.json()).toMatchObject({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: expect.any(Array),
       threadSummaries: [{ threadRootId: messageId, replyCount: 1 }],
       threadsSupported: true,

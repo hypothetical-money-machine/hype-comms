@@ -317,6 +317,9 @@ function createClient(
       hasMore: false,
     }),
     getConversationMessages: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: bootstrapResponse.syncCursor,
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
@@ -326,14 +329,27 @@ function createClient(
       throw new Error("unused");
     },
     getMessageThread: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: bootstrapResponse.syncCursor,
       root: launchMessage,
       replies: [],
       nextCursor: null,
     }),
     listMessageReactions: async () => ({ reactions: [] }),
     searchMessages: async () => ({ results: [], nextCursor: null }),
-    listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
+    listConversationTasks: async () => ({
+      snapshotPosition: bootstrapResponse.syncCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
+    listMyTasks: async () => ({
+      snapshotPosition: bootstrapResponse.syncCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     advanceReadCursor: async (conversationId: string, lastReadMessageId: string) => {
       readCursorRequests.push({ conversationId, lastReadMessageId });
       const conv = bootstrapResponse.conversations.find(

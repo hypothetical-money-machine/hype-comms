@@ -284,6 +284,9 @@ function createHarness(): Harness {
       hasMore: false,
     }),
     getConversationMessages: async () => ({
+      attachments: [],
+      reactions: [],
+      snapshotPosition: snapshotCursor,
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
@@ -300,13 +303,21 @@ function createHarness(): Harness {
       // the thread search-jump regression below depends on.
       await new Promise((resolve) => setTimeout(resolve, 0));
       return {
+        attachments: [],
+        reactions: [],
+        snapshotPosition: snapshotCursor,
         root: threadRoot,
         replies: [threadReply],
         nextCursor: null,
       };
     },
     listMessageReactions: async () => ({ reactions: [] }),
-    listConversationFiles: async () => ({ files: [], nextCursor: null, hasMore: false }),
+    listConversationFiles: async () => ({
+      snapshotPosition: snapshotCursor,
+      files: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     listMessageAttachments: async () => ({ attachments: [] }),
     chooseAndUploadConversationFiles: async (conversationId: string, maxFiles: number) => {
       attachmentUploadRequests.push({ conversationId, maxFiles });
@@ -321,8 +332,18 @@ function createHarness(): Harness {
       results: [{ message: launchMessage }, { message: threadReply }],
       nextCursor: null,
     }),
-    listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
+    listConversationTasks: async () => ({
+      snapshotPosition: snapshotCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
+    listMyTasks: async () => ({
+      snapshotPosition: snapshotCursor,
+      tasks: [],
+      nextCursor: null,
+      hasMore: false,
+    }),
     advanceReadCursor: async () => undefined,
     syncWorkspace: async (after: SyncPosition) =>
       ({
@@ -487,8 +508,10 @@ describe("conversation history loading", () => {
     expect(screen.queryByText("Loading conversation history…")).toBeNull();
 
     request.mockResolvedValueOnce({
+      snapshotPosition: testPosition("10"),
       messages: [launchMessage],
       attachments: [],
+      reactions: [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: null,
@@ -916,8 +939,10 @@ describe("main composer focus on conversation changes", () => {
     async ({ input, expectedScrollTop }) => {
       const harness = await renderWorkspace();
       const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+        snapshotPosition: testPosition("10"),
         messages: [launchMessage],
         attachments: [],
+        reactions: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: "older-launch",
@@ -957,8 +982,10 @@ describe("main composer focus on conversation changes", () => {
         bounds.mockReturnValue(new DOMRect(0, 600, 500, 30));
         await act(async () =>
           resolveHistory({
+            snapshotPosition: testPosition("10"),
             messages: [threadRoot, launchMessage],
             attachments: [],
+            reactions: [],
             threadSummaries: [],
             threadsSupported: true,
             nextCursor: null,
@@ -977,8 +1004,10 @@ describe("main composer focus on conversation changes", () => {
   it("keeps the reading position after a search jump when older history loads, but permits a new jump", async () => {
     const harness = await renderWorkspace();
     const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+      snapshotPosition: testPosition("10"),
       messages: [launchMessage],
       attachments: [],
+      reactions: [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: "older-launch",
@@ -1002,8 +1031,10 @@ describe("main composer focus on conversation changes", () => {
     const scroll = vi.spyOn(row, "scrollIntoView");
     try {
       request.mockResolvedValue({
+        snapshotPosition: testPosition("10"),
         messages: [threadRoot, launchMessage],
         attachments: [],
+        reactions: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: null,

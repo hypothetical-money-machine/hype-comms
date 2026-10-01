@@ -25,7 +25,12 @@ interface TestEvent {
 
 const TRUSTED = { trusted: true, senderId: 7 };
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000001";
-const EMPTY_TASKS = { tasks: [], nextCursor: null, hasMore: false };
+const EMPTY_TASKS = {
+  snapshotPosition: { epoch: "00000000-0000-4000-8000-000000000002", sequence: "0" },
+  tasks: [],
+  nextCursor: null,
+  hasMore: false,
+};
 const USER: User = {
   id: "10000000-0000-4000-8000-000000000002",
   kind: "human",

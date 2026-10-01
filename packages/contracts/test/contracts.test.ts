@@ -1341,19 +1341,32 @@ describe("transport contracts", () => {
     ).toThrow();
     expect(
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: null,
       }),
     ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [],
       threadSummaries: [],
       threadsSupported: true,
       attachments: [],
       nextCursor: null,
     });
-    expect(messageHistoryResponseSchema.parse({ messages: [], nextCursor: null })).toEqual({
+    expect(
+      messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [],
+        nextCursor: null,
+      }),
+    ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [],
       threadSummaries: [],
       threadsSupported: false,
@@ -1362,9 +1375,11 @@ describe("transport contracts", () => {
     });
     expect(() =>
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [],
         threadSummaries: [],
-        reactions: [],
+        unexpected: [],
         nextCursor: null,
       }),
     ).toThrow();
@@ -1403,8 +1418,15 @@ describe("transport contracts", () => {
     } as const;
 
     expect(
-      messageHistoryResponseSchema.parse({ messages: [root, reply], nextCursor: null }),
+      messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        messages: [root, reply],
+        nextCursor: null,
+      }),
     ).toEqual({
+      reactions: [],
+      snapshotPosition: testPosition("0"),
       messages: [root, reply],
       threadSummaries: [],
       threadsSupported: false,
@@ -1413,6 +1435,8 @@ describe("transport contracts", () => {
     });
     expect(
       messageHistoryResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         messages: [root],
         threadSummaries: [{ threadRootId: MESSAGE_ID, replyCount: 1, latestReply: reply }],
         nextCursor: null,
@@ -1422,10 +1446,18 @@ describe("transport contracts", () => {
       threadsSupported: false,
     });
     expect(
-      messageThreadResponseSchema.parse({ root, replies: [reply], nextCursor: null }),
+      messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
+        root,
+        replies: [reply],
+        nextCursor: null,
+      }),
     ).toMatchObject({ root: { id: MESSAGE_ID }, replies: [{ id: REPLY_ID }] });
     expect(() =>
       messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         root: reply,
         replies: [],
         nextCursor: null,
@@ -1433,12 +1465,55 @@ describe("transport contracts", () => {
     ).toThrow();
     expect(() =>
       messageThreadResponseSchema.parse({
+        reactions: [],
+        snapshotPosition: testPosition("0"),
         root,
         replies: [{ ...reply, threadRootId: REPLY_ID }],
         nextCursor: null,
       }),
     ).toThrow();
   });
+
+  it.each(["history", "thread"] as const)(
+    "validates bundled %s reactions against the page",
+    (kind) => {
+      const root = {
+        id: MESSAGE_ID,
+        conversationId: CONVERSATION_ID,
+        conversationSequence: "1",
+        version: 1,
+        clientMessageId: MESSAGE_ID,
+        authorId: USER_ID,
+        threadRootId: null,
+        body: "Root",
+        bodyFormat: "hype_comms_markdown_v1",
+        editedAt: null,
+        deletedAt: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      } as const;
+      const reaction = {
+        id: REACTION_ID,
+        messageId: MESSAGE_ID,
+        userId: USER_ID,
+        emoji: "👍",
+        createdAt: NOW,
+      };
+      const page = kind === "history" ? { messages: [root] } : { root, replies: [] };
+      const schema =
+        kind === "history" ? messageHistoryResponseSchema : messageThreadResponseSchema;
+      const common = { ...page, snapshotPosition: testPosition("0"), nextCursor: null };
+      expect(schema.safeParse({ ...common, reactions: [reaction] }).success).toBe(true);
+      expect(schema.safeParse({ ...common, reactions: [reaction, reaction] }).success).toBe(false);
+      expect(
+        schema.safeParse({ ...common, reactions: [reaction, { ...reaction, id: REPLY_ID }] })
+          .success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({ ...common, reactions: [{ ...reaction, messageId: REPLY_ID }] }).success,
+      ).toBe(false);
+    },
+  );
 
   it("validates the initial realtime handshake event", () => {
     const event = {

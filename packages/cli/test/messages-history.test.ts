@@ -16,6 +16,8 @@ async function home(): Promise<string> {
 
 function historyResponse(): object {
   return {
+    reactions: [],
+    snapshotPosition: { epoch: "00000000-0000-4000-8000-000000000002", sequence: "0" },
     messages: [],
     threadSummaries: [],
     threadsSupported: false,
