@@ -28,11 +28,16 @@ const candidates =
           ];
 let interpreter;
 for (const [command, prefix] of candidates) {
-  const probe = spawnSync(command, [...prefix, "--version"], { stdio: "ignore" });
+  const probe = spawnSync(command, [...prefix, "--version"], { encoding: "utf8" });
   if (probe.error?.code === "ENOENT") continue;
   if (probe.error !== undefined || probe.status !== 0) {
     throw new Error(`Could not start Python interpreter ${command}`);
   }
+  const version = /^Python (\d+)\.(\d+)/u.exec((probe.stdout || probe.stderr).trim());
+  if (version === null) throw new Error(`Could not determine Python version for ${command}`);
+  const major = Number(version[1]);
+  const minor = Number(version[2]);
+  if (major < 3 || (major === 3 && minor < 11)) continue;
   interpreter = { command, prefix };
   break;
 }
