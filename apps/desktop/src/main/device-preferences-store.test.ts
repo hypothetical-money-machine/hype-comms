@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,10 +6,12 @@ import type { DevicePreferences } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_DEVICE_PREFERENCES } from "../shared/device-preferences";
+import { DevicePreferencesController } from "./device-preferences-controller";
 import {
   DevicePreferencesStore,
   MAX_DEVICE_PREFERENCES_FILE_BYTES,
 } from "./device-preferences-store";
+import { readBoundedUtf8File } from "./preference-file";
 
 const directories: string[] = [];
 
@@ -91,6 +93,73 @@ describe("DevicePreferencesStore", () => {
       await expect(store.load()).resolves.toEqual(DEFAULT_DEVICE_PREFERENCES);
     }
   });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "rejects an unreadable existing file and loads it after access recovers",
+    async () => {
+      const userDataPath = await scratchDirectory();
+      const store = new DevicePreferencesStore({ userDataPath });
+      const expected = preferences({ sidebarWidth: "wide", sendMessageShortcut: "mod-enter" });
+      await store.save(expected);
+      await chmod(preferenceFile(userDataPath), 0o000);
+
+      try {
+        await expect(readFile(preferenceFile(userDataPath), "utf8")).rejects.toMatchObject({
+          code: "EACCES",
+        });
+        await expect(
+          readBoundedUtf8File(preferenceFile(userDataPath), MAX_DEVICE_PREFERENCES_FILE_BYTES),
+        ).resolves.toBeNull();
+        await expect(store.load()).rejects.toMatchObject({ code: "EACCES" });
+      } finally {
+        await chmod(preferenceFile(userDataPath), 0o600);
+      }
+
+      await expect(store.load()).resolves.toEqual(expected);
+      expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual(expected);
+    },
+  );
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "preserves unread preferences before a partial update and merges them after a load retry",
+    async () => {
+      const userDataPath = await scratchDirectory();
+      const store = new DevicePreferencesStore({ userDataPath });
+      const expected = preferences({
+        sidebarWidth: "wide",
+        messageTextSize: "large",
+        timestampFormat: "24-hour",
+        groupConsecutiveMessages: false,
+        alwaysShowGroupedMessageTimes: true,
+        showProfileTitles: false,
+        sendMessageShortcut: "mod-enter",
+        motionPreference: "reduced",
+      });
+      await store.save(expected);
+      const save = vi.spyOn(store, "save");
+      const controller = new DevicePreferencesController({ persistence: store });
+      await chmod(preferenceFile(userDataPath), 0o000);
+
+      try {
+        await expect(controller.initialize()).rejects.toMatchObject({ code: "EACCES" });
+        await expect(controller.update({ spellCheck: false })).rejects.toThrow(/initialized/u);
+        await expect(controller.update({ timestampFormat: "12-hour" })).rejects.toThrow(
+          /initialized/u,
+        );
+        expect(save).not.toHaveBeenCalled();
+      } finally {
+        await chmod(preferenceFile(userDataPath), 0o600);
+      }
+
+      expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual(expected);
+      await expect(controller.update({ spellCheck: false })).rejects.toThrow(/initialized/u);
+      await expect(controller.initialize()).resolves.toEqual(expected);
+      const updated = { ...expected, spellCheck: false };
+      await expect(controller.update({ spellCheck: false })).resolves.toEqual(updated);
+      expect(JSON.parse(await readFile(preferenceFile(userDataPath), "utf8"))).toEqual(updated);
+      controller.dispose();
+    },
+  );
 
   it("rejects an invalid snapshot before writing", async () => {
     const userDataPath = await scratchDirectory();

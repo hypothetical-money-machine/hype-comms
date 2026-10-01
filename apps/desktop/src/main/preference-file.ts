@@ -129,12 +129,14 @@ export async function syncDirectoryBestEffort(directory: string): Promise<void> 
 
 /**
  * Reads a small preference file with a hard size cap, returning null for anything unreadable,
- * empty, or oversized. The cap is enforced on the bytes actually read, not just the stat size,
- * so a file growing between stat and read cannot slip past it.
+ * empty, or oversized. Callers that must preserve unread settings can reject I/O errors; a
+ * missing pathname still returns null. The cap is enforced on the bytes actually read, not just
+ * the stat size, so a file growing between stat and read cannot slip past it.
  */
 export async function readBoundedUtf8File(
   filePath: string,
   maxBytes: number,
+  options: { readonly rejectReadErrors?: boolean } = {},
 ): Promise<string | null> {
   let file: FileHandle | undefined;
   try {
@@ -158,7 +160,13 @@ export async function readBoundedUtf8File(
     }
 
     return bytes.toString("utf8", 0, totalBytesRead);
-  } catch {
+  } catch (error) {
+    if (
+      options.rejectReadErrors === true &&
+      !(file === undefined && error instanceof Error && "code" in error && error.code === "ENOENT")
+    ) {
+      throw error;
+    }
     return null;
   } finally {
     await file?.close().catch(() => undefined);
