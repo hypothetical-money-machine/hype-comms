@@ -23,7 +23,7 @@ The adapter:
   and threads a channel reply by passing only the server-minted thread-root
   UUID as a flag;
 - atomically checkpoints the last accepted decimal workspace cursor together
-  with any post-handoff read-cursor target still awaiting delivery; and
+  with pending read-cursor targets and unfinished ambient-turn anchors; and
 - supports `deliver=hype_comms` cron jobs in both live-gateway and standalone
   cron processes.
 
@@ -104,16 +104,26 @@ edit operation through the CLI, so without that declaration the gateway opens a
 streaming preview, sends a partial first message, discovers that the edit
 failed, and leaves the partial sitting beside the finished answer.
 
-The flag is not the whole story for silence, though, and the difference matters.
-At the pinned commit only one of the gateway's two stream-consumer construction
-sites skips streaming on the flag; the other reads it merely to blank the
-typing cursor and builds a consumer anyway. A consumer can seal a segment
-mid-turn and hand a bare silence marker to `send()` as ordinary text, which is
-exactly the shape a model produces when it decides to stay quiet after calling a
-tool. So the adapter also filters whole-message silence markers on the way out.
-That filter, not the flag, is what guarantees the word `NO_REPLY` is never
-posted into someone's channel, because a posted Hype Comms message cannot be
-retracted from here.
+At the pinned commit the proxy stream-consumer path ignores that flag when
+constructing its consumer. Hermes also sends interim assistant commentary and
+long-running heartbeat messages before it knows whether a turn will end with
+`NO_REPLY`. The adapter disables tool/thinking progress, interim commentary,
+heartbeats, and streaming for Hype Comms turns through a copied
+`display.platforms.hype_comms` policy. Useful final answers still reach the
+normal sender, including the direct send Hermes uses between queued turns.
+The whole-message silence filter remains a final safeguard.
+
+This policy depends on the pinned runner's `_run_agent_inner` and
+`_run_agent_via_proxy` methods loading configuration through
+`_load_gateway_config`. The adapter clones those functions' globals per Hype
+Comms invocation; other platforms call the original methods. It does not modify
+Hermes module globals or the user's configuration file. The pinned
+`_preserve_queued_followup_history_offset` helper also identifies each completed
+turn's own result before Hermes replaces it with the last queued turn's result.
+Startup rejects an incompatible runner instead of enabling ambient turns with
+unverified progress or recovery behavior. Review these hooks when updating the
+Hermes pin. These overrides cover the listed progress/commentary routes;
+separate system notices keep Hermes's behavior.
 
 No Hermes source is vendored here.
 
@@ -308,6 +318,11 @@ draining, or the pinned queue helpers are unavailable, the adapter retries the
 watch event without advancing its checkpoint. Each admitted message keeps its
 own context pack, reply anchor, and silence decision.
 
+Before handing an ambient wake to the volatile FIFO, the adapter persists a
+recovery anchor. A successful model decision removes that anchor; failed or
+interrupted decisions retain it for restart recovery. A reconnect in the same
+process does not enqueue another copy of an already admitted live turn.
+
 Every authorized message costs one inference turn even when the model stays
 quiet. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS` unless agent-to-agent
 wakes are intentional; self-authored messages remain suppressed.
@@ -336,14 +351,27 @@ never used for authorization.
 
 State is scoped by SHA-256 of the credential-free API origin plus agent user
 ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
-mode `0600`. Version 2 stores the decimal workspace checkpoint and, per
-conversation, a pending read target with its conversation sequence. A valid
-version 1 checkpoint is migrated in place before watch starts.
+mode `0600`. Version 3 stores the decimal workspace checkpoint, per-conversation
+pending read targets, and at most 4,096 unfinished ambient-turn anchors. Each
+anchor contains message, conversation, author, and thread-root IDs, workspace
+and conversation sequences, and a timestamp. It contains no message text or
+credentials. Valid version 1 and version 2 checkpoints migrate in place before
+watch starts; malformed recovery targets fail startup.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
 installations resume from their persisted cursor. At-least-once duplicate
 events at or below that cursor are ignored.
+
+On restart, the adapter refetches each unfinished ambient anchor's context pack
+before watch resumes. It repeats current sender authorization and strict pack
+validation, then lets the model decide whether to answer. A deleted or
+inaccessible anchor, or an author denied by the current policy, is retired
+without inference. Recovery never rewinds the accepted workspace cursor.
+This is at-least-once model processing: a crash after a decision or reply but
+before its durable completion write can repeat that turn. Anchors also remain
+durable when FIFO admission is full or the gateway is draining; startup retries
+instead of discarding those turns.
 
 When `read-cursors:write` is present, `handle_message` must return successfully
 before the adapter marks anything read. It then writes the triggering workspace
@@ -431,7 +459,10 @@ post-handoff ordering, failed handoff, retracted-anchor poison-event skipping,
 read-scope warning/no-mutation behavior, durable pending read retry across
 idle uptime and restart, Retry-After propagation, permanent-failure parking,
 retry-task and in-flight child cancellation, fatal-handler teardown ownership,
-v1-to-v2 migration, metadata cache updates, equal-cursor resync,
+v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
+authorization, write/fsync failure rollback, reconnect admission deduplication,
+per-turn completion across mixed failed/successful FIFO decisions, isolated
+Hype display configuration, metadata cache updates, equal-cursor resync,
 cursor-expiry recovery, malformed NDJSON cleanup, transient respawn recovery,
 private-stdin send, thread-root resolution for top-level and in-thread wakes,
 fallback delivery threading from the metadata anchor, chunked-reply root
