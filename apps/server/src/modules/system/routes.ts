@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
 import type { HealthResponse, ReadinessResponse } from "@hype-comms/contracts";
-import { parseBearerAuthorization } from "../../http/bearer-authorization.js";
 import { routeModule } from "../../http/route-registrar.js";
 import { publicPolicy } from "../../http/authentication-policies.js";
 
@@ -18,9 +17,13 @@ interface SystemRoutesOptions {
 }
 
 function hasMetricsAccess(header: string | string[] | undefined, token: string): boolean {
-  const { token: suppliedToken } = parseBearerAuthorization(header);
-  if (suppliedToken === null) return false;
-  const supplied = Buffer.from(suppliedToken);
+  if (typeof header !== "string") return false;
+  // Metrics secrets may contain whitespace. Validate the scheme and separators without changing
+  // any bytes of the configured secret, including its leading or trailing whitespace.
+  const secretOffset = header.length - token.length;
+  const prefix = header.slice(0, secretOffset);
+  if (/^Bearer[ \t]+/i.exec(prefix)?.[0] !== prefix) return false;
+  const supplied = Buffer.from(header.slice(secretOffset));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
