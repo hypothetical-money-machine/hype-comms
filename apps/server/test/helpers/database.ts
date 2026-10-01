@@ -90,7 +90,7 @@ export async function createTestSchema(options: CreateTestSchemaOptions): Promis
       await drop();
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "Test schema setup and cleanup failed", {
-        cause: error,
+        cause: cleanupError,
       });
     }
     throw error;
