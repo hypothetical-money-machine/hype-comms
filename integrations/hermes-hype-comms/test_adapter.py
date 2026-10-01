@@ -3857,28 +3857,53 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter._backoff_base = 0.05
         adapter._backoff_max = 0.5
 
-        with patch.object(adapter_module.random, "random", return_value=0.0):
-            await adapter._accept_event(message_event("101", DM_ID, USER_ID))
-            retry_task = adapter._read_cursor_retry_task
-            self.assertIsNotNone(retry_task)
-            # Let the one task consume its initial 100 ms backoff and enter
-            # the wakeable sleep before a later message observes Retry-After.
-            await asyncio.sleep(0.01)
+        now = 1_000.0
+        sleeping_at: asyncio.Queue[float] = asyncio.Queue()
+        wakeup = adapter._read_cursor_retry_wakeup
+        original_wait = wakeup.wait
 
-            await adapter._accept_event(message_event("102", DM_ID, USER_ID))
+        async def observe_sleep() -> None:
+            sleeping_at.put_nowait(now)
+            await original_wait()
 
-            self.assertIs(adapter._read_cursor_retry_task, retry_task)
-            # The initial deadline has elapsed here. Retrying now would prove
-            # the 300 ms deadline observed by the opportunistic flush was lost.
-            await asyncio.sleep(0.14)
-            read_calls = [
-                call
-                for call in factory.calls
-                if call["args"][:2] == ("read-cursors", "advance")
-            ]
-            self.assertEqual(len(read_calls), 2)
-            assert retry_task is not None
-            await asyncio.wait_for(retry_task, timeout=0.5)
+        async def wait_for_current_sleep() -> None:
+            while await asyncio.wait_for(sleeping_at.get(), timeout=1.0) != now:
+                pass
+
+        with (
+            patch.object(adapter_module.random, "random", return_value=0.0),
+            patch.object(adapter_module, "time", types.SimpleNamespace(monotonic=lambda: now)),
+            patch.object(wakeup, "wait", observe_sleep),
+        ):
+            try:
+                await adapter._accept_event(message_event("101", DM_ID, USER_ID))
+                retry_task = adapter._read_cursor_retry_task
+                self.assertIsNotNone(retry_task)
+                await wait_for_current_sleep()
+
+                now += 0.01
+                await adapter._accept_event(message_event("102", DM_ID, USER_ID))
+                self.assertIs(adapter._read_cursor_retry_task, retry_task)
+                await wait_for_current_sleep()
+
+                # Expire the initial 100 ms backoff while remaining before the later
+                # Retry-After deadline. A delayed runner cannot advance this clock.
+                now += 0.14
+                wakeup.set()
+                await wait_for_current_sleep()
+                read_calls = [
+                    call
+                    for call in factory.calls
+                    if call["args"][:2] == ("read-cursors", "advance")
+                ]
+                self.assertEqual(len(read_calls), 2)
+
+                now += 0.3
+                wakeup.set()
+                assert retry_task is not None
+                await asyncio.wait_for(retry_task, timeout=1.0)
+            finally:
+                await adapter.disconnect()
 
         read_calls = [
             call
