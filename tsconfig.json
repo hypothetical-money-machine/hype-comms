@@ -5,6 +5,7 @@
   "files": [],
   "references": [
     { "path": "packages/contracts" },
+    { "path": "packages/api-client" },
     { "path": "apps/server" },
     { "path": "apps/desktop" },
     { "path": "packages/cli" }
