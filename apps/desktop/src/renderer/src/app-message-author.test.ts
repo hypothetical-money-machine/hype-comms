@@ -5,7 +5,7 @@ import { SYSTEM_USER_ID, type Message, type User } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MessageRow } from "./App";
+import { MessageRow } from "./message-row";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const MESSAGE_ID = "10000000-0000-4000-8000-000000000002";

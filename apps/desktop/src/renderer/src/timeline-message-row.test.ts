@@ -5,7 +5,8 @@ import { createElement, useState, type ComponentProps } from "react";
 import { MESSAGE_RETRACT_WINDOW_MS, type Message, type User } from "@hype-comms/contracts";
 import { afterEach, expect, it, vi } from "vitest";
 import type * as MessageBodyModule from "./message-body";
-import { formatMessageTime, TimelineMessageRow } from "./App";
+import { formatMessageTime } from "./message-row";
+import { TimelineMessageRow } from "./message-timeline";
 
 const rendering = vi.hoisted(() => ({ bodies: 0 }));
 vi.mock("./message-body", async (importOriginal) => {
