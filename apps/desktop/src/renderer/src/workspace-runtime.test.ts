@@ -1987,6 +1987,35 @@ describe("WorkspaceRuntime", () => {
     runtime.stop();
   });
 
+  it("isolates subscriber failures during initial notification and shutdown", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unsubscribeThrowing = runtime.subscribe(() => {
+      throw new Error("Private subscriber error");
+    });
+    const healthyObserver = vi.fn();
+    const unsubscribeHealthy = runtime.subscribe(healthyObserver);
+
+    try {
+      expect(healthyObserver).toHaveBeenCalledWith(runtime.state);
+      await expect(runtime.stop()).resolves.toBeUndefined();
+      expect(healthyObserver).toHaveBeenLastCalledWith(
+        expect.objectContaining({ bootstrap: null, messages: [], outbox: [] }),
+      );
+      expect(reportError).toHaveBeenCalledTimes(2);
+      expect(reportError.mock.calls).toEqual([
+        ["Workspace state subscriber failed"],
+        ["Workspace state subscriber failed"],
+      ]);
+    } finally {
+      unsubscribeThrowing();
+      unsubscribeHealthy();
+      reportError.mockRestore();
+    }
+  });
+
   it("publishes the cache's committed summaries without repeating event accounting", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     const cache = new FakeWorkspaceCache();
@@ -7753,6 +7782,56 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
     expect(api.acknowledged).toContain("11");
     expect(api.bootstrapRequests).toBe(1);
+  });
+
+  it("refreshes committed member invalidations when a state subscriber throws", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10", { members: [user, agent] }));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const reportError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let observerThrew = false;
+    let acknowledgedAtFailure = false;
+    let committedAtFailure: string | null = null;
+    const unsubscribeThrowing = runtime.subscribe((state) => {
+      if (state.bootstrap?.syncCursor.sequence === "11" && !observerThrew) {
+        observerThrew = true;
+        acknowledgedAtFailure = api.acknowledged.includes("11");
+        committedAtFailure = cache.cursor;
+        throw new Error("Observer failure containing private renderer state");
+      }
+    });
+    const healthyObserver = vi.fn();
+    const unsubscribeHealthy = runtime.subscribe(healthyObserver);
+    healthyObserver.mockClear();
+
+    try {
+      api.members = [user];
+      api.emitWorkspaceEvent(memberUpdated(MEMBER_EVENT_ID, "11", agent));
+      await settle(() => observerThrew, "observer failure after commit and acknowledgement");
+      await settle(() => api.memberRequests === 1, "member refresh after observer failure");
+      await settle(() => runtime.state.bootstrap?.members.length === 1, "disabled member removal");
+
+      expect(acknowledgedAtFailure).toBe(true);
+      expect(committedAtFailure).toBe("11");
+      expect((await cache.load()).bootstrap?.members.map((item) => item.id)).toEqual([USER_ID]);
+      expect(healthyObserver).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bootstrap: expect.objectContaining({
+            syncCursor: testPosition("11"),
+            members: expect.arrayContaining([expect.objectContaining({ id: AGENT_ID })]),
+          }),
+        }),
+      );
+      expect(reportError).toHaveBeenCalledExactlyOnceWith("Workspace state subscriber failed");
+      expect(runtime.state.error).toBeNull();
+      expect(api.bootstrapRequests).toBe(1);
+    } finally {
+      unsubscribeThrowing();
+      unsubscribeHealthy();
+      reportError.mockRestore();
+      await runtime.stop();
+    }
   });
 
   it("refreshes the directory from an offline backfill before reloading the cache", async () => {
