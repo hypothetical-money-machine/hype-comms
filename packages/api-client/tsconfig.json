@@ -8,5 +8,6 @@
     "composite": true,
     "exactOptionalPropertyTypes": true
   },
+  "references": [{ "path": "../contracts" }],
   "include": ["src/**/*.ts"]
 }
