@@ -10,6 +10,20 @@ import { createPool } from "./pool.js";
 
 const MIGRATION_LOCK_ID = "3247861932147781";
 
+// Migration 0031 originally failed if an existing account owned the publisher username. The
+// corrected SQL creates the same fixed publisher id with an available username. Databases that
+// applied the original file need no replay. Accept only this recorded/file checksum pair so edits
+// to either version still fail the checksum guard.
+const revisedMigrationChecksums = new Map([
+  [
+    "0031_system_channels.sql",
+    {
+      original: "5b4ef577525807a65e5cb827ab6db87914eb3dff2bf38b99ac1089f086914770",
+      corrected: "1a54a7dc925d7db2c28d321667f93821093a56a64d382b5da45be203df7e55ae",
+    },
+  ],
+]);
+
 interface MigrationRow extends QueryResultRow {
   readonly filename: unknown;
   readonly checksum: unknown;
@@ -84,7 +98,16 @@ export async function runMigrations(
 
     for (const migration of migrations) {
       const appliedChecksum = appliedByFilename.get(migration.filename);
-      if (appliedChecksum !== undefined && appliedChecksum !== migration.checksum) {
+      const revision = revisedMigrationChecksums.get(migration.filename);
+      const appliedOriginalRevision =
+        revision !== undefined &&
+        appliedChecksum === revision.original &&
+        migration.checksum === revision.corrected;
+      if (
+        appliedChecksum !== undefined &&
+        appliedChecksum !== migration.checksum &&
+        !appliedOriginalRevision
+      ) {
         throw new Error(
           `Migration checksum mismatch for ${migration.filename}: ` +
             `database has ${appliedChecksum}, file has ${migration.checksum}`,
