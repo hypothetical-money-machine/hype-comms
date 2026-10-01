@@ -971,7 +971,7 @@ export class ChatSession {
 
   /**
    * Ends only the session whose credential the server rejected, checking after queued changes.
-   * Returns false when the response was superseded, so callers can retry instead of requiring login.
+   * Returns false when the response or initiating scope was superseded.
    */
   markSignedOut(response: Response, isCurrent: () => boolean = () => true): Promise<boolean> {
     const credential = this.#responseCredentials.get(response);

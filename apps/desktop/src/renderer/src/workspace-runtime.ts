@@ -83,6 +83,8 @@ export interface WorkspaceRuntimeState {
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
+  /** Changes for an explicit main-timeline jump, including a repeated jump to the same message. */
+  readonly focusedMessageRequest: number;
   readonly selectedThreadRootId: string | null;
   readonly focusedThreadMessageId: string | null;
   readonly historyLoading: readonly string[];
@@ -177,6 +179,7 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
+  focusedMessageRequest: 0,
   selectedThreadRootId: null,
   focusedThreadMessageId: null,
   historyLoading: [],
@@ -592,6 +595,8 @@ export class WorkspaceRuntime {
   #state = INITIAL_STATE;
   #cache: WorkspaceCache | null = null;
   #generation = 0;
+  // Do not reuse a jump request if this runtime stops and starts another session.
+  #focusedMessageRequest = 0;
   #offlineOnly = false;
   #protocolBlocked = false;
   /** The current projection owns one flush; a rotated barrier may supersede a hung old worker. */
@@ -1156,7 +1161,7 @@ export class WorkspaceRuntime {
     this.#setState({
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
-
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: null,
       focusedThreadMessageId: null,
       threadLoading: false,
@@ -1220,17 +1225,6 @@ export class WorkspaceRuntime {
     if (summary.unreadCount === 0 && summary.mentionCount === 0) return;
     const targetMessage = summary.lastMessage;
     if (targetMessage === null) return;
-
-    this.#setState({
-      bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
-        if (current === undefined) return null;
-        return {
-          ...current,
-          unreadCount: 0,
-          mentionCount: 0,
-        };
-      }),
-    });
 
     this.markConversationReadThrough(conversationId, targetMessage.id);
   }
@@ -1677,7 +1671,7 @@ export class WorkspaceRuntime {
       selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
       focusedMessageId:
         message === undefined || message.threadRootId === null ? attachment.messageId : null,
-
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: message?.threadRootId ?? null,
       focusedThreadMessageId:
         message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
@@ -1915,7 +1909,7 @@ export class WorkspaceRuntime {
             }),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
-
+        focusedMessageRequest: ++this.#focusedMessageRequest,
         selectedThreadRootId: threadRootId,
         focusedThreadMessageId: threadRootId === null ? null : result.message.id,
         threadLoading: threadRootId !== null,
@@ -2093,6 +2087,7 @@ export class WorkspaceRuntime {
         ...(this.#state.selectedConversationId === root.conversationId
           ? {
               focusedMessageId: selectedThreadRootId ?? threadRootId,
+              focusedMessageRequest: ++this.#focusedMessageRequest,
             }
           : {}),
       });
@@ -2556,13 +2551,23 @@ export class WorkspaceRuntime {
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const retainedMessages = this.#retainMessages(history.messages);
-      const knownIds = new Set(this.#state.messages.map((message) => message.id));
-      const addedMessages = retainedMessages.some(
-        (message) =>
-          !knownIds.has(message.id) &&
-          message.deletedAt === null &&
-          (!history.threadsSupported || message.threadRootId === null),
+      // Index the page, not the store: each "load older" click walks up to
+      // MAX_OVERLAPPING_HISTORY_PAGES pages, and the incoming page is at most 50 messages while
+      // the store can hold thousands.
+      const unseenVisibleIds = new Set(
+        retainedMessages
+          .filter(
+            (message) =>
+              message.deletedAt === null &&
+              (!history.threadsSupported || message.threadRootId === null),
+          )
+          .map((message) => message.id),
       );
+      for (const message of this.#state.messages) {
+        unseenVisibleIds.delete(message.id);
+        if (unseenVisibleIds.size === 0) break;
+      }
+      const addedMessages = unseenVisibleIds.size > 0;
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#setState({
         messages: mergeMessages(this.#state.messages, retainedMessages),
@@ -2598,7 +2603,8 @@ export class WorkspaceRuntime {
   }
 
   hasOlder(conversationId: string): boolean {
-    return this.#historyCursors.get(conversationId) !== null;
+    const cursor = this.#historyCursors.get(conversationId);
+    return cursor !== null && (!this.#offlineOnly || cursor !== undefined);
   }
 
   #directConversationId(memberId: string): string | null {

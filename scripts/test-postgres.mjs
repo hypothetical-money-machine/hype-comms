@@ -16,6 +16,7 @@ import {
 
 export { requireTestDatabaseUrl } from "./test-database-config.mjs";
 
+/** Ensures direct PostgreSQL execution requires the database even if the caller omits the gate. */
 export function serverSuiteEnvironment(environment = process.env) {
   return { ...environment, HYPE_COMMS_REQUIRE_TEST_DATABASE: "1" };
 }

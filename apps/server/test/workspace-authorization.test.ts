@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { conversationVisibilitySql } from "../src/modules/workspace/conversation-access.js";
+import { conversationVisibilitySql } from "../src/modules/workspace/authorization.js";
 
 describe("conversationVisibilitySql", () => {
   it("embeds the visibility tables and the supplied alias and user parameter", () => {
