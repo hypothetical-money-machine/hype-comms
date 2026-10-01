@@ -85,6 +85,8 @@ export interface WorkspaceRuntimeState {
   readonly focusedMessageId: string | null;
   readonly selectedThreadRootId: string | null;
   readonly focusedThreadMessageId: string | null;
+  readonly historyLoading: readonly string[];
+  readonly historyErrors: Readonly<Record<string, string>>;
   readonly threadLoading: boolean;
   readonly threadError: string | null;
   readonly connection: RealtimeConnectionState;
@@ -126,6 +128,9 @@ interface OutboxUpdate {
  * download that fails while a resync runs is transient, and is retried with backoff instead.
  */
 const MAX_CONSECUTIVE_RESYNCS = 3;
+// Bound one user action even if a server returns empty/overlapping pages indefinitely.
+const MAX_OVERLAPPING_HISTORY_PAGES = 20;
+const MAX_METADATA_REFRESH_RETRIES = 3;
 
 /**
  * How long the resync in place has to hold up before the next demand starts a chain of its own
@@ -174,6 +179,8 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   focusedMessageId: null,
   selectedThreadRootId: null,
   focusedThreadMessageId: null,
+  historyLoading: [],
+  historyErrors: {},
   threadLoading: false,
   threadError: null,
   connection: "offline",
@@ -650,6 +657,8 @@ export class WorkspaceRuntime {
   /** The immutable main-process scope currently authorized to mutate this renderer cache. */
   #realtimeScope: RealtimeSessionScope | null = null;
   readonly #historyCursors = new Map<string, string | null>();
+  /** Histories restored from IndexedDB in this generation, independently of network paging. */
+  readonly #cachedConversationIds = new Set<string>();
   /** In-flight first-page hydrations so opening the same conversation does not stack fetches. */
   readonly #historyHydrations = new Map<string, Promise<void>>();
   readonly #readTargets = new Map<string, ReadTarget>();
@@ -738,6 +747,7 @@ export class WorkspaceRuntime {
       this.#scope.userId !== scope.userId ||
       this.#scope.workspaceId !== scope.workspaceId;
     const generation = ++this.#generation;
+    this.#cachedConversationIds.clear();
     this.#offlineOnly = options.offline === true;
     this.#protocolBlocked = false;
     this.#retireMembersReplacementQueue();
@@ -872,7 +882,7 @@ export class WorkspaceRuntime {
           ? this.#cache
           : this.#createCache(cryptoStatus);
       this.#cache = cache;
-      let cached = await cache.load();
+      let cached = await cache.load({ conversationId: null });
       if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
       if (
         cached.bootstrap !== null &&
@@ -882,9 +892,35 @@ export class WorkspaceRuntime {
         // A correctly scoped encrypted database cannot contain another identity. Treat any such
         // projection as corrupt, remove it before first paint, and rebuild only while online.
         await cache.clearAll();
-        cached = await cache.load();
+        cached = await cache.load({ conversationId: null });
         if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
           return;
+      }
+      const preferredConversationId = this.#state.selectedConversationId;
+      const openingConversationId =
+        cached.bootstrap === null
+          ? null
+          : cached.bootstrap.conversations.some(
+                (summary) => summary.conversation.id === preferredConversationId,
+              )
+            ? preferredConversationId
+            : firstConversation(cached.bootstrap);
+      if (openingConversationId !== null) {
+        cached = await cache.load({
+          conversationId: openingConversationId,
+          includeAllTasks: true,
+        });
+        if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
+          return;
+        if (
+          cached.bootstrap !== null &&
+          (cached.bootstrap.currentUser.user.id !== scope.userId ||
+            cached.bootstrap.workspace.id !== scope.workspaceId)
+        ) {
+          await cache.clearAll();
+          throw new Error("The restored conversation did not match the signed-in session");
+        }
+        this.#cachedConversationIds.add(openingConversationId);
       }
       this.#hydrateRetractReservations(cached.retractReservations, cached.messages);
       this.#membershipRepairPending =
@@ -901,9 +937,7 @@ export class WorkspaceRuntime {
         reactions: cached.reactions,
         tasks: cached.tasks,
         outbox: cached.outbox,
-        selectedConversationId:
-          this.#state.selectedConversationId ??
-          (cached.bootstrap === null ? null : firstConversation(cached.bootstrap)),
+        selectedConversationId: openingConversationId,
         cacheMode: cryptoStatus.mode,
         cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
         stale: true,
@@ -950,7 +984,7 @@ export class WorkspaceRuntime {
         await this.#completeStartupAfterReplicaCatchUp(generation);
         return;
       }
-      await this.#refreshSnapshot(generation);
+      await this.#refreshSnapshot(generation, undefined, undefined, "selected");
       if (generation !== this.#generation || this.#cache === null) return;
       await this.#completeStartupAfterSnapshot(generation);
     } catch (error) {
@@ -1122,22 +1156,30 @@ export class WorkspaceRuntime {
     this.#setState({
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
+
       selectedThreadRootId: null,
       focusedThreadMessageId: null,
       threadLoading: false,
       threadError: null,
     });
+    this.#ensureConversationHistory(task.conversationId);
   }
 
   markConversationReadThrough(conversationId: string, messageId: string): void {
     if (this.#offlineOnly) return;
-    const message = this.#state.messages.find(
-      (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
-    );
     const summary = this.#state.bootstrap?.conversations.find(
       (candidate) => candidate.conversation.id === conversationId,
     );
-    if (message === undefined || summary === undefined) return;
+    if (summary === undefined) return;
+    const message =
+      this.#state.messages.find(
+        (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
+      ) ??
+      (summary.lastMessage?.id === messageId &&
+      summary.lastMessage.conversationId === conversationId
+        ? summary.lastMessage
+        : undefined);
+    if (message === undefined) return;
     const targetSequence = message.conversationSequence;
     const currentSequence = summary.readCursor?.lastReadConversationSequence;
     const tracked = this.#readTargets.get(conversationId);
@@ -1169,6 +1211,30 @@ export class WorkspaceRuntime {
     this.#sendReadTarget(conversationId, target, this.#generation);
   }
 
+  markConversationAsRead(conversationId: string): void {
+    if (this.#offlineOnly || this.#state.bootstrap === null) return;
+    const summary = this.#state.bootstrap.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (summary === undefined) return;
+    if (summary.unreadCount === 0 && summary.mentionCount === 0) return;
+    const targetMessage = summary.lastMessage;
+    if (targetMessage === null) return;
+
+    this.#setState({
+      bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
+        if (current === undefined) return null;
+        return {
+          ...current,
+          unreadCount: 0,
+          mentionCount: 0,
+        };
+      }),
+    });
+
+    this.markConversationReadThrough(conversationId, targetMessage.id);
+  }
+
   #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
     if (
       this.#protocolBlocked ||
@@ -1194,7 +1260,14 @@ export class WorkspaceRuntime {
             ) {
               return current;
             }
-            return { ...current, readCursor: result.readCursor };
+            const clearsUnreads =
+              current.lastMessage === null ||
+              BigInt(projectedSequence) >= BigInt(current.lastMessage.conversationSequence);
+            return {
+              ...current,
+              readCursor: result.readCursor,
+              ...(clearsUnreads ? { unreadCount: 0, mentionCount: 0 } : {}),
+            };
           }),
         });
         if (this.#readTargets.get(conversationId) === target) {
@@ -1502,6 +1575,9 @@ export class WorkspaceRuntime {
   #rotateProjectionBarrier(): void {
     this.#projectionAbortController.abort();
     this.#projectionAbortController = new AbortController();
+    this.#historyHydrations.clear();
+    this.#cachedConversationIds.clear();
+    this.#setState({ historyLoading: [], historyErrors: {} });
   }
 
   async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
@@ -1537,6 +1613,9 @@ export class WorkspaceRuntime {
       });
       applied = true;
     });
+    if (applied && this.#isCurrentNotificationAction(action, currentContext, generation)) {
+      this.#ensureConversationHistory(action.conversationId);
+    }
     return applied;
   }
 
@@ -1598,6 +1677,7 @@ export class WorkspaceRuntime {
       selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
       focusedMessageId:
         message === undefined || message.threadRootId === null ? attachment.messageId : null,
+
       selectedThreadRootId: message?.threadRootId ?? null,
       focusedThreadMessageId:
         message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
@@ -1835,6 +1915,7 @@ export class WorkspaceRuntime {
             }),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
+
         selectedThreadRootId: threadRootId,
         focusedThreadMessageId: threadRootId === null ? null : result.message.id,
         threadLoading: threadRootId !== null,
@@ -1845,6 +1926,7 @@ export class WorkspaceRuntime {
     // The serialized projection can retire quietly when a session replacement wins during an
     // awaited reaction read. Do not let its continuation open an old thread in the new scope.
     if (!projected || !this.#isProjectionCurrent(projection, conversationId)) return;
+    this.#ensureConversationHistory(conversationId);
     if (threadRootId !== null) await this.openThread(threadRootId, result.message.id);
   }
 
@@ -2009,7 +2091,9 @@ export class WorkspaceRuntime {
         threadLoading: false,
         threadError: null,
         ...(this.#state.selectedConversationId === root.conversationId
-          ? { focusedMessageId: selectedThreadRootId ?? threadRootId }
+          ? {
+              focusedMessageId: selectedThreadRootId ?? threadRootId,
+            }
           : {}),
       });
     });
@@ -2341,17 +2425,122 @@ export class WorkspaceRuntime {
   }
 
   async loadOlder(conversationId: string): Promise<void> {
+    const existing = this.#historyHydrations.get(conversationId);
+    if (existing !== undefined) return existing;
     const cache = this.#cache;
-    const before = this.#historyCursors.get(conversationId);
-    if (cache === null || before === null) return;
+    if (
+      cache === null ||
+      (this.#cachedConversationIds.has(conversationId) &&
+        (this.#offlineOnly || this.#historyCursors.get(conversationId) === null))
+    ) {
+      return;
+    }
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    const hydration = this.#loadAdditionalHistory(conversationId)
+      .catch((error: unknown) => {
+        if (this.#isProjectionCurrent(projection, conversationId)) {
+          this.#setState({
+            historyErrors: {
+              ...this.#state.historyErrors,
+              [conversationId]: errorMessage(error, "Could not load conversation history"),
+            },
+          });
+        }
+      })
+      .finally(() => {
+        if (this.#historyHydrations.get(conversationId) === hydration) {
+          this.#historyHydrations.delete(conversationId);
+          this.#setState({
+            historyLoading: this.#state.historyLoading.filter((id) => id !== conversationId),
+          });
+        }
+      });
+    this.#historyHydrations.set(conversationId, hydration);
+    const historyErrors = { ...this.#state.historyErrors };
+    delete historyErrors[conversationId];
+    this.#setState({
+      historyLoading: [...this.#state.historyLoading, conversationId],
+      historyErrors,
+    });
+    await hydration;
+  }
+
+  async #loadAdditionalHistory(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    // Opening a conversation still refreshes only its first page. An explicit older-page
+    // request follows server cursors until it adds visible messages or reaches the end.
+    const continueOverlaps = this.#historyCursors.has(conversationId);
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < MAX_OVERLAPPING_HISTORY_PAGES; page++) {
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const before = this.#historyCursors.get(conversationId);
+      if (before !== undefined && before !== null) {
+        if (seenCursors.has(before))
+          throw new Error("The server repeated a history page. Try loading older messages again.");
+        seenCursors.add(before);
+      }
+      const addedMessages = await this.#loadHistoryPage(conversationId);
+      if (
+        !this.#isProjectionCurrent(projection, conversationId) ||
+        !continueOverlaps ||
+        this.#state.selectedConversationId !== conversationId ||
+        addedMessages !== false ||
+        this.#historyCursors.get(conversationId) === null
+      ) {
+        return;
+      }
+    }
+    throw new Error("More history remains. Load older messages again to continue.");
+  }
+
+  async #loadHistoryPage(conversationId: string): Promise<boolean | undefined> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    if (!this.#cachedConversationIds.has(conversationId)) {
+      await this.#serialize(async () => {
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        const cached = await cache.load({ conversationId });
+        if (!this.#isProjectionCurrent(projection, conversationId) || cached.repairMarker !== null)
+          return;
+        if (
+          !cached.bootstrap?.conversations.some(
+            (summary) => summary.conversation.id === conversationId,
+          )
+        ) {
+          return;
+        }
+        this.#cachedConversationIds.add(conversationId);
+        const retainedMessages = this.#retainMessages(cached.messages);
+        this.#setState({
+          messages: mergeMessages(this.#state.messages, retainedMessages),
+          reactions: mergeReactions(
+            this.#state.reactions,
+            retainReactionsForLiveMessages(cached.reactions, retainedMessages),
+          ),
+          tasks: mergeTasks(this.#state.tasks, cached.tasks),
+        });
+      });
+    }
+    const before = this.#historyCursors.get(conversationId);
+    if (
+      !this.#isProjectionCurrent(projection, conversationId) ||
+      !this.#cachedConversationIds.has(conversationId) ||
+      this.#offlineOnly ||
+      before === null
+    ) {
+      return;
+    }
     const history = await this.#client.getConversationMessages({
       conversationId,
       ...(before === undefined ? {} : { before }),
       limit: 50,
     });
-    await this.#serialize(async () => {
+    return this.#serialize(async () => {
       if (!this.#isProjectionCurrent(projection, conversationId)) return;
       const messageIds = history.messages.map((message) => message.id);
       const hydrated =
@@ -2367,6 +2556,13 @@ export class WorkspaceRuntime {
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return;
       const retainedMessages = this.#retainMessages(history.messages);
+      const knownIds = new Set(this.#state.messages.map((message) => message.id));
+      const addedMessages = retainedMessages.some(
+        (message) =>
+          !knownIds.has(message.id) &&
+          message.deletedAt === null &&
+          (!history.threadsSupported || message.threadRootId === null),
+      );
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#setState({
         messages: mergeMessages(this.#state.messages, retainedMessages),
@@ -2397,6 +2593,7 @@ export class WorkspaceRuntime {
           retainAttachmentsForLiveMessages(history.attachments ?? [], retainedMessages),
         ),
       });
+      return addedMessages;
     });
   }
 
@@ -2421,16 +2618,11 @@ export class WorkspaceRuntime {
    */
   #ensureConversationHistory(conversationId: string): void {
     if (
-      this.#offlineOnly ||
-      this.#historyCursors.has(conversationId) ||
-      this.#historyHydrations.has(conversationId)
+      !this.#cachedConversationIds.has(conversationId) ||
+      !this.#historyCursors.has(conversationId)
     ) {
-      return;
+      void this.loadOlder(conversationId);
     }
-    const hydration = this.loadOlder(conversationId).finally(() => {
-      this.#historyHydrations.delete(conversationId);
-    });
-    this.#historyHydrations.set(conversationId, hydration);
   }
 
   async resetLocalCache(): Promise<void> {
@@ -2619,6 +2811,7 @@ export class WorkspaceRuntime {
     generation: number,
     minimumCursor?: SyncPosition,
     prefetched?: WorkspaceSnapshot,
+    hydration: "all" | "selected" = "all",
   ): Promise<boolean> {
     const cache = this.#cache;
     const scope = this.#scope;
@@ -2645,7 +2838,7 @@ export class WorkspaceRuntime {
     const previousEpoch = this.#syncCursor?.epoch ?? this.#state.bootstrap?.syncCursor.epoch;
     if (previousEpoch !== undefined && previousEpoch !== snapshot.syncCursor.epoch) {
       if (!(await this.#resetProtocolReplica(generation))) return false;
-      return this.#refreshSnapshot(generation, undefined, snapshot);
+      return this.#refreshSnapshot(generation, undefined, snapshot, hydration);
     }
     if (
       minimumCursor !== undefined &&
@@ -2666,23 +2859,32 @@ export class WorkspaceRuntime {
     // generation check.
     const historyCursors = new Map<string, string | null>();
     const threadCursors = new Map<string, string | null>();
+    // An empty replica needs the opening conversation before first paint. Other histories are
+    // fetched on selection, as on a cached restart. Repairs still replace the full snapshot.
+    const initialConversationId = snapshot.conversations.some(
+      (summary) => summary.conversation.id === this.#state.selectedConversationId,
+    )
+      ? this.#state.selectedConversationId
+      : firstConversation(snapshot);
     for (const summary of snapshot.conversations) {
-      const history = await this.#client.getConversationMessages({
-        conversationId: summary.conversation.id,
-        limit: 50,
-      });
-      if (!isCurrent()) return false;
-      historyCursors.set(summary.conversation.id, history.nextCursor);
-      messages.push(...history.messages);
-      threadSummaries.push(...history.threadSummaries);
-      attachments.push(...(history.attachments ?? []));
-      threadsSupported &&= history.threadsSupported;
-      if (history.messages.length > 0) {
-        const hydrated = await this.#client.listMessageReactions(
-          history.messages.map((message) => message.id),
-        );
+      if (hydration === "all" || summary.conversation.id === initialConversationId) {
+        const history = await this.#client.getConversationMessages({
+          conversationId: summary.conversation.id,
+          limit: 50,
+        });
         if (!isCurrent()) return false;
-        reactions.push(...hydrated.reactions);
+        historyCursors.set(summary.conversation.id, history.nextCursor);
+        messages.push(...history.messages);
+        threadSummaries.push(...history.threadSummaries);
+        attachments.push(...(history.attachments ?? []));
+        threadsSupported &&= history.threadsSupported;
+        if (history.messages.length > 0) {
+          const hydrated = await this.#client.listMessageReactions(
+            history.messages.map((message) => message.id),
+          );
+          if (!isCurrent()) return false;
+          reactions.push(...hydrated.reactions);
+        }
       }
       if (isTaskConversation(summary, snapshot.currentUser.user.id)) {
         let after: string | undefined;
@@ -2830,6 +3032,10 @@ export class WorkspaceRuntime {
     }
     const loaded = await cache.load();
     if (!isCurrent()) return false;
+    this.#cachedConversationIds.clear();
+    for (const summary of loaded.bootstrap?.conversations ?? []) {
+      this.#cachedConversationIds.add(summary.conversation.id);
+    }
     // A realtime event can win after the snapshot replacement commits but before its durable
     // result is reloaded. That event may be the source-less retract whose thread summaries and
     // unread totals the snapshot would otherwise incorrectly declare authoritative.
@@ -3069,11 +3275,12 @@ export class WorkspaceRuntime {
     if (cache === null || generation !== this.#generation || this.#protocolBlocked) return;
     this.#syncRecoveryPending = true;
     this.#clearSyncRetryTimer();
-    let state = await cache.load();
-    let cursor = state.syncCursor;
+    let cursor = await cache.loadSyncCursor();
+    if (generation !== this.#generation || cache !== this.#cache) return;
     if (cursor === null) throw new Error("Sync requires an authoritative workspace position");
     let resets = 0;
     let sourceLessRetractApplied = false;
+    let projectionChanged = false;
     for (;;) {
       const result = await this.#client.syncWorkspace(cursor);
       if (generation !== this.#generation) return;
@@ -3101,6 +3308,7 @@ export class WorkspaceRuntime {
           return;
         }
         resets += 1;
+        projectionChanged = true;
         if (result.reason === "epoch_mismatch") {
           if (!(await this.#resetProtocolReplica(generation))) return;
         } else {
@@ -3108,13 +3316,14 @@ export class WorkspaceRuntime {
         }
         this.#syncCursor = null;
         await this.#refreshSnapshot(generation);
-        if (generation !== this.#generation) return;
-        state = await cache.load();
-        cursor = state.syncCursor;
+        if (generation !== this.#generation || cache !== this.#cache) return;
+        cursor = await cache.loadSyncCursor();
+        if (generation !== this.#generation || cache !== this.#cache) return;
         if (cursor === null) throw new Error("Bootstrap did not establish a sync position");
         continue;
       }
       let repairedMembership = false;
+      projectionChanged ||= result.response.events.length > 0;
       for (const event of result.response.events) {
         // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
         // here and drained once below. Without this the fix would only work while the app is
@@ -3170,8 +3379,33 @@ export class WorkspaceRuntime {
     // Drained once for the whole backfill, and before the reload so the state this flush publishes
     // is the refreshed directory rather than the stale cached one. Also the retry site for a
     // realtime refetch that failed earlier.
-    if (this.#membersDirty) await this.#refreshMembers(generation);
-    if (!(await this.#reloadCache(generation, cache))) return;
+    if (this.#membersDirty) {
+      projectionChanged = true;
+      await this.#refreshMembers(generation);
+    }
+    if (projectionChanged || this.#state.bootstrap === null) {
+      const conversationId =
+        resets === 0 && !sourceLessRetractApplied
+          ? (this.#startupReloadConversationId() ?? undefined)
+          : undefined;
+      if (!(await this.#reloadCache(generation, cache, conversationId))) return;
+    } else {
+      // An empty catch-up only changes sync progress. The replica was already loaded before
+      // startup, and HTTP mutations publish their own durable projections. Decrypting every
+      // message again here adds work proportional to all previously visited conversations.
+      if (
+        generation !== this.#generation ||
+        !this.#isProjectionCurrent(this.#captureProjection(cache))
+      ) {
+        return;
+      }
+      if (
+        this.#syncCursor !== null &&
+        !sameSyncPosition(this.#state.bootstrap.syncCursor, this.#syncCursor)
+      ) {
+        this.#setState({ bootstrap: { ...this.#state.bootstrap, syncCursor: this.#syncCursor } });
+      }
+    }
     this.#syncRecoveryPending = false;
     // A directory read that failed leaves the client genuinely stale, so the flush must not claim
     // otherwise just because the event page drained. A resync remains stale until realtime has
@@ -3411,14 +3645,45 @@ export class WorkspaceRuntime {
   async #refreshWorkspaceMetadata(
     generation: number,
     requireCurrentCatalog = false,
+    refreshAttempt = 0,
   ): Promise<boolean> {
     const cache = this.#cache;
     const scope = this.#scope;
-    if (cache === null || scope === null || generation !== this.#generation) return false;
-    const snapshot = await this.#fetchSnapshot();
-    if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
+    if (
+      cache === null ||
+      scope === null ||
+      generation !== this.#generation ||
+      this.#protocolBlocked ||
+      this.#membershipRepairPending
+    ) {
       return false;
     }
+    if (refreshAttempt > MAX_METADATA_REFRESH_RETRIES) {
+      throw new Error("The workspace metadata keeps changing. Reconnect to try again.");
+    }
+    const refetchMetadata = (): Promise<boolean> => {
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        scope !== this.#scope ||
+        this.#protocolBlocked ||
+        this.#membershipRepairPending
+      ) {
+        return Promise.resolve(false);
+      }
+      return this.#refreshWorkspaceMetadata(generation, requireCurrentCatalog, refreshAttempt + 1);
+    };
+    const requestProjection = this.#captureProjection(cache);
+    const snapshot = await this.#fetchSnapshot();
+    if (
+      generation !== this.#generation ||
+      cache !== this.#cache ||
+      scope !== this.#scope ||
+      this.#protocolBlocked
+    ) {
+      return false;
+    }
+    if (!this.#isProjectionCurrent(requestProjection)) return refetchMetadata();
     if (
       snapshot.currentUser.user.id !== scope.userId ||
       snapshot.workspace.id !== scope.workspaceId
@@ -3441,14 +3706,54 @@ export class WorkspaceRuntime {
       ) {
         return false;
       }
+      if (this.#syncCursor === null) return false;
+      // Catch-up may have replaced the replay epoch. Fetch metadata for that recovered replica;
+      // applying the prefetched catalog would either compare different epochs or reset it back.
+      if (this.#syncCursor.epoch !== snapshot.syncCursor.epoch) return refetchMetadata();
     }
 
-    const loaded = await cache.load();
+    // A normal restart has already restored its histories and applied intervening events. At
+    // that same cursor, refreshing the unchanged catalog needs no history decryption or rewrite.
+    // Source-less retraction repair retains the full reload that reconciles its projections.
+    if (!requireCurrentCatalog) {
+      const projection = this.#captureProjection(cache);
+      let refreshed: WorkspaceSnapshot | null;
+      try {
+        refreshed = await cache.refreshMetadata(snapshot, projection.signal);
+      } catch (error) {
+        if (!this.#isProjectionCurrent(projection)) return refetchMetadata();
+        throw error;
+      }
+      if (!this.#isProjectionCurrent(projection) || generation !== projection.generation) {
+        return refetchMetadata();
+      }
+      if (refreshed !== null) {
+        if (
+          this.#syncCursor === null ||
+          !sameSyncPosition(this.#syncCursor, refreshed.syncCursor)
+        ) {
+          return this.#reloadCache(generation, cache);
+        }
+        this.#setState({ bootstrap: refreshed });
+        return true;
+      }
+    }
+
+    const fallbackProjection = this.#captureProjection(cache);
+    let loaded: CachedWorkspaceState;
+    try {
+      loaded = await cache.load();
+    } catch (error) {
+      if (!this.#isProjectionCurrent(fallbackProjection)) return refetchMetadata();
+      throw error;
+    }
     if (generation !== this.#generation || cache !== this.#cache || loaded.bootstrap === null) {
       return false;
     }
+    if (!this.#isProjectionCurrent(fallbackProjection)) return refetchMetadata();
     const durableCursor = loaded.syncCursor;
     if (durableCursor === null) return false;
+    if (durableCursor.epoch !== snapshot.syncCursor.epoch) return refetchMetadata();
     if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
       throw new Error("The workspace metadata advanced beyond the repaired cursor");
     }
@@ -3476,23 +3781,29 @@ export class WorkspaceRuntime {
     const retractSourceMessageIds = this.#state.threadSummaries
       .filter((summary) => visibleConversationIds.has(summary.latestReply.conversationId))
       .map((summary) => summary.latestReply.id);
-    const signal = this.#projectionAbortController.signal;
-    const replaced = await cache.replaceSnapshot(
-      {
-        currentUser: snapshot.currentUser,
-        workspace: snapshot.workspace,
-        members,
-        conversations: catalog,
-        syncCursor: durableCursor,
-        featureFlags: snapshot.featureFlags,
-      },
-      messages,
-      reactions,
-      tasks,
-      signal,
-      retractSourceMessageIds,
-    );
-    if (generation !== this.#generation || cache !== this.#cache || signal.aborted) return false;
+    const signal = fallbackProjection.signal;
+    let replaced: boolean;
+    try {
+      replaced = await cache.replaceSnapshot(
+        {
+          currentUser: snapshot.currentUser,
+          workspace: snapshot.workspace,
+          members,
+          conversations: catalog,
+          syncCursor: durableCursor,
+          featureFlags: snapshot.featureFlags,
+        },
+        messages,
+        reactions,
+        tasks,
+        signal,
+        retractSourceMessageIds,
+      );
+    } catch (error) {
+      if (!this.#isProjectionCurrent(fallbackProjection)) return refetchMetadata();
+      throw error;
+    }
+    if (!this.#isProjectionCurrent(fallbackProjection)) return refetchMetadata();
     if (!replaced) {
       const reloaded = await this.#reloadCache(generation, cache);
       // Source-less retractions cannot reconcile counters from their event payload. A durable
@@ -3773,13 +4084,12 @@ export class WorkspaceRuntime {
     if (this.#protocolBlocked) return;
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
-    const loaded = await cache.load();
-    if (generation !== this.#generation) return;
-    this.#syncCursor = loaded.syncCursor;
+    const syncCursor = await cache.loadSyncCursor();
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    this.#syncCursor = syncCursor;
     this.#realtimeEpoch += 1;
-    if (loaded.syncCursor === null) throw new Error("Realtime requires a committed sync position");
-    const prepared =
-      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor));
+    if (syncCursor === null) throw new Error("Realtime requires a committed sync position");
+    const prepared = this.#realtimeScope ?? (await this.#prepareRealtime(generation, syncCursor));
     if (prepared === null || generation !== this.#generation) return;
     try {
       await this.#client.activateWorkspaceRealtime(prepared);
@@ -4667,13 +4977,54 @@ export class WorkspaceRuntime {
     return true;
   }
 
-  async #reloadCache(generation: number, cache: WorkspaceCache): Promise<boolean> {
+  #startupReloadConversationId(): string | null {
+    const selected = this.#state.selectedConversationId;
+    if (
+      !this.#startupReplicaCatchUpPending ||
+      this.#membershipRepairPending ||
+      this.#resyncRecoveryPending ||
+      selected === null ||
+      this.#cachedConversationIds.size !== 1 ||
+      !this.#cachedConversationIds.has(selected) ||
+      this.#state.messages.some((message) => message.conversationId !== selected) ||
+      this.#state.threadSummaries.some(
+        (summary) => summary.latestReply.conversationId !== selected,
+      ) ||
+      this.#state.attachments.length > 0 ||
+      this.#state.conversationFiles.length > 0
+    ) {
+      return null;
+    }
+    return selected;
+  }
+
+  async #reloadCache(
+    generation: number,
+    cache: WorkspaceCache,
+    conversationId?: string,
+  ): Promise<boolean> {
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
       return false;
-    const loaded = await cache.load();
+    // A normal cached startup has restored only its opening history. Catch-up updates all
+    // conversations durably, but unopened histories can still wait for their first visit.
+    const loaded =
+      conversationId === undefined
+        ? await cache.load()
+        : await cache.load({ conversationId, includeAllTasks: true });
     if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
       return false;
+    // A person can navigate while the asynchronous cache read is pending. Preserve the complete
+    // projection if another conversation or attachment state appeared during that read.
+    if (conversationId !== undefined && this.#startupReloadConversationId() !== conversationId) {
+      return this.#reloadCache(generation, cache);
+    }
+    this.#cachedConversationIds.clear();
+    for (const summary of loaded.bootstrap?.conversations ?? []) {
+      if (conversationId === undefined || summary.conversation.id === conversationId) {
+        this.#cachedConversationIds.add(summary.conversation.id);
+      }
+    }
     this.#hydrateRetractReservations(loaded.retractReservations, loaded.messages);
     let threadSummaries: readonly MessageThreadSummary[] = this.#state.threadSummaries.filter(
       (summary) =>

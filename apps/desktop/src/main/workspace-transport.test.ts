@@ -255,6 +255,119 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
   return createTransport(async () => response()).transport;
 }
 
+describe("WorkspaceTransport credential rotation", () => {
+  it.each(["sync", "send"] as const)(
+    "keeps %s retryable when its retry is rejected after another credential rotation",
+    async (operation) => {
+      const cookies = new MemoryCookies();
+      cookies.values.set("hype_comms_session", "initial-cookie");
+      let startFirst!: () => void;
+      let finishFirst!: () => void;
+      let startRetry!: () => void;
+      let finishRetry!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        startFirst = resolve;
+      });
+      const firstCanFinish = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      const retryStarted = new Promise<void>((resolve) => {
+        startRetry = resolve;
+      });
+      const retryCanFinish = new Promise<void>((resolve) => {
+        finishRetry = resolve;
+      });
+      const requests: {
+        readonly credential: string | undefined;
+        readonly url: string;
+        readonly key: string | null;
+        readonly body: RequestInit["body"];
+      }[] = [];
+      let rotations = 0;
+      const session = new ChatSession({
+        apiOrigin: API_ORIGIN,
+        authVariant: "production",
+        cookies,
+        request: async (url, init) => {
+          if (url.endsWith("/v2/auth/me")) return jsonResponse(CURRENT_USER);
+          if (url.endsWith("/v2/auth/session/refresh")) {
+            rotations += 1;
+            cookies.values.set("hype_comms_session", `rotated-cookie-${rotations}`);
+            return statusResponse(204);
+          }
+          requests.push({
+            credential: cookies.values.get("hype_comms_session"),
+            url,
+            key: new Headers(init.headers).get("idempotency-key"),
+            body: init.body,
+          });
+          if (requests.length === 1) {
+            startFirst();
+            await firstCanFinish;
+            return statusResponse(401);
+          }
+          if (requests.length === 2) {
+            startRetry();
+            await retryCanFinish;
+            return statusResponse(401);
+          }
+          return operation === "sync"
+            ? jsonResponse(SYNC_RESPONSE)
+            : jsonResponse({ message: THREAD_REPLY, syncCursor: testPosition("43") });
+        },
+      });
+      const transport = new WorkspaceTransport(API_ORIGIN, session);
+      const attempt = () =>
+        operation === "sync" ? transport.sync(testPosition("41")) : transport.send(SEND_OPERATION);
+
+      try {
+        await session.restore();
+        const firstAttempt = attempt();
+        await firstStarted;
+        await session.renewSession();
+        finishFirst();
+        await retryStarted;
+        await session.renewSession();
+        finishRetry();
+
+        expect(await firstAttempt).toEqual({
+          status: "retryable",
+          reason: "server",
+          retryAfterMs: null,
+        });
+        expect(requests).toHaveLength(2);
+        expect(cookies.removals).toEqual([]);
+        expect(cookies.values.get("hype_comms_session")).toBe("rotated-cookie-2");
+        expect(session.state).toMatchObject({ status: "signed-in" });
+
+        await expect(attempt()).resolves.toMatchObject({ status: "accepted" });
+        expect(requests.map((request) => request.credential)).toEqual([
+          "initial-cookie",
+          "rotated-cookie-1",
+          "rotated-cookie-2",
+        ]);
+        expect(new Set(requests.map((request) => request.url)).size).toBe(1);
+        if (operation === "send") {
+          expect(requests.map((request) => request.key)).toEqual([
+            SEND_OPERATION.idempotencyKey,
+            SEND_OPERATION.idempotencyKey,
+            SEND_OPERATION.idempotencyKey,
+          ]);
+          expect(requests.map((request) => request.body)).toEqual([
+            JSON.stringify(SEND_OPERATION.message),
+            JSON.stringify(SEND_OPERATION.message),
+            JSON.stringify(SEND_OPERATION.message),
+          ]);
+        }
+      } finally {
+        finishFirst();
+        finishRetry();
+        session.stop();
+      }
+    },
+  );
+});
+
 describe("WorkspaceTransport bootstrap compatibility", () => {
   it.each([426, 404])(
     "blocks protocol mismatch on HTTP %s without retrying a queued send",
@@ -898,27 +1011,60 @@ describe("WorkspaceTransport tasks", () => {
 });
 
 describe("WorkspaceTransport members", () => {
-  it("invalidates a rejected session before consuming an oversized 401 body", async () => {
-    const markSignedOut = vi.fn(async () => undefined);
-    const cancelled = vi.fn(() => {
-      expect(markSignedOut).toHaveBeenCalledOnce();
-    });
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
-      },
-      cancel: cancelled,
-    });
-    const transport = new WorkspaceTransport(API_ORIGIN, {
-      fetch: async () =>
-        serverResponse(body, { status: 401, headers: { "content-type": "application/json" } }),
-      markSignedOut,
-    });
-    await expect(transport.send(SEND_OPERATION)).resolves.toEqual({
-      status: "authentication_required",
-    });
-    expect(cancelled).toHaveBeenCalledOnce();
-  });
+  it.each(["members", "updateProfile"] as const)(
+    "discards a superseded 401 for %s and returns the neutral retry error",
+    async (operation) => {
+      const cancelled = vi.fn();
+      const response = serverResponse(new ReadableStream<Uint8Array>({ cancel: cancelled }), {
+        status: 401,
+        headers: { "content-type": "application/json", "retry-after": "30" },
+      });
+      const markSignedOut = vi.fn(async () => false);
+      const fetch = vi.fn(async () => response);
+      const transport = new WorkspaceTransport(API_ORIGIN, { fetch, markSignedOut });
+      const request = operation === "members" ? transport.members() : transport.updateProfile(null);
+      await expect(request).rejects.toMatchObject({
+        name: "WorkspaceRequestError",
+        message: "Workspace request was interrupted. Please retry.",
+        status: 503,
+        retryAfterMs: null,
+      });
+      expect(markSignedOut).toHaveBeenCalledExactlyOnceWith(response);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(cancelled).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([true, false])(
+    "keeps the first 401 sign-out verdict %s before body consumption",
+    async (signedOut) => {
+      const markSignedOut = vi.fn(async () => signedOut);
+      const cancelled = vi.fn(() => {
+        expect(markSignedOut).toHaveBeenCalledOnce();
+      });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+        },
+        cancel: cancelled,
+      });
+      const response = serverResponse(body, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+      const transport = new WorkspaceTransport(API_ORIGIN, {
+        fetch: async () => response,
+        markSignedOut,
+      });
+      await expect(transport.send(SEND_OPERATION)).resolves.toEqual(
+        signedOut
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null },
+      );
+      expect(markSignedOut).toHaveBeenCalledExactlyOnceWith(response);
+      expect(cancelled).toHaveBeenCalledOnce();
+    },
+  );
 
   it("reads the workspace member directory from the members route", async () => {
     const requests: string[] = [];

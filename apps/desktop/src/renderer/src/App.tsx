@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -7,6 +8,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ComponentProps,
 } from "react";
 
 import {
@@ -16,6 +18,7 @@ import {
   type AuthCapabilities,
   type ChannelAccess,
   type ChannelMode,
+  type ConversationSummary,
   type ChatSessionState,
   type TimestampFormatPreference,
   type Message,
@@ -37,6 +40,7 @@ import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
+import { ConversationContextMenu } from "./conversation-context-menu";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
@@ -531,8 +535,9 @@ export function MessageRow({
   useEffect(() => {
     if (!retractVisible) return;
     const remaining = retractWindowRemainingMs(message.createdAt, nowMs);
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining);
+    if (remaining < 0) return;
+    // The retract window includes its final millisecond; update after that boundary.
+    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining + 1);
     return () => window.clearTimeout(timer);
   }, [message.createdAt, nowMs, retractVisible]);
   const threadActionLabel =
@@ -671,6 +676,47 @@ export function MessageRow({
   );
 }
 
+const NO_REACTIONS: readonly Reaction[] = [];
+const NO_ATTACHMENTS: readonly Attachment[] = [];
+
+type TimelineMessageRowProps = Omit<
+  ComponentProps<typeof MessageRow>,
+  | "onAddReaction"
+  | "onRemoveReaction"
+  | "onOpenAttachment"
+  | "onCreateTask"
+  | "onRetract"
+  | "onOpenThread"
+> & {
+  readonly runtime: Pick<
+    WorkspaceRuntime,
+    "addReaction" | "removeReaction" | "openFile" | "retractMessage" | "openThread"
+  >;
+  readonly onCreateTask?: (message: Message) => Promise<void>;
+  readonly threadAvailable: boolean;
+};
+
+// Bind row actions inside the memo boundary so composer and scroll state changes do not
+// rerender unchanged message bodies and controls. All data and capability props stay compared.
+export const TimelineMessageRow = memo(function TimelineMessageRow({
+  runtime,
+  onCreateTask,
+  threadAvailable,
+  ...props
+}: TimelineMessageRowProps) {
+  return (
+    <MessageRow
+      {...props}
+      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
+      onAddReaction={(emoji) => runtime.addReaction(props.message.id, emoji)}
+      onRemoveReaction={(emoji) => runtime.removeReaction(props.message.id, emoji)}
+      onCreateTask={onCreateTask === undefined ? undefined : () => onCreateTask(props.message)}
+      onRetract={() => runtime.retractMessage(props.message.id)}
+      onOpenThread={threadAvailable ? () => void runtime.openThread(props.message.id) : undefined}
+    />
+  );
+});
+
 export function PendingMessageRow({
   item,
   currentUser,
@@ -803,6 +849,52 @@ export function App({
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    conversationId: string;
+    position: { x: number; y: number };
+  } | null>(null);
+  const contextMenuTrigger = useRef<HTMLButtonElement | null>(null);
+
+  const openConversationContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>, conversationId: string): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      contextMenuTrigger.current = event.currentTarget;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position =
+        event.clientX === 0 && event.clientY === 0
+          ? {
+              x: rect.left + 16,
+              y: rect.bottom,
+            }
+          : { x: event.clientX, y: event.clientY };
+      setContextMenu({
+        conversationId,
+        position,
+      });
+    },
+    [],
+  );
+
+  const closeConversationContextMenu = useCallback((): void => {
+    setContextMenu(null);
+  }, []);
+
+  const activeContextMenuSummary = useMemo((): ConversationSummary | null => {
+    if (contextMenu === null) return null;
+    return (
+      runtimeState.bootstrap?.conversations.find(
+        (summary) => summary.conversation.id === contextMenu.conversationId,
+      ) ?? null
+    );
+  }, [contextMenu, runtimeState.bootstrap]);
+
+  const markConversationAsRead = useCallback(
+    (conversationId: string): void => {
+      runtime.markConversationAsRead(conversationId);
+    },
+    [runtime],
+  );
   const previousSelectedConversationId = useRef<string | null>(runtimeState.selectedConversationId);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
@@ -1088,6 +1180,17 @@ export function App({
   }, [applySession, client, notificationSession, runtime]);
 
   const bootstrap = runtimeState.bootstrap;
+  const channelReferences = useMemo<ChannelReferenceTarget[]>(
+    () =>
+      (bootstrap?.conversations ?? []).flatMap((summary) =>
+        summary.conversation.kind !== "channel" ||
+        isBuiltInConversation(summary.conversation) ||
+        summary.conversation.slug === null
+          ? []
+          : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
+      ),
+    [bootstrap?.conversations],
+  );
   const currentUserRole = bootstrap?.currentUser.role;
   useEffect(() => {
     if (
@@ -1107,6 +1210,13 @@ export function App({
   const selectedSummary = bootstrap?.conversations.find(
     (summary) => summary.conversation.id === runtimeState.selectedConversationId,
   );
+  const selectedHistoryLoading =
+    runtimeState.selectedConversationId !== null &&
+    runtimeState.historyLoading.includes(runtimeState.selectedConversationId);
+  const selectedHistoryError =
+    runtimeState.selectedConversationId === null
+      ? undefined
+      : runtimeState.historyErrors[runtimeState.selectedConversationId];
   const selectedConversationMembers = useMemo(() => {
     if (bootstrap === null || selectedSummary === undefined) return [];
     const participantIds = new Set(selectedSummary.participantIds);
@@ -1124,14 +1234,23 @@ export function App({
     selectedIsPersonal === true;
   const canPublishBulletins =
     selectedIsAnnouncement && !selectedIsBuiltIn && bootstrap?.currentUser.role === "owner";
-  const conversationMessages = runtimeState.messages.filter(
-    (message) =>
-      message.deletedAt === null && message.conversationId === runtimeState.selectedConversationId,
+  const conversationMessages = useMemo(
+    () =>
+      runtimeState.messages.filter(
+        (message) =>
+          message.deletedAt === null &&
+          message.conversationId === runtimeState.selectedConversationId,
+      ),
+    [runtimeState.messages, runtimeState.selectedConversationId],
   );
-  const messages = visibleTimelineMessages(
-    runtimeState.messages,
-    runtimeState.selectedConversationId,
-    runtimeState.threadsSupported,
+  const messages = useMemo(
+    () =>
+      visibleTimelineMessages(
+        runtimeState.messages,
+        runtimeState.selectedConversationId,
+        runtimeState.threadsSupported,
+      ),
+    [runtimeState.messages, runtimeState.selectedConversationId, runtimeState.threadsSupported],
   );
   const unreadDividerMessageId = useUnreadDividerMessageId(
     runtimeState.selectedConversationId,
@@ -1913,22 +2032,25 @@ export function App({
     }
   };
 
-  const createTaskFromMessage = async (message: Message): Promise<void> => {
-    const firstLine = message.body.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
-    const title = (firstLine === "" ? "Follow up on this message" : firstLine).slice(0, 240);
-    try {
-      await runtime.createTask({
-        conversationId: message.conversationId,
-        title,
-        sourceMessageId: message.id,
-        assigneeId: selectedIsPersonal ? (bootstrap?.currentUser.user.id ?? null) : null,
-      });
-      setPaneView("tasks");
-      setComposerError("");
-    } catch (error) {
-      setComposerError(ipcErrorMessage(error, "Could not create a task from this message"));
-    }
-  };
+  const createTaskFromMessage = useCallback(
+    async (message: Message): Promise<void> => {
+      const firstLine = message.body.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
+      const title = (firstLine === "" ? "Follow up on this message" : firstLine).slice(0, 240);
+      try {
+        await runtime.createTask({
+          conversationId: message.conversationId,
+          title,
+          sourceMessageId: message.id,
+          assigneeId: selectedIsPersonal ? (bootstrap?.currentUser.user.id ?? null) : null,
+        });
+        setPaneView("tasks");
+        setComposerError("");
+      } catch (error) {
+        setComposerError(ipcErrorMessage(error, "Could not create a task from this message"));
+      }
+    },
+    [runtime, selectedIsPersonal, bootstrap?.currentUser.user.id],
+  );
 
   const openTaskSource = (task: Task): void => {
     runPreferencesNavigation(() => {
@@ -2156,11 +2278,6 @@ export function App({
       summary.conversation.kind === "direct_message" ||
       summary.conversation.kind === "group_direct_message",
   );
-  const channelReferences: ChannelReferenceTarget[] = channels.flatMap((summary) =>
-    summary.conversation.slug === null
-      ? []
-      : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
-  );
   const currentUserId = bootstrap.currentUser.user.id;
   const selectedTypingText = typingIndicatorText(
     runtimeState.selectedConversationId === null
@@ -2360,6 +2477,9 @@ export function App({
                   type="button"
                   key={summary.conversation.id}
                   onClick={() => selectConversation(summary.conversation.id)}
+                  onContextMenu={(event) =>
+                    openConversationContextMenu(event, summary.conversation.id)
+                  }
                 >
                   <span
                     className="conversation-label conversation-label-channel"
@@ -2404,6 +2524,7 @@ export function App({
               type="button"
               key={summary.conversation.id}
               onClick={() => selectConversation(summary.conversation.id)}
+              onContextMenu={(event) => openConversationContextMenu(event, summary.conversation.id)}
             >
               <span
                 className="conversation-label conversation-label-channel"
@@ -2442,6 +2563,9 @@ export function App({
                 type="button"
                 key={summary.conversation.id}
                 onClick={() => selectConversation(summary.conversation.id)}
+                onContextMenu={(event) =>
+                  openConversationContextMenu(event, summary.conversation.id)
+                }
               >
                 <span
                   className="conversation-label conversation-label-direct-message"
@@ -2716,15 +2840,27 @@ export function App({
                   <button
                     className="load-older"
                     type="button"
+                    disabled={selectedHistoryLoading}
                     onClick={() => {
                       const conversationId = runtimeState.selectedConversationId;
                       if (conversationId !== null) void runtime.loadOlder(conversationId);
                     }}
                   >
-                    Load older messages
+                    {selectedHistoryLoading
+                      ? "Loading messages…"
+                      : selectedHistoryError !== undefined
+                        ? "Retry loading messages"
+                        : messages.length === 0
+                          ? "Load messages"
+                          : "Load older messages"}
                   </button>
                 )}
-              {messages.length === 0 && pending.length === 0 ? (
+              {selectedHistoryError !== undefined && <p role="alert">{selectedHistoryError}</p>}
+              {messages.length === 0 && pending.length === 0 && selectedHistoryLoading ? (
+                <p role="status">Loading conversation history…</p>
+              ) : messages.length === 0 &&
+                pending.length === 0 &&
+                selectedHistoryError === undefined ? (
                 <ConversationEmptyState
                   conversationName={
                     selectedSummary === undefined ? null : runtime.conversationName(selectedSummary)
@@ -2745,20 +2881,15 @@ export function App({
                       runtimeState.selectedConversationId !== null && (
                         <UnreadDivider conversationId={runtimeState.selectedConversationId} />
                       )}
-                    <MessageRow
+                    <TimelineMessageRow
                       message={message}
+                      runtime={runtime}
                       members={bootstrap.members}
-                      reactions={reactionsByMessage.get(message.id) ?? []}
-                      attachments={attachmentsByMessage.get(message.id) ?? []}
+                      reactions={reactionsByMessage.get(message.id) ?? NO_REACTIONS}
+                      attachments={attachmentsByMessage.get(message.id) ?? NO_ATTACHMENTS}
                       currentUserId={currentUserId}
-                      onOpenAttachment={(attachmentId) => runtime.openFile(attachmentId)}
                       reactionsDisabled={selectedSummary?.conversation.isArchived ?? true}
-                      onAddReaction={(emoji) => runtime.addReaction(message.id, emoji)}
-                      onRemoveReaction={(emoji) => runtime.removeReaction(message.id, emoji)}
-                      onCreateTask={
-                        tasksAvailable ? () => createTaskFromMessage(message) : undefined
-                      }
-                      onRetract={() => runtime.retractMessage(message.id)}
+                      onCreateTask={tasksAvailable ? createTaskFromMessage : undefined}
                       highlighted={message.id === runtimeState.focusedMessageId}
                       continuation={
                         preferences.groupConsecutiveMessages &&
@@ -2771,15 +2902,13 @@ export function App({
                         threadSummaryByRoot.get(message.id)?.replyCount ?? 0,
                         loadedReplyCountByRoot.get(message.id) ?? 0,
                       )}
-                      onOpenThread={
+                      threadAvailable={
                         runtimeState.threadsSupported &&
                         message.threadRootId === null &&
                         (!(selectedSummary?.conversation.isArchived ?? true) ||
                           threadSummaryByRoot.has(message.id) ||
                           loadedReplyCountByRoot.has(message.id) ||
                           pendingThreadRootIds.has(message.id))
-                          ? () => void runtime.openThread(message.id)
-                          : undefined
                       }
                     />
                   </Fragment>
@@ -3123,6 +3252,16 @@ export function App({
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}
+        />
+      )}
+      {contextMenu !== null && activeContextMenuSummary !== null && (
+        <ConversationContextMenu
+          conversation={activeContextMenuSummary}
+          position={contextMenu.position}
+          triggerRef={contextMenuTrigger}
+          onClose={closeConversationContextMenu}
+          onMarkAsRead={markConversationAsRead}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
       )}
     </main>
