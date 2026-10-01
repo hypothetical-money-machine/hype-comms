@@ -1936,7 +1936,7 @@ describe("PersistentWorkspaceCache durability", () => {
     const state = await cache.load();
     expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
     expect(state.messages).toEqual([]);
-    expect(state.outbox).toEqual([]);
+    expectRetainedUnsent(state.outbox, queuedAlphaMessage);
     expect(
       state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
     ).toBe(false);
@@ -2127,7 +2127,16 @@ describe("PersistentWorkspaceCache durability", () => {
     const purged = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
     await purged.open();
     expect(await purged.table("messages").count()).toBe(0);
-    expect(await purged.table("outbox").count()).toBe(0);
+    expect(await purged.table("outbox").toArray()).toMatchObject([
+      {
+        clientMessageId: queuedAlphaMessage.message.clientMessageId,
+        conversationId: queuedAlphaMessage.conversationId,
+        status: "permanent_failure",
+        attemptCount: 0,
+        nextAttemptAt: null,
+        failureReason: expect.stringContaining("retained on this device"),
+      },
+    ]);
     expect((await purged.table("metadata").get("state")).repairMarker).not.toBeNull();
     purged.close();
     const state = await reopened.load();
@@ -2497,7 +2506,7 @@ describe("workspace cache implementation parity", () => {
       await cache.stageMembershipRepair(selfRemovedEvent);
       const removed = await cache.load({ conversationId: ALPHA_ID });
       expect(removed.messages).toEqual([]);
-      expect(removed.outbox).toEqual([]);
+      expectRetainedUnsent(removed.outbox, queuedAlphaMessage);
       expect(removed.repairMarker?.eventId).toBe(selfRemovedEvent.id);
       expect((await cache.load({ conversationId: null, includeAllTasks: true })).tasks).toEqual([]);
     }
