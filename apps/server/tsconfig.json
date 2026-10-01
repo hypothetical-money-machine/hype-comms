@@ -1,19 +1,15 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
     "lib": ["ES2024"],
     "rootDir": "src",
     "outDir": "dist",
-    "sourceMap": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "composite": true,
     "types": ["node"]
   },
+  "references": [{ "path": "../../packages/contracts" }],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

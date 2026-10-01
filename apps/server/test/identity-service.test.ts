@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 
+import type { Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+
 import {
   apiErrorEnvelopeSchema,
   currentUserSchema,
@@ -8,12 +11,9 @@ import {
   magicLinkTokenSchema,
   type Email,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -22,15 +22,7 @@ import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 import { SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const initialNow = Date.parse("2026-07-24T12:00:00.000Z");
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 class FakeEmailSender implements EmailSender {
   readonly sent: SendMagicLinkInput[] = [];
@@ -47,9 +39,9 @@ class FakeEmailSender implements EmailSender {
 }
 
 describeWithPostgres("IdentityService and identity routes", () => {
-  const schemaName = `identity_service_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
+  let schemaName: string;
   let repository: IdentityRepository;
   let sender: FakeEmailSender;
   let nowMs: number;
@@ -57,19 +49,22 @@ describeWithPostgres("IdentityService and identity routes", () => {
   let reuseDetections: number;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "identity_service", poolSize: 8 });
+    pool = schema.pool;
+    schemaName = schema.schemaName;
   });
 
   beforeEach(async () => {
-    await pool.query(`
-      TRUNCATE device_sessions, magic_link_tokens, invitations, workspace_memberships,
-               workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     repository = new IdentityRepository(pool);
     sender = new FakeEmailSender();
     nowMs = initialNow;
@@ -90,10 +85,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
   });
 
   async function seedOwner(email = "owner@example.com") {

@@ -28,6 +28,7 @@ import {
   type CreateAiAgentHost,
 } from "./ai-agent-host";
 import type { AiChannelPreference, AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import { reportMainProcessError } from "./main-process-log";
 
 const MAX_ENTRIES = 200;
 const MAX_PLAN_ENTRIES = 100;
@@ -393,7 +394,7 @@ export class AiChannelController {
       options.reportListenerError ??
       (() => {
         // Listener failures can carry a rejected state payload. Never write that payload to logs.
-        console.error("AI Channel state listener failed");
+        reportMainProcessError("AI Channel state listener failed");
       });
   }
 

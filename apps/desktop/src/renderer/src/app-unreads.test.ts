@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DesktopApi } from "../../shared/desktop-api";
 import { App } from "./App";
 import type { CompactModeRuntime } from "./compact-mode-runtime";
+import { createTestDevicePreferencesRuntime } from "./device-preferences-test-fixture";
 import { FencedBlockquoteRuntime } from "./fenced-blockquote-runtime";
 import type { SidebarPositionRuntime } from "./sidebar-position-runtime";
 import type { ThemeRuntime } from "./theme-runtime";
@@ -270,6 +271,10 @@ const activeContext: Extract<NotificationContext, { status: "active" }> = {
 
 interface ClientHarness {
   readonly client: DesktopApi;
+  readonly readCursorRequests: readonly {
+    readonly conversationId: string;
+    readonly lastReadMessageId: string;
+  }[];
   readonly emitWorkspaceEvent: (event: ProductRealtimeEvent) => void;
   readonly signOut: () => Promise<{ readonly status: "signed-out" }>;
 }
@@ -280,6 +285,7 @@ function createClient(
   let realtimeStarts = 0;
   let realtimeScope: RealtimeSessionScope | null = null;
   const eventListeners = new Set<(frame: ScopedProductRealtimeEvent) => void>();
+  const readCursorRequests: { conversationId: string; lastReadMessageId: string }[] = [];
   const signOut = vi
     .fn<() => Promise<{ readonly status: "signed-out" }>>()
     .mockResolvedValue({ status: "signed-out" });
@@ -326,7 +332,25 @@ function createClient(
     searchMessages: async () => ({ results: [], nextCursor: null }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    advanceReadCursor: async () => undefined,
+    advanceReadCursor: async (conversationId: string, lastReadMessageId: string) => {
+      readCursorRequests.push({ conversationId, lastReadMessageId });
+      const conv = bootstrapResponse.conversations.find(
+        (c) => c.conversation.id === conversationId,
+      );
+      const sequence =
+        conv?.lastMessage?.id === lastReadMessageId ? conv.lastMessage.conversationSequence : "1";
+      return {
+        readCursor: {
+          conversationId,
+          userId: USER_ID,
+          lastReadMessageId,
+          lastReadConversationSequence: sequence,
+          lastReadAt: NOW,
+          updatedAt: NOW,
+        },
+        syncCursor: "1",
+      };
+    },
     syncWorkspace: async (after: string) =>
       ({
         status: "accepted",
@@ -373,6 +397,7 @@ function createClient(
   } as unknown as DesktopApi;
   return {
     client,
+    readCursorRequests,
     signOut,
     emitWorkspaceEvent: (event: ProductRealtimeEvent): void => {
       if (realtimeScope === null) return;
@@ -419,6 +444,7 @@ async function renderWorkspace(
       client: client.client,
       theme: createTheme(),
       compactMode: createCompactMode(),
+      devicePreferences: createTestDevicePreferencesRuntime(),
       fencedBlockquotes: new FencedBlockquoteRuntime(null),
       sidebarPosition: createSidebarPosition(),
     }),
@@ -438,6 +464,56 @@ describe("in-app Unreads destination", () => {
     fireEvent.click(group);
 
     expect(screen.getByRole("heading", { name: "Dan, Athena" })).toBeTruthy();
+  });
+
+  it("right-clicks a channel in the sidebar and marks it as read", async () => {
+    const { readCursorRequests } = await renderWorkspace();
+
+    const launchButton = screen.getByRole("button", {
+      name: /Launch Planning.*1 mention/u,
+    });
+    fireEvent.contextMenu(launchButton, { clientX: 50, clientY: 100 });
+
+    const markAsReadItem = await screen.findByRole("menuitem", { name: "Mark as read" });
+    expect(markAsReadItem).toBeTruthy();
+    expect(markAsReadItem.getAttribute("aria-disabled")).toBe("false");
+
+    fireEvent.click(markAsReadItem);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("menuitem", { name: "Mark as read" })).toBeNull();
+      const button = screen.getByRole("button", { name: "Launch Planning" });
+      expect(button.querySelector(".conversation-badge")).toBeNull();
+    });
+
+    expect(readCursorRequests).toEqual([
+      { conversationId: LAUNCH_ID, lastReadMessageId: launchMessage.id },
+    ]);
+  });
+
+  it("right-clicks a direct message in the sidebar and marks it as read", async () => {
+    const { readCursorRequests } = await renderWorkspace();
+
+    const danButton = screen.getByRole("button", {
+      name: /Dan.*2 unread messages/u,
+    });
+    fireEvent.contextMenu(danButton, { clientX: 50, clientY: 100 });
+
+    const markAsReadItem = await screen.findByRole("menuitem", { name: "Mark as read" });
+    expect(markAsReadItem).toBeTruthy();
+    expect(markAsReadItem.getAttribute("aria-disabled")).toBe("false");
+
+    fireEvent.click(markAsReadItem);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("menuitem", { name: "Mark as read" })).toBeNull();
+      const button = screen.getByRole("button", { name: /^Presence: offline Dan$/ });
+      expect(button.querySelector(".conversation-badge")).toBeNull();
+    });
+
+    expect(readCursorRequests).toEqual([
+      { conversationId: DAN_DM_ID, lastReadMessageId: danMessage.id },
+    ]);
   });
 
   it("opens the Unreads list from the sidebar and jumps to a conversation", async () => {
