@@ -109,6 +109,18 @@ function unavailableState(
   };
 }
 
+function sameAuthenticatedSession(
+  left: AuthenticatedSessionContext | null,
+  right: AuthenticatedSessionContext | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.userId === right.userId &&
+    left.workspaceId === right.workspaceId
+  );
+}
+
 export interface SessionCookieStore {
   readonly get: (filter: {
     readonly url: string;
@@ -194,6 +206,12 @@ export class ChatSession {
   #cacheAuthorizationActive = false;
   #renewalTimer: ReturnType<typeof setTimeout> | null = null;
   #renewalFailures = 0;
+  #credentialGeneration = 0;
+  #sessionEpoch: object = {};
+  readonly #responseCredentials = new WeakMap<
+    Response,
+    { readonly sessionEpoch: object; readonly credentialGeneration: number }
+  >();
   #logoutUrl: AuthKitLogoutUrl | null = null;
 
   constructor(options: {
@@ -279,6 +297,7 @@ export class ChatSession {
         this.#revokeCacheAuthorization();
         await this.#clearCookie(IDENTITY_COOKIE_NAME);
         await this.#clearAuthenticatedContext();
+        this.#advanceSessionEpoch();
         this.#setState({ status: "signed-out" });
         return this.#state;
       }
@@ -458,6 +477,8 @@ export class ChatSession {
       throw new ChatSessionError(AUTHKIT_FAILED_MESSAGE);
     }
     const context = this.#contextFor(identity);
+    this.#advanceSessionEpoch();
+    this.#advanceCredentialGeneration();
     await this.#rememberAuthenticatedContext(context);
     this.#applySignedIn(context);
     await this.#scheduleRenewal();
@@ -524,6 +545,8 @@ export class ChatSession {
     }
 
     const context = this.#contextFor(identity);
+    this.#advanceSessionEpoch();
+    this.#advanceCredentialGeneration();
     await this.#rememberAuthenticatedContext(context);
     this.#applySignedIn(context);
     await this.#scheduleRenewal();
@@ -539,6 +562,7 @@ export class ChatSession {
     this.#revokeCacheAuthorization();
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     await this.#clearAuthenticatedContext();
+    this.#advanceSessionEpoch();
     this.#setState({ status: "signed-out", message: INVALID_MAGIC_LINK_MESSAGE });
     throw new ChatSessionError(INVALID_MAGIC_LINK_MESSAGE);
   }
@@ -569,6 +593,7 @@ export class ChatSession {
     await this.#clearCookie(IDENTITY_COOKIE_NAME);
     await this.#clearAuthenticatedContext();
     this.#logoutUrl = logoutUrl;
+    this.#advanceSessionEpoch();
     this.#setState({ status: "signed-out" });
     return this.#state;
   }
@@ -608,17 +633,46 @@ export class ChatSession {
     // request instead (`markSignedOut`) or by the next restore.
     this.#renewalFailures += 1;
     const backoff = RENEWAL_RETRY_DELAY_MS * 2 ** (this.#renewalFailures - 1);
-    this.#armRenewal(Math.min(backoff, RENEWAL_MAX_RETRY_DELAY_MS));
+    this.#armRenewal(Math.min(backoff, RENEWAL_MAX_RETRY_DELAY_MS), "renew");
+  }
+
+  /** A bounded timer wake-up checks the cookie again instead of rotating it weeks too early. */
+  async #maintainRenewal(): Promise<void> {
+    if (this.#state.status === "signed-out") {
+      this.#stopRenewal();
+      return;
+    }
+
+    const expiresAt = await this.#readIdentityExpiry();
+    if (expiresAt !== null && expiresAt - RENEWAL_MARGIN_MS > Date.now()) {
+      this.#armRenewal(expiresAt - RENEWAL_MARGIN_MS - Date.now());
+      return;
+    }
+    await this.#renewSession();
   }
 
   /** Performs one credential rotation. Returns false when it could not be completed. */
   async #rotateSession(): Promise<boolean> {
     try {
       const response = await this.#fetch(this.#sessionRefreshUrl, { method: "POST" });
-      return response.ok;
+      if (!response.ok) return false;
+      this.#advanceCredentialGeneration();
+      return true;
     } catch {
       return false;
     }
+  }
+
+  #advanceCredentialGeneration(): void {
+    if (this.#credentialGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new ChatSessionError("Session credential generation is exhausted");
+    }
+    this.#credentialGeneration += 1;
+  }
+
+  /** Replaces the identity token so requests cannot cross a sign-in or sign-out boundary. */
+  #advanceSessionEpoch(): void {
+    this.#sessionEpoch = {};
   }
 
   async #scheduleRenewal(): Promise<void> {
@@ -628,12 +682,14 @@ export class ChatSession {
     );
   }
 
-  #armRenewal(delayMs: number): void {
+  #armRenewal(delayMs: number, operation: "check" | "renew" = "check"): void {
     this.#stopRenewal();
     const delay = Math.min(Math.max(delayMs, RENEWAL_MIN_DELAY_MS), RENEWAL_MAX_DELAY_MS);
     const timer = setTimeout(() => {
       this.#renewalTimer = null;
-      void this.renewSession();
+      void this.#runMutation(() =>
+        operation === "renew" ? this.#renewSession() : this.#maintainRenewal(),
+      );
     }, delay);
     // A pending renewal must never hold the Electron main process open at quit.
     timer.unref?.();
@@ -774,6 +830,9 @@ export class ChatSession {
     if (this.#state.status === "session-unavailable") {
       throw new ChatSessionError("Workspace requests require a validated session");
     }
+    const requestContext = this.#authenticatedContextFromState();
+    const requestCredentialGeneration = this.#credentialGeneration;
+    const requestSessionEpoch = this.#sessionEpoch;
     const headers = new Headers(init.headers);
     const capabilities = new Set(
       (headers.get("x-hype-comms-capabilities") ?? "")
@@ -784,7 +843,63 @@ export class ChatSession {
     capabilities.add(GROUP_DIRECT_MESSAGES_CAPABILITY);
     capabilities.add(AGENT_EFFECTIVE_SCOPES_CAPABILITY);
     headers.set("x-hype-comms-capabilities", [...capabilities].join(","));
-    return this.#fetch(url, { ...init, headers });
+    const request = { ...init, headers };
+    const response = await this.#fetch(url, request);
+    if (response.status !== 401) {
+      this.#responseCredentials.set(response, {
+        sessionEpoch: requestSessionEpoch,
+        credentialGeneration: requestCredentialGeneration,
+      });
+      return response;
+    }
+
+    // Renewal changes the cookie while already-authorized requests may still be in flight with the
+    // predecessor. Wait for the serialized session change, then retry once if this session stayed
+    // active and a validated replacement credential was installed. Without this check, the stale
+    // 401 reaches `markSignedOut` and deletes the valid successor credential.
+    await this.#runMutation(async () => undefined);
+    try {
+      this.#assertRequestSession(requestContext, requestSessionEpoch);
+    } catch (error) {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+    if (this.#credentialGeneration === requestCredentialGeneration) {
+      this.#responseCredentials.set(response, {
+        sessionEpoch: requestSessionEpoch,
+        credentialGeneration: requestCredentialGeneration,
+      });
+      return response;
+    }
+
+    await response.body?.cancel().catch(() => undefined);
+    this.#assertRequestSession(requestContext, requestSessionEpoch);
+    const retryCredentialGeneration = this.#credentialGeneration;
+    const retryResponse = await this.#fetch(url, request);
+    await this.#runMutation(async () => undefined);
+    try {
+      this.#assertRequestSession(requestContext, requestSessionEpoch);
+    } catch (error) {
+      await retryResponse.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+    this.#responseCredentials.set(retryResponse, {
+      sessionEpoch: requestSessionEpoch,
+      credentialGeneration: retryCredentialGeneration,
+    });
+    return retryResponse;
+  }
+
+  #assertRequestSession(
+    requestContext: AuthenticatedSessionContext | null,
+    requestSessionEpoch: object,
+  ): void {
+    if (
+      this.#sessionEpoch !== requestSessionEpoch ||
+      !sameAuthenticatedSession(requestContext, this.#authenticatedContextFromState())
+    ) {
+      throw new ChatSessionError("Workspace request session changed");
+    }
   }
 
   async #fetch(url: string, init: RequestInit): Promise<Response> {
@@ -800,18 +915,31 @@ export class ChatSession {
     });
   }
 
-  /** Marks the session as ended after the server rejects an authenticated request. */
-  markSignedOut(isCurrent: () => boolean = () => true): Promise<void> {
+  /**
+   * Ends only the session whose credential the server rejected, checking after queued changes.
+   * Returns false when the response or initiating scope was superseded.
+   */
+  markSignedOut(response: Response, isCurrent: () => boolean = () => true): Promise<boolean> {
+    const credential = this.#responseCredentials.get(response);
     return this.#runMutation(async () => {
-      // A 401 can wait behind a successful replacement login in the mutation queue.
-      if (!isCurrent()) return;
+      if (
+        !isCurrent() ||
+        response.status !== 401 ||
+        credential === undefined ||
+        credential.sessionEpoch !== this.#sessionEpoch ||
+        credential.credentialGeneration !== this.#credentialGeneration
+      ) {
+        return false;
+      }
       this.#stopRenewal();
       this.#revokeCacheAuthorization();
       await this.#clearCookie(IDENTITY_COOKIE_NAME);
       await this.#clearAuthenticatedContext();
+      this.#advanceSessionEpoch();
       if (this.#state.status !== "signed-out") {
         this.#setState({ status: "signed-out" });
       }
+      return true;
     });
   }
 }
