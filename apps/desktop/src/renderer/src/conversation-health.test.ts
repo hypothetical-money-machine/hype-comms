@@ -50,6 +50,23 @@ describe("ConversationHealth", () => {
     expect(screen.queryByRole("button", { name: "Reset local cache" })).toBeNull();
   });
 
+  it.each([false, true])(
+    "keeps a collection retry local unless workspace recovery is pending (%s)",
+    (stale) => {
+      const onRetryCollection = vi.fn();
+      const { props } = renderHealth({
+        stale,
+        collectionRecovery: { status: "blocked", reason: "Task service unavailable" },
+        onRetryCollection,
+      });
+      expect(screen.getByText(/Task service unavailable/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(props.onRetry).toHaveBeenCalledTimes(stale ? 1 : 0);
+      expect(onRetryCollection).toHaveBeenCalledTimes(stale ? 0 : 1);
+      expect(screen.queryByRole("button", { name: "Reset local cache" })).toBeNull();
+    },
+  );
+
   it("announces an actionable runtime notice as an error", () => {
     const { props } = renderHealth({ notice: "The workspace could not sync." });
 

@@ -34,7 +34,15 @@ import {
 import { AUTHKIT_SIGN_IN_UNAVAILABLE_MESSAGE, type DesktopApi } from "../../shared/desktop-api";
 import { AiChannel } from "./ai-channel";
 import { AgentEnrollmentsView } from "./agent-enrollments-view";
-import { PresenceIndicator, typingIndicatorText } from "./activity-indicators";
+import {
+  useWorkspaceSelection,
+  selectWorkspaceView,
+  equalWorkspaceView,
+} from "./workspace-selection";
+import { collectionRecovery } from "./workspace-recovery";
+import type { CollectionIdentity } from "./workspace-collections";
+import { WorkspaceTypingIndicator } from "./workspace-typing-indicator";
+import { PresenceIndicator } from "./activity-indicators";
 import { Avatar } from "./avatar";
 import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
@@ -101,11 +109,7 @@ import { useDevicePreferences } from "./use-device-preferences";
 import { ipcErrorMessage } from "./ipc-error-message";
 import { WorkspaceSearch } from "./workspace-search";
 import type { OutboxItem } from "./workspace-cache";
-import {
-  cacheFallbackNotice,
-  WorkspaceRuntime,
-  type WorkspaceRuntimeState,
-} from "./workspace-runtime";
+import { cacheFallbackNotice, WorkspaceRuntime } from "./workspace-runtime";
 
 type SignedInSession = Extract<ChatSessionState, { status: "signed-in"; method: "email" }>;
 type WorkspaceDestination =
@@ -841,7 +845,7 @@ export function App({
   const runtime = useMemo(() => new WorkspaceRuntime(client), [client]);
   const preferences = useDevicePreferences(devicePreferences);
   const isHeadless = client.isHeadless === true;
-  const [runtimeState, setRuntimeState] = useState<WorkspaceRuntimeState>(runtime.state);
+  const runtimeState = useWorkspaceSelection(runtime, selectWorkspaceView, equalWorkspaceView);
   const [session, setSession] = useState<ChatSessionState | null>(null);
   const { draft, setDraft, clearDraft, resetDrafts } = useConversationDrafts(
     runtimeState.selectedConversationId,
@@ -1067,8 +1071,6 @@ export function App({
       runtime.closeThread();
     });
   }, [runPreferencesNavigation, runtime]);
-
-  useEffect(() => runtime.subscribe(setRuntimeState), [runtime]);
 
   useEffect(() => {
     notificationSession?.start();
@@ -2365,12 +2367,39 @@ export function App({
       summary.conversation.kind === "group_direct_message",
   );
   const currentUserId = bootstrap.currentUser.user.id;
-  const selectedTypingText = typingIndicatorText(
+  const selectedCollection: CollectionIdentity | null =
     runtimeState.selectedConversationId === null
-      ? []
-      : (runtimeState.typingByConversation[runtimeState.selectedConversationId] ?? []),
-    bootstrap.members,
-    currentUserId,
+      ? null
+      : paneView === "tasks" && selectedIsPersonal
+        ? { kind: "my_tasks" }
+        : {
+            kind: paneView === "chat" ? "timeline" : paneView,
+            conversationId: runtimeState.selectedConversationId,
+          };
+  const selectedRecovery =
+    selectedCollection === null
+      ? undefined
+      : collectionRecovery(runtimeState.recovery, selectedCollection);
+  const retrySelectedCollection = (): void => {
+    const id = runtimeState.selectedConversationId;
+    if (id === null) return;
+    const loading =
+      paneView === "files"
+        ? runtime.loadConversationFiles(id)
+        : paneView === "tasks"
+          ? selectedIsPersonal
+            ? runtime.loadMyTasks()
+            : runtime.loadConversationTasks(id)
+          : runtime.loadOlder(id);
+    void loading.catch(() => undefined);
+  };
+  const typingIndicator = (
+    <WorkspaceTypingIndicator
+      runtime={runtime}
+      conversationId={runtimeState.selectedConversationId}
+      members={bootstrap.members}
+      currentUserId={currentUserId}
+    />
   );
   const unreadItems = listUnreadConversations(bootstrap.conversations, (summary) =>
     runtime.conversationName(summary),
@@ -2759,6 +2788,8 @@ export function App({
             <ConversationHealth
               connection={runtimeState.connection}
               stale={runtimeState.stale}
+              {...(selectedRecovery === undefined ? {} : { collectionRecovery: selectedRecovery })}
+              onRetryCollection={retrySelectedCollection}
               cacheMode={runtimeState.cacheMode}
               notice={workspaceNotice}
               onRetry={() =>
@@ -2861,7 +2892,7 @@ export function App({
                 platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                typingText={selectedTypingText}
+                typingIndicator={typingIndicator}
                 sendMessageShortcut={preferences.sendMessageShortcut}
                 spellCheck={preferences.spellCheck}
                 onDraftChange={updateMainDraft}
@@ -3085,7 +3116,7 @@ export function App({
                 platform={client.platform}
                 placeholder={selectedIsAnnouncement ? "Write a bulletin…" : undefined}
                 submitLabel={selectedIsAnnouncement ? "Post bulletin" : "Send"}
-                typingText={selectedTypingText}
+                typingIndicator={typingIndicator}
                 sendMessageShortcut={preferences.sendMessageShortcut}
                 spellCheck={preferences.spellCheck}
                 onDraftChange={updateMainDraft}
@@ -3302,7 +3333,7 @@ export function App({
               placeholder="Reply in thread"
               submitLabel="Reply"
               variantClassName="thread-composer"
-              typingText={selectedTypingText}
+              typingIndicator={typingIndicator}
               sendMessageShortcut={preferences.sendMessageShortcut}
               spellCheck={preferences.spellCheck}
               onDraftChange={updateThreadDraft}

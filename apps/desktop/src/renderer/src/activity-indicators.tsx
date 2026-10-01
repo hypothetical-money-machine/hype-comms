@@ -1,5 +1,17 @@
 import type { PresenceState, User } from "@hype-comms/contracts";
 
+export function TypingIndicator({ text = "" }: { readonly text?: string }) {
+  return (
+    <p
+      className={text === "" ? "typing-indicator idle" : "typing-indicator active"}
+      aria-live="polite"
+      aria-hidden={text === "" ? true : undefined}
+    >
+      {text === "" ? "\u00a0" : text}
+    </p>
+  );
+}
+
 export function PresenceIndicator({ state }: { readonly state: PresenceState }) {
   return (
     <span

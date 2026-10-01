@@ -28,6 +28,8 @@ import {
 } from "./composer-formatting";
 import { filterMentionMembers, insertMention, mentionQueryAt, segmentMentions } from "./mentions";
 
+import { TypingIndicator } from "./activity-indicators";
+
 const MESSAGE_COMPOSER_SIZE = { minHeight: 44, maxHeight: 132 } as const;
 
 function ToolbarIcon({ children }: { readonly children: ReactNode }) {
@@ -164,7 +166,7 @@ export function MessageComposer({
   placeholder,
   submitLabel = "Send",
   variantClassName,
-  typingText = "",
+  typingIndicator,
   platform,
   sendMessageShortcut = "enter",
   spellCheck = true,
@@ -189,7 +191,7 @@ export function MessageComposer({
   readonly placeholder?: string;
   readonly submitLabel?: string;
   readonly variantClassName?: string;
-  readonly typingText?: string;
+  readonly typingIndicator?: ReactNode;
   readonly platform: DesktopPlatform;
   readonly sendMessageShortcut?: SendMessageShortcutPreference;
   readonly spellCheck?: boolean;
@@ -414,13 +416,7 @@ export function MessageComposer({
       onSubmit={submit}
       aria-busy={isSubmitting || attachmentUploadBusy}
     >
-      <p
-        className={typingText === "" ? "typing-indicator idle" : "typing-indicator active"}
-        aria-live="polite"
-        aria-hidden={typingText === "" ? true : undefined}
-      >
-        {typingText === "" ? "\u00a0" : typingText}
-      </p>
+      {typingIndicator ?? <TypingIndicator />}
       {pendingAttachments.length > 0 && (
         <ul className="composer-attachments" aria-label="Attached files">
           {pendingAttachments.map((attachment) => (
