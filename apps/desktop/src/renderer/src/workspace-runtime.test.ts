@@ -2021,6 +2021,7 @@ describe("WorkspaceRuntime", () => {
       expect(runtime.state.reactions).toEqual([secondReaction]);
       expect(load.mock.calls).toEqual([[{ conversationId: SECOND_CONVERSATION_ID }]]);
       if (offline) {
+        expect(runtime.hasOlder(SECOND_CONVERSATION_ID)).toBe(false);
         expect(api.historyRequests).toEqual([]);
         await runtime.sendMessage(SECOND_CONVERSATION_ID, "Queued from restored cache", []);
         expect((await cache.load()).outbox).toHaveLength(1);
@@ -5522,6 +5523,37 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("issues distinct main-timeline jump requests for repeated task and attachment sources", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+    await runtime.start(session);
+    const sourceTask = { ...task, sourceMessageId: OWN_MESSAGE_ID };
+    runtime.openTaskSource(sourceTask);
+    const first = runtime.state.focusedMessageRequest;
+    runtime.openTaskSource(sourceTask);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(first);
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "launch-notes.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    runtime.openAttachmentSource(attachment);
+    const second = runtime.state.focusedMessageRequest;
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second);
+    expect(runtime.state.focusedMessageId).toBe(OWN_MESSAGE_ID);
+    await runtime.stop();
+    await runtime.start(session);
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second + 1);
   });
 
   it("sends attachment ids and hydrates files from history and live messages", async () => {
