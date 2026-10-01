@@ -212,7 +212,15 @@ cursors remain opaque strings.
 
 Watch reconnects from the last successfully written position. If no position is given, it uses
 bootstrap's current position. An expired position or changed epoch emits `system.resync_required`
-before exit so callers can bootstrap again. The shared client acknowledges only after stdout completes the NDJSON write. Parsing a frame does not acknowledge it.
+before exit so callers can bootstrap again. The shared client acknowledges only after stdout
+completes the NDJSON write. Parsing a frame does not acknowledge it. Pending delivery limits remain
+in force across reconnects.
+
+On a stop signal or terminal failure, watch gives accepted output one second to drain. If the
+downstream reader remains blocked, pending lines are abandoned and their positions are not
+acknowledged. A resync event can also remain unwritten in this case; the command still exits with
+`RESYNC_REQUIRED` on stderr. The executable gives stderr a further one second to drain before
+forcing exit if a pending OS stdout write would keep the process alive.
 
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
 `GET /v2/messages/:id`.

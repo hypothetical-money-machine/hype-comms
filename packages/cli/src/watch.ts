@@ -26,6 +26,8 @@ import {
 import { EventWriter, writeResult } from "./output.js";
 import type { CommandContext } from "./types.js";
 
+const OUTPUT_SHUTDOWN_TIMEOUT_MS = 1_000;
+
 /** Builds the body-free repair signal the client emits when it cannot continue from its cursor. */
 function syntheticResyncEvent(
   workspaceId: string,
@@ -123,6 +125,7 @@ export async function watchProductRealtime(
   let tail: Promise<void> = Promise.resolve();
   let stopped = false;
   let finished = false;
+  let outputCancelled = false;
   let requestedRetryDelay = 0;
   let incompatibleReason: string | undefined;
   let resolve: (value: { readonly cursor: SyncPosition }) => void = () => undefined;
@@ -136,11 +139,23 @@ export async function watchProductRealtime(
     finished = true;
     stopped = true;
     realtime.resetSession();
-    void tail.then(() => (error === undefined ? resolve({ cursor }) : reject(error)), reject);
+    const settle = (failure?: unknown): void => {
+      if (outputCancelled) return;
+      outputCancelled = true;
+      clearTimeout(deadline);
+      if (failure === undefined) resolve({ cursor });
+      else reject(failure);
+    };
+    // Give already accepted output a short chance to drain. A downstream reader may never
+    // consume stdout, so neither signals nor terminal failures can wait for it indefinitely.
+    const deadline = setTimeout(() => settle(error), OUTPUT_SHUTDOWN_TIMEOUT_MS);
+    void tail.then(() => settle(error), settle);
   };
   const enqueue = (event: ProductRealtimeEvent): void => {
     const delivery = tail.then(async () => {
+      if (outputCancelled) return;
       await input.onEvent(event);
+      if (outputCancelled) return;
       // Only successful output delivery acknowledges the position used for reconnect.
       if (event.type !== "system.resync_required") {
         cursor = laterCursor(cursor, event.position);
@@ -154,6 +169,7 @@ export async function watchProductRealtime(
     });
     // finish owns the rejected result; attach immediately while output may still be pending.
     void tail.catch(() => undefined);
+    if (event.type === "system.resync_required") finish(new ResyncRequiredError());
   };
   const realtime = new WorkspaceRealtimeClient({
     apiOrigin: input.origin,
