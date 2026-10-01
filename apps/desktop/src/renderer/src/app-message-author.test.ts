@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cleanup, render, screen } from "@testing-library/react";
-import { type Message, type User } from "@hype-comms/contracts";
+import { SYSTEM_USER_ID, type Message, type User } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -96,5 +96,22 @@ describe("MessageRow author title", () => {
 
     expect(screen.getByText("Former member")).not.toBeNull();
     expect(document.querySelector(".message-author-title")).toBeNull();
+  });
+
+  it("names the app as the author of a message from the system user", () => {
+    // The publisher is not a workspace member, so the ordinary fallback would misname it.
+    renderMessage({ members: [], message: { ...baseMessage, authorId: SYSTEM_USER_ID } });
+
+    expect(screen.getByText("Hype Comms")).not.toBeNull();
+    expect(screen.queryByText("Former member")).toBeNull();
+  });
+
+  it("keeps the Former member fallback for a departed member, even in a built-in channel", () => {
+    // Attribution matches the author id, not the conversation: a member who replied in a
+    // built-in channel and later left must not have their words attributed to the app.
+    renderMessage({ members: [] });
+
+    expect(screen.getByText("Former member")).not.toBeNull();
+    expect(screen.queryByText("Hype Comms")).toBeNull();
   });
 });

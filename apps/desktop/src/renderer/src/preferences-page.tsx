@@ -260,9 +260,6 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
               </button>
             )}
             <div>
-              <p className="eyebrow">
-                {view === "designer" ? "Workspace appearance" : "Workspace preferences"}
-              </p>
               <h2 id="preferences-title">
                 {view === "designer" ? "Theme designer" : "Preferences"}
               </h2>
@@ -334,9 +331,7 @@ export const PreferencesPage = forwardRef<PreferencesPageHandle, PreferencesPage
               >
                 <p className="eyebrow">Unsaved theme</p>
                 <h3 id="theme-discard-title">Discard your changes?</h3>
-                <p id="theme-discard-description">
-                  Your current app theme is still safe. Only this unsaved draft will be lost.
-                </p>
+                <p id="theme-discard-description">Your unsaved theme changes will be lost.</p>
                 <div>
                   <button ref={discardKeepEditingRef} type="button" onClick={cancelDiscard}>
                     Keep editing

@@ -50,8 +50,7 @@ export function CompactModeToggle({ compactMode, platform }: CompactModeTogglePr
       </label>
       <kbd>{compactModeShortcutLabel(platform)}</kbd>
       <p className="compact-mode-control-hint">
-        Tighter message, sidebar, and chrome spacing. The rail and sidebar hide until you reveal
-        them.
+        Reduce spacing and hide navigation when you are not using it.
       </p>
       {error !== "" && (
         <p className="compact-mode-control-error" role="alert">
