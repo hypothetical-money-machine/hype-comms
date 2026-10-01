@@ -40,4 +40,14 @@ describe("acknowledged event output", () => {
       writer.dispose();
     }
   });
+  it("releases a stalled pipe when the watch stops", async () => {
+    const stream = new Writable({
+      write() {},
+    });
+    const writer = new EventWriter(stream);
+    const output = expect(writer.write({ event: "test" })).rejects.toThrow("Event output closed");
+    writer.dispose();
+    await output;
+    expect(stream.destroyed).toBe(true);
+  });
 });

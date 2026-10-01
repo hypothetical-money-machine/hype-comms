@@ -1,7 +1,7 @@
 import { visibleTimelineMessages } from "./App";
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MESSAGE_RETRACT_WINDOW_MS, type Message, type User } from "@hype-comms/contracts";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -338,4 +338,22 @@ describe("MessageRow retract action", () => {
     expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
     expect(screen.getByText("Root message")).not.toBeNull();
   });
+
+  it.each([0, MESSAGE_RETRACT_WINDOW_MS])(
+    "expires retract after the inclusive deadline when mounted at age %i",
+    (ageMs) => {
+      renderMessage({
+        onRetract: vi.fn().mockResolvedValue(undefined),
+        message: {
+          ...message,
+          createdAt: new Date(Date.parse(NOW) - ageMs).toISOString(),
+        },
+      });
+
+      act(() => vi.advanceTimersByTime(MESSAGE_RETRACT_WINDOW_MS - ageMs));
+      expect(screen.getByRole("button", { name: "Retract message" })).not.toBeNull();
+      act(() => vi.advanceTimersByTime(1));
+      expect(screen.queryByRole("button", { name: "Retract message" })).toBeNull();
+    },
+  );
 });
