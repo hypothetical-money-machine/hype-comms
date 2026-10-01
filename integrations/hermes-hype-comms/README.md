@@ -10,9 +10,8 @@ The adapter:
 - loads bootstrap, member, and complete conversation metadata;
 - starts `hype-comms-cli watch --json --after <cursor>` and treats stdout as
   NDJSON only;
-- wakes Hermes for every message in the agent's DMs and for explicitly
-  mentioned channel messages, plus unmentioned follow-ups inside threads the
-  agent has already written in when that is switched on;
+- wakes Hermes for every authorized message in joined conversations, then lets
+  the model either reply or intentionally remain silent;
 - after those wake gates pass, retrieves exactly one server-authoritative
   context pack ending at the triggering message and supplies that pack as
   clearly delimited, untrusted user content;
@@ -24,7 +23,7 @@ The adapter:
   and threads a channel reply by passing only the server-minted thread-root
   UUID as a flag;
 - atomically checkpoints the last accepted decimal workspace cursor together
-  with any post-handoff read-cursor target still awaiting delivery; and
+  with pending read-cursor targets and unfinished ambient-turn anchors; and
 - supports `deliver=hype_comms` cron jobs in both live-gateway and standalone
   cron processes.
 
@@ -68,6 +67,11 @@ NousResearch/hermes-agent commit
   decide whether to open a streaming preview at all
 - `MessageEvent.channel_prompt`, applied as an ephemeral system prompt at
   API-call time and never persisted to transcript history
+- `BasePlatformAdapter.set_busy_session_handler`, `build_session_key`, and the
+  base's active-session guard and stale-lock recovery
+- `GatewayRunner._enqueue_fifo`, `_queue_depth`, `_adapter_for_source`, and
+  `_BUSY_QUEUE_MAX_PENDING` for separate ambient follow-up turns (upstream
+  internals, not public API)
 - The intentional-silence markers in `gateway.response_filters`
   (`[SILENT]`, `SILENT`, `NO_REPLY`, `NO REPLY`), matched against a whole
   response only
@@ -100,16 +104,26 @@ edit operation through the CLI, so without that declaration the gateway opens a
 streaming preview, sends a partial first message, discovers that the edit
 failed, and leaves the partial sitting beside the finished answer.
 
-The flag is not the whole story for silence, though, and the difference matters.
-At the pinned commit only one of the gateway's two stream-consumer construction
-sites skips streaming on the flag; the other reads it merely to blank the
-typing cursor and builds a consumer anyway. A consumer can seal a segment
-mid-turn and hand a bare silence marker to `send()` as ordinary text, which is
-exactly the shape a model produces when it decides to stay quiet after calling a
-tool. So the adapter also filters whole-message silence markers on the way out.
-That filter, not the flag, is what guarantees the word `NO_REPLY` is never
-posted into someone's channel, because a posted Hype Comms message cannot be
-retracted from here.
+At the pinned commit the proxy stream-consumer path ignores that flag when
+constructing its consumer. Hermes also sends interim assistant commentary and
+long-running heartbeat messages before it knows whether a turn will end with
+`NO_REPLY`. The adapter disables tool/thinking progress, interim commentary,
+heartbeats, and streaming for Hype Comms turns through a copied
+`display.platforms.hype_comms` policy. Useful final answers still reach the
+normal sender, including the direct send Hermes uses between queued turns.
+The whole-message silence filter remains a final safeguard.
+
+This policy depends on the pinned runner's `_run_agent_inner` and
+`_run_agent_via_proxy` methods loading configuration through
+`_load_gateway_config`. The adapter clones those functions' globals per Hype
+Comms invocation; other platforms call the original methods. It does not modify
+Hermes module globals or the user's configuration file. The pinned
+`_preserve_queued_followup_history_offset` helper also identifies each completed
+turn's own result before Hermes replaces it with the last queued turn's result.
+Startup rejects an incompatible runner instead of enabling ambient turns with
+unverified progress or recovery behavior. Review these hooks when updating the
+Hermes pin. These overrides cover the listed progress/commentary routes;
+separate system notices keep Hermes's behavior.
 
 No Hermes source is vendored here.
 
@@ -188,13 +202,8 @@ Optional:
   under the message that woke the agent. Default `true`. Set it to `false` to
   send every reply flat. Replies in direct messages are always flat and this
   switch does not change that.
-- `HYPE_COMMS_THREAD_FOLLOWUPS`: whether an unmentioned reply inside a thread
-  the agent has already replied in wakes it. Default `false`. Read the trigger
-  policy below before turning it on: it widens what reaches Hermes past
-  explicit mentions, and it costs one inference turn per message even when the
-  model decides to say nothing.
 
-The context limit and both switches are read once, when the adapter is
+The context limit and thread-reply switch are read once, when the adapter is
 constructed, so a change takes effect on `hermes gateway restart`.
 
 The environment credential overrides any saved CLI profile and is never
@@ -238,10 +247,9 @@ hermes gateway status
 ## Context pack
 
 An eligible wake is anchored to the exact server-minted triggering message ID.
-Only after self-message suppression, DM/channel resolution, verified-mention
-gating, the optional participated-thread gate, and profile-aware Hermes
-authorization (or the legacy UUID fallback) pass does the adapter make one
-context-history request. The returned pack contains:
+Only after self-message suppression, DM/channel resolution, and profile-aware
+Hermes authorization (or the legacy UUID fallback) pass does the adapter make
+one context-history request. The returned pack contains:
 
 - the canonical `#channel-slug` or derived `@dm-peer` selector;
 - up to `HYPE_COMMS_CONTEXT_LIMIT` messages, oldest first, through the trigger;
@@ -256,15 +264,11 @@ an invalid thread target, or any conversation/anchor mismatch. The shared CLI
 contract performs the first validation; this second check is the boundary just
 before model exposure.
 
-Nearby messages are ambient context, not additional wake triggers. An
-unmentioned channel message still causes no history request and no inference by
-itself. Once a later authorized mention or participated-thread follow-up wakes
-the agent, however, earlier conversation messages in the bounded tail—including
-messages that did not mention the agent or whose authors lack wake
-permission—become model-visible and are identified by the routing line described
-below. That privacy and token-cost expansion is intentional: it is what lets the
-agent answer from what was actually said instead of seeing only the final
-trigger.
+Every authorized message is a wake trigger. Nearby earlier messages in the
+bounded tail—including messages whose authors lack wake permission—become
+model-visible and are identified by the routing line described below. This
+privacy and token-cost expansion is intentional: it lets the agent decide from
+what was actually said rather than from the final message in isolation.
 
 The model receives the complete pack as compact JSON inside `BEGIN/END HYPE
 COMMS CONTEXT PACK V1` lines. Newlines and apparent boundary text inside message
@@ -275,23 +279,14 @@ validated realtime event; the server pack supplies the canonical reply root.
 
 ## Trigger and delivery policy
 
-- Direct message: always dispatched to Hermes after normal Hermes
-  authorization.
-- Channel: dispatched when `mentionedUserIds` explicitly contains the agent
-  user ID.
-- Unmentioned channel traffic: never wakes Hermes by itself, unless it is a
-  participated-thread follow-up and `HYPE_COMMS_THREAD_FOLLOWUPS` is on. It can
-  appear later as bounded ambient context when an eligible message does wake
-  Hermes; see the context-pack section above.
+- Direct message and channel traffic: dispatched to Hermes after normal Hermes
+  authorization, whether or not the agent is mentioned.
+- Reply decision: the model either produces a substantive reply or emits exactly
+  `NO_REPLY`; Hermes and the adapter both suppress that marker from delivery.
 - Self-authored message: ignored.
 - Reply in a channel: threaded under the message that woke the agent, in the
   same Hype Comms conversation. A reply whose anchor the adapter no longer
-  holds is sent flat into the conversation rather than guessed at. Note that
-  with follow-ups off, which is the default, the agent does not hear anything
-  said inside the thread it just opened unless that message mentions it again.
-  Threading puts the answer where a reply chip invites the human to continue,
-  and the trigger policy has not moved, so this is the one place where the two
-  pull against each other.
+  holds is sent flat into the conversation rather than guessed at.
 - Reply in a direct message: always flat, never threaded. A one-to-one
   conversation has no use for a thread, and a client that supports threads
   files threaded replies out of the main timeline, which in a direct message
@@ -306,41 +301,31 @@ validated realtime event; the server pack supplies the canonical reply root.
 - Owner administration: intentionally unavailable through the adapter. Use an
   owner's human CLI profile to manage agents and tokens.
 
-### Thread follow-ups
+### Intentional silence
 
-Off by default. With `HYPE_COMMS_THREAD_FOLLOWUPS=true`, a reply inside a
-thread the agent has already replied in wakes it even though nobody mentioned
-it, and the agent decides for itself whether to answer.
+Silence is decided by the model, not by a content blocklist. The adapter's
+stable `channel_prompt` tells the agent to use `NO_REPLY` when a message needs
+nothing from it. Hermes suppresses intentional-silence responses, and the
+adapter independently drops a whole-message silence marker before the network
+sender as a final delivery safeguard. The silent turn remains in Hermes's
+session history, so the agent can follow the conversation without posting.
 
-The adapter does not have to subscribe to anything to see those messages. It
-already receives every `message.created` event for the conversations it belongs
-to, and it discards the unmentioned ones itself. What the
-`participated-thread-notifications-v1` capability adds is precision: the server
-marks the thread replies that land in threads this agent has written in, so the
-agent can wake on those alone instead of waking on all thread traffic or
-keeping its own ledger of where it has spoken. The marking is per recipient and
-never travels in the shared event payload.
+While Hermes is answering, an unmentioned channel message waits for its own
+turn in Hermes's FIFO. It does not interrupt or steer the active answer, and
+does not cause a busy acknowledgement. Explicit mentions and direct messages
+keep Hermes's normal busy-input policy. If the FIFO is full, the gateway is
+draining, or the pinned queue helpers are unavailable, the adapter retries the
+watch event without advancing its checkpoint. Each admitted message keeps its
+own context pack, reply anchor, and silence decision.
 
-Silence is decided by the model, not by a filter. Hermes suppresses delivery
-when a whole response is one of its intentional-silence markers, and the
-adapter's `channel_prompt` tells the agent to use `NO_REPLY` when a follow-up
-needs nothing from it. The silent turn still enters Hermes's session history, so
-the agent keeps following the conversation without posting into it.
+Before handing an ambient wake to the volatile FIFO, the adapter persists a
+recovery anchor. A successful model decision removes that anchor; failed or
+interrupted decisions retain it for restart recovery. A reconnect in the same
+process does not enqueue another copy of an already admitted live turn.
 
-Three consequences are worth stating before turning it on. Deciding to stay
-quiet is a full inference turn, so a busy thread costs tokens and rate limit for
-no visible output. Unmentioned messages in participated threads now do reach
-Hermes and stay in its transcript, which narrows the promise made above: the
-allowlist still governs who may wake the agent, but "not added silently to
-Hermes context" stops holding for threads it has already joined.
-
-The third is the one to check before turning this on in a workspace that runs
-more than one agent. The adapter suppresses only its own messages, so where two
-agents have both replied in the same thread, each one's reply wakes the other
-and the exchange continues until one model chooses to stay quiet. Nothing in the
-adapter breaks that cycle. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS`,
-or leave follow-ups off, unless you have a reason to want agents answering each
-other.
+Every authorized message costs one inference turn even when the model stays
+quiet. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS` unless agent-to-agent
+wakes are intentional; self-authored messages remain suppressed.
 
 Hermes's configured authorization remains the final inbound gate. Before
 fetching context, the adapter invokes Hermes's profile-aware sender callback
@@ -366,14 +351,44 @@ never used for authorization.
 
 State is scoped by SHA-256 of the credential-free API origin plus agent user
 ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
-mode `0600`. Version 2 stores the decimal workspace checkpoint and, per
-conversation, a pending read target with its conversation sequence. A valid
-version 1 checkpoint is migrated in place before watch starts.
+mode `0600`. Version 3 stores the decimal workspace checkpoint, per-conversation
+pending read targets, and at most 4,096 unfinished ambient-turn anchors. Each
+anchor contains message, conversation, author, and thread-root IDs, workspace
+and conversation sequences, and a timestamp. It contains no message text or
+credentials. Valid version 1 and version 2 checkpoints migrate in place before
+watch starts; malformed recovery targets fail startup.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
 installations resume from their persisted cursor. At-least-once duplicate
 events at or below that cursor are ignored.
+
+On restart, the adapter refetches unfinished ambient anchors' context packs.
+It repeats current sender authorization and strict pack validation before
+each model handoff. It admits the backlog until Hermes's FIFO fills, then
+starts watch and retries the remaining anchors in one bounded background task.
+A newer unmentioned message in that channel waits behind those unfinished
+admissions, even if a FIFO slot opens before the next recovery retry. Its
+anchor is persisted and watch continues; context is refetched and read progress
+is recorded only when that turn is actually admitted. A blocked channel does
+not prevent recovery or live traffic in other channels, and mentions and direct
+messages retain their normal busy-input policy.
+A transient context failure or draining gateway also defers recovery without
+keeping the adapter offline. The task preserves Retry-After within the capped
+backoff policy and makes progress when capacity frees even without new watch
+traffic. Retry attempts and deadlines are tracked per conversation, so a longer
+Retry-After in one channel cannot postpone another channel's available FIFO slot.
+New pending work wakes the same worker without shortening an existing channel
+deadline. Disconnect and fatal shutdown cancel and await this task, including
+any in-flight context CLI child. A deleted or
+inaccessible anchor, or an author denied by the current policy, is retired
+without inference. Recovery never rewinds the accepted workspace cursor.
+This is at-least-once model processing: a crash after a decision or reply but
+before its durable completion write can repeat that turn. Anchors also remain
+durable when FIFO admission is full or the gateway is draining. Each recovery
+queue tracks admission separately from successful decisions, so a failed model
+turn remains durable for the next connection without entering an automatic
+inference retry loop or blocking newer live turns during the current connection.
 
 When `read-cursors:write` is present, `handle_message` must return successfully
 before the adapter marks anything read. It then writes the triggering workspace
@@ -461,7 +476,13 @@ post-handoff ordering, failed handoff, retracted-anchor poison-event skipping,
 read-scope warning/no-mutation behavior, durable pending read retry across
 idle uptime and restart, Retry-After propagation, permanent-failure parking,
 retry-task and in-flight child cancellation, fatal-handler teardown ownership,
-v1-to-v2 migration, metadata cache updates, equal-cursor resync,
+v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
+authorization, write/fsync failure rollback, reconnect admission deduplication,
+per-turn completion across mixed failed/successful FIFO decisions, isolated
+Hype display configuration, deferred recovery beyond live FIFO capacity,
+failed-turn retry isolation, ordered deferred live admission, cross-channel
+recovery progress, current-policy checks, recovery-task cancellation/reaping and fatal
+teardown ownership, metadata cache updates, equal-cursor resync,
 cursor-expiry recovery, malformed NDJSON cleanup, transient respawn recovery,
 private-stdin send, thread-root resolution for top-level and in-thread wakes,
 fallback delivery threading from the metadata anchor, chunked-reply root
