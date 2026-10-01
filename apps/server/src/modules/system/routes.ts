@@ -17,8 +17,13 @@ interface SystemRoutesOptions {
 }
 
 function hasMetricsAccess(header: string | string[] | undefined, token: string): boolean {
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
-  const supplied = Buffer.from(header.slice("Bearer ".length));
+  if (typeof header !== "string") return false;
+  // Metrics secrets may contain internal spaces or tabs. Configuration rejects boundary
+  // whitespace and invalid HTTP header characters; compare the remaining secret byte-for-byte.
+  const secretOffset = header.length - token.length;
+  const prefix = header.slice(0, secretOffset);
+  if (/^Bearer[ \t]+/i.exec(prefix)?.[0] !== prefix) return false;
+  const supplied = Buffer.from(header.slice(secretOffset));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }

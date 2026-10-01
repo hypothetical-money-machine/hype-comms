@@ -545,7 +545,9 @@ export async function insertDeviceSession(
       input.createdAt,
       input.lastSeenAt,
       input.expiresAt,
-      input.workosSessionId ?? null,
+      input.workosSessionId == null
+        ? null
+        : authKitProviderSessionIdSchema.parse(input.workosSessionId),
     ],
   );
   return mapDeviceSession(result.rows[0] as DeviceSessionRow);
