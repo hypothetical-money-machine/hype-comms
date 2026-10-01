@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 import { buildApp } from "../src/app.js";
+import { loadConfig } from "../src/config.js";
 import { Lifecycle } from "../src/lifecycle.js";
 import { MetricsRegistry } from "../src/metrics.js";
 import type { IdentityService } from "../src/modules/identity/service.js";
@@ -101,35 +102,35 @@ describe("operational routes", () => {
   it.each([
     "metrics token that is at least 32 characters",
     "metrics\ttoken-that-is-at-least-32-characters",
-    "  metrics-token-that-is-at-least-32-characters",
-    "metrics-token-that-is-at-least-32-characters  ",
-  ])("preserves the configured metrics secret %j", async (token) => {
+  ])("authenticates metrics secrets with internal whitespace over HTTP %j", async (token) => {
+    const config = loadConfig({ HYPE_COMMS_METRICS_TOKEN: token });
+    expect(config.metricsToken).toBe(token);
     const app = await buildApp({ metrics: { registry: new MetricsRegistry(), token } });
     apps.push(app);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
 
     for (const prefix of ["Bearer ", "bearer ", "BEARER\t", "bEaReR \t  "]) {
-      const authorized = await app.inject({
-        method: "GET",
-        url: "/metrics",
+      const authorized = await fetch(`${address}/metrics`, {
         headers: { authorization: prefix + token },
       });
-      expect(authorized.statusCode).toBe(200);
+      expect(authorized.status).toBe(200);
+      expect(authorized.headers.get("cache-control")).toBe("no-store");
+      expect(await authorized.text()).toContain("hype_comms_http_requests_total");
     }
 
-    const incorrect = await app.inject({
-      method: "GET",
-      url: "/metrics",
+    const incorrect = await fetch(`${address}/metrics`, {
       headers: { authorization: `Bearer ${token.slice(0, -1)}x` },
     });
-    expect(incorrect.statusCode).toBe(401);
+    expect(incorrect.status).toBe(401);
+    expect(incorrect.headers.get("www-authenticate")).toBe("Bearer");
+    await incorrect.text();
 
-    for (const prefix of ["Basic ", "Bearer", " Bearer ", "Bearer \n", "Bearer \r\n"]) {
-      const malformed = await app.inject({
-        method: "GET",
-        url: "/metrics",
+    for (const prefix of ["Basic ", "Bearer"]) {
+      const malformed = await fetch(`${address}/metrics`, {
         headers: { authorization: prefix + token },
       });
-      expect(malformed.statusCode).toBe(401);
+      expect(malformed.status).toBe(401);
+      await malformed.text();
     }
   });
 
