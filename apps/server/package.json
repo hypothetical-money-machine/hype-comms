@@ -20,7 +20,8 @@
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",
     "test": "npm run --prefix ../.. build:contracts && vitest run",
-    "typecheck": "tsc --build --pretty false",
+    "typecheck": "tsc --build --pretty false && npm run typecheck:route-declarations",
+    "typecheck:route-declarations": "tsc -p tsconfig.route-declarations.json --noEmit",
     "test:unit": "npm run --prefix ../.. build:contracts && vitest run --project unit",
     "test:integration": "npm run --prefix ../.. build:contracts && vitest run --project integration"
   },

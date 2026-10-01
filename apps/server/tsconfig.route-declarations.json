@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "dist/.route-declarations.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "test/types/route-declarations.ts"]
+}

@@ -40,17 +40,14 @@ import {
   type CurrentUser,
   type SessionToken,
 } from "@hype-comms/contracts";
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import { z } from "zod";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
+import { humanPolicy, publicPolicy, workspacePolicy } from "../../http/authentication-policies.js";
 
 import { ApiError } from "../../errors.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
-import {
-  rejectAmbiguousCredentials,
-  requireAgentScope,
-  requireAuthenticatedIdentity,
-  requireHumanIdentity,
-  type AuthenticatedRequestIdentity,
-} from "./request-auth.js";
+import { rejectAmbiguousCredentials, type AuthenticatedRequestIdentity } from "./request-auth.js";
 import type { AgentEnrollmentActor, AgentEnrollmentModule } from "./agent-enrollment.js";
 import type { AuthKitService } from "./authkit-service.js";
 import type { IdentityService, RedeemedSession } from "./service.js";
@@ -102,14 +99,6 @@ function enrollmentActor(identity: AuthenticatedRequestIdentity): AgentEnrollmen
   };
 }
 
-function enrollmentParameters(value: unknown): { readonly id: string } {
-  const parsed = entityIdSchema.safeParse(
-    typeof value === "object" && value !== null && "id" in value ? value.id : undefined,
-  );
-  if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment id");
-  return { id: parsed.data };
-}
-
 function requiredEnrollmentIdempotencyKey(value: string | string[] | undefined): string {
   const parsed = idempotencyKeySchema.safeParse(value);
   if (!parsed.success) throw new ApiError(400, "BAD_REQUEST", "Idempotency-Key is required");
@@ -126,7 +115,7 @@ function includesRollbackUnsafeAgentScope(scopes: readonly AgentScope[]): boolea
   );
 }
 
-function requiredEnrollmentCredential(request: FastifyRequest) {
+function requiredEnrollmentCredential(request: Pick<FastifyRequest, "headers">) {
   if (cookieValue(request) !== undefined) {
     throw new ApiError(400, "BAD_REQUEST", "Enrollment redemption accepts only its credential");
   }
@@ -161,7 +150,7 @@ function sessionCookie(
   ].join("; ");
 }
 
-function cookieValue(request: FastifyRequest): string | undefined {
+function cookieValue(request: Pick<FastifyRequest, "headers">): string | undefined {
   const cookie = request.headers.cookie;
   if (cookie === undefined) return undefined;
   for (const part of cookie.split(";")) {
@@ -303,419 +292,671 @@ function invalidMagicLinkPage(): string {
 </html>`;
 }
 
-export const identityLandingRoutes: FastifyPluginAsync = async (app) => {
-  app.get("/auth/magic-link", async (request, reply) => {
-    const result = magicLinkLandingQuerySchema.safeParse(request.query);
-    const contentSecurityPolicy =
-      "default-src 'none'; style-src 'none'; img-src 'none'; script-src 'none'; " +
-      "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
-
-    void reply.headers({
-      ...MAGIC_LINK_PAGE_HEADERS,
-      "content-security-policy": contentSecurityPolicy,
-      "content-type": "text/html; charset=utf-8",
-    });
-    if (!result.success) {
-      return reply.code(400).send(invalidMagicLinkPage());
-    }
-
-    // A magic-link request has no authenticated client identity, so only the recipient may choose
-    // which installed app receives the credential. Unknown query keys are stripped by the schema.
-    return reply.code(200).send(magicLinkPage(result.data.token));
-  });
-};
-
-export const identityRoutes: FastifyPluginAsync<IdentityRoutesOptions> = async (
-  app,
-  {
-    service,
-    agentEnrollment,
-    authKitService,
-    cookieSecure,
-    selfServiceMagicLink = true,
-    agentProvisioningEnabled = true,
-    defaultAgentAgencyEnabled = true,
-  },
-) => {
-  const profileUpdateThrottle = new FixedWindowAttemptThrottle({
-    maxAttempts: PROFILE_UPDATE_LIMIT,
-    windowMs: PROFILE_UPDATE_WINDOW_MS,
-  });
-
-  const requireEnrollmentModule = (): AgentEnrollmentModule => {
-    if (agentEnrollment === undefined) {
-      throw new ApiError(503, "SERVICE_UNAVAILABLE", "Agent enrollment is unavailable");
-    }
-    return agentEnrollment;
-  };
-
-  const requireEnrollmentIssuanceEnabled = (): void => {
-    if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
-      throw new ApiError(
-        503,
-        "SERVICE_UNAVAILABLE",
-        "Agent provisioning is disabled during the server rollback window",
-      );
-    }
-  };
-
-  app.post("/auth/magic-link", async (request, reply) => {
-    if (!selfServiceMagicLink) {
-      throw new ApiError(
-        503,
-        "SERVICE_UNAVAILABLE",
-        "Sign-in links are issued by an administrator",
-      );
-    }
-    const result = requestMagicLinkSchema.safeParse(request.body);
-    if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid magic-link request");
-    const response = await service.requestMagicLink(result.data.email, request.ip, request.log);
-    return reply.code(202).send(magicLinkRequestedSchema.parse(response));
-  });
-
-  app.post("/auth/session", async (request, reply) => {
-    const result = verifyMagicLinkSchema.safeParse(request.body);
-    if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid magic-link token");
-    const userAgent = request.headers["user-agent"];
-    const label = userAgent === undefined ? null : userAgent.slice(0, 200);
-    const session = await service.redeemMagicLink(result.data.token, label);
-    const currentUser = await service.authenticate(session.token);
-    if (currentUser === null) {
-      throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
-    }
-    setSessionCookie(reply, session, cookieSecure);
-    return reply
-      .code(200)
-      .send(
-        desktopCurrentUserResponse(
-          currentUser,
-          supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
-        ),
-      );
-  });
-
-  app.get("/auth/me", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, service);
-    const memberProfiles = supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]);
-    return identity.credentialType === "session"
-      ? desktopCurrentUserResponse(identity.currentUser, memberProfiles)
-      : (() => {
-          const principal = currentPrincipalSchema.parse({
-            ...identity.currentUser,
-            ...(supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"])
-              ? { effectiveScopes: identity.authorizationScopes }
-              : {}),
-          });
-          return memberProfiles ? principal : { ...principal, user: withoutTitle(principal.user) };
-        })();
-  });
-
-  app.patch("/profile", async (request, reply) => {
-    const { currentUser } = await requireCurrentUser(request, service);
-    const retryAfterMs = profileUpdateThrottle.recordAttempt(currentUser.user.id);
-    if (retryAfterMs > 0) {
-      void reply.header("retry-after", Math.ceil(retryAfterMs / 1_000).toString());
-      throw new ApiError(429, "RATE_LIMITED", "Too many requests");
-    }
-    const body = updateProfileRequestSchema.safeParse(request.body);
-    if (!body.success) throw new ApiError(400, "BAD_REQUEST", "Invalid profile update");
-    const response = updateProfileResponseSchema.parse({
-      user: await service.updateProfileTitle(currentUser.user.id, body.data.title),
-    });
-    return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
-      ? response
-      : { ...response, user: withoutTitle(response.user) };
-  });
-
-  app.post("/auth/session/refresh", async (request, reply) => {
-    const token = requiredSessionToken(request);
-    const session = await service.refreshSession(token, request.log);
-    setSessionCookie(reply, session, cookieSecure);
-    return reply.code(204).send();
-  });
-
-  app.delete("/auth/session", async (request, reply) => {
-    void reply.header("cache-control", "no-store");
-    rejectAmbiguousCredentials(request);
-    const result = sessionTokenSchema.safeParse(cookieValue(request));
-    const providerSessionId = result.success ? await service.signOut(result.data) : null;
-    if (providerSessionId !== null && authKitService !== undefined) {
-      const logoutUrl = authKitLogoutUrlSchema.safeParse(
-        authKitService.createLogoutUrl(providerSessionId),
-      );
-      if (logoutUrl.success) void reply.header(authKitLogoutUrlHeaderName, logoutUrl.data);
-    }
-    void reply.header("set-cookie", sessionCookie("", cookieSecure, { clear: true }));
-    return reply.code(204).send();
-  });
-
-  app.get("/auth/devices", async (request) => {
-    const { currentUser } = await requireCurrentUser(request, service);
-    return deviceSessionSchema.array().parse(await service.listDevices(currentUser.user.id));
-  });
-
-  app.delete("/auth/devices/:id", async (request, reply) => {
-    const { currentUser } = await requireCurrentUser(request, service);
-    const parameters = entityIdSchema.safeParse(
-      typeof request.params === "object" && request.params !== null && "id" in request.params
-        ? request.params.id
-        : undefined,
-    );
-    if (!parameters.success) throw new ApiError(400, "BAD_REQUEST", "Invalid device session id");
-    if (!(await service.revokeDevice(currentUser.user.id, parameters.data))) {
-      throw new ApiError(404, "NOT_FOUND", "Device session not found");
-    }
-    return reply.code(204).send();
-  });
-
-  /** Shared by the legacy `/auth/invitations` path and the current `/invitations` one. */
-  const createInvitation = async (
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ): Promise<FastifyReply> => {
-    const identity = await requireHumanIdentity(request, service);
-    const result = createInvitationSchema.safeParse(request.body);
-    if (!result.success) throw new ApiError(400, "BAD_REQUEST", "Invalid invitation");
-    const invitation = await service.createInvitation(
-      identity.currentUser.user.id,
-      result.data.email,
-      result.data.role,
-    );
-    return reply.code(201).send(invitationSchema.parse(invitation));
-  };
-
-  app.post("/auth/invitations", createInvitation);
-
-  app.get("/invitations", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    return listInvitationsResponseSchema.parse({
-      invitations: await service.listInvitations(identity.currentUser.user.id),
-    });
-  });
-
-  app.post("/invitations", createInvitation);
-
-  app.delete("/invitations/:id", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, service);
-    const invitationId = entityIdSchema.safeParse(
-      typeof request.params === "object" && request.params !== null && "id" in request.params
-        ? request.params.id
-        : undefined,
-    );
-    if (!invitationId.success) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid invitation id");
-    }
-    if (!(await service.revokeInvitation(identity.currentUser.user.id, invitationId.data))) {
-      throw new ApiError(404, "NOT_FOUND", "Pending invitation not found");
-    }
-    return reply.code(204).send();
-  });
-
-  app.get("/agent-enrollment-policy", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    return agentEnrollmentPolicyResponseSchema.parse({
-      policy: await requireEnrollmentModule().getPolicy(enrollmentActor(identity)),
-    });
-  });
-
-  app.patch("/agent-enrollment-policy", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    requireEnrollmentIssuanceEnabled();
-    const input = updateAgentEnrollmentPolicyRequestSchema.safeParse(request.body);
-    if (!input.success) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment policy");
-    }
-    return agentEnrollmentPolicyResponseSchema.parse({
-      policy: await requireEnrollmentModule().setPolicy(enrollmentActor(identity), input.data.mode),
-    });
-  });
-
-  app.post("/agent-enrollments", async (request, reply) => {
-    const identity = await requireAuthenticatedIdentity(request, service);
-    requireAgentScope(identity, "agents:invite");
-    requireEnrollmentIssuanceEnabled();
-    const input = requestAgentEnrollmentSchema.safeParse(request.body);
-    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent enrollment");
-    const enrollment = await requireEnrollmentModule().request(
-      enrollmentActor(identity),
-      input.data,
-      requiredEnrollmentIdempotencyKey(request.headers["idempotency-key"]),
-    );
-    return reply.code(201).send(agentEnrollmentResponseSchema.parse({ enrollment }));
-  });
-
-  app.get("/agent-enrollments", async (request, reply) => {
-    void reply.header("cache-control", "no-store");
-    const identity = await requireAuthenticatedIdentity(request, service);
-    requireAgentScope(identity, "agents:invite");
-    return listAgentEnrollmentsResponseSchema.parse({
-      enrollments: await requireEnrollmentModule().list(
-        enrollmentActor(identity),
-        supportsAgentEnrollmentReviewChannels(request.headers["x-hype-comms-capabilities"]),
+export const identityLandingRoutes = routeModule((routes) => {
+  routes.register({
+    method: "GET",
+    url: "/auth/magic-link",
+    policy: publicPolicy,
+    scopes: [],
+    // This public page renders a validation error as HTML instead of the API envelope.
+    request: {
+      query: validateRequest(
+        z.unknown().transform((value) => magicLinkLandingQuerySchema.safeParse(value)),
+        "Invalid sign-in link",
       ),
+    },
+    handler: async ({ input: { query: result }, reply }) => {
+      const contentSecurityPolicy =
+        "default-src 'none'; style-src 'none'; img-src 'none'; script-src 'none'; " +
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+
+      void reply.headers({
+        ...MAGIC_LINK_PAGE_HEADERS,
+        "content-security-policy": contentSecurityPolicy,
+        "content-type": "text/html; charset=utf-8",
+      });
+      if (!result.success) {
+        return reply.code(400).send(invalidMagicLinkPage());
+      }
+
+      // A magic-link request has no authenticated client identity, so only the recipient may choose
+      // which installed app receives the credential. Unknown query keys are stripped by the schema.
+      return reply.code(200).send(magicLinkPage(result.data.token));
+    },
+  });
+});
+
+export const identityRoutes = routeModule<IdentityRoutesOptions>(
+  (
+    routes,
+    {
+      service,
+      agentEnrollment,
+      authKitService,
+      cookieSecure,
+      selfServiceMagicLink = true,
+      agentProvisioningEnabled = true,
+      defaultAgentAgencyEnabled = true,
+    },
+  ) => {
+    const human = humanPolicy(service);
+    const workspace = workspacePolicy(service);
+    const currentUserPolicy = {
+      name: "current-human-session",
+      authenticate: (request: FastifyRequest) => requireCurrentUser(request, service),
+    };
+    const profileUpdateThrottle = new FixedWindowAttemptThrottle({
+      maxAttempts: PROFILE_UPDATE_LIMIT,
+      windowMs: PROFILE_UPDATE_WINDOW_MS,
     });
-  });
 
-  app.get("/agent-enrollments/:id", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, service);
-    requireAgentScope(identity, "agents:invite");
-    const { id } = enrollmentParameters(request.params);
-    return agentEnrollmentResponseSchema.parse({
-      enrollment: await requireEnrollmentModule().get(enrollmentActor(identity), id),
+    const requireEnrollmentModule = (): AgentEnrollmentModule => {
+      if (agentEnrollment === undefined) {
+        throw new ApiError(503, "SERVICE_UNAVAILABLE", "Agent enrollment is unavailable");
+      }
+      return agentEnrollment;
+    };
+
+    const requireEnrollmentIssuanceEnabled = (): void => {
+      if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
+        throw new ApiError(
+          503,
+          "SERVICE_UNAVAILABLE",
+          "Agent provisioning is disabled during the server rollback window",
+        );
+      }
+    };
+
+    routes.register({
+      method: "POST",
+      url: "/auth/magic-link",
+      policy: publicPolicy,
+      scopes: [],
+      request: { body: validateRequest(requestMagicLinkSchema, "Invalid magic-link request") },
+      beforeValidation: () => {
+        if (!selfServiceMagicLink) {
+          throw new ApiError(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Sign-in links are issued by an administrator",
+          );
+        }
+      },
+      handler: async ({ request, reply, input: { body: result } }) => {
+        const response = await service.requestMagicLink(result.email, request.ip, request.log);
+        return reply.code(202).send(magicLinkRequestedSchema.parse(response));
+      },
     });
-  });
 
-  app.post("/agent-enrollments/:id/review", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    requireEnrollmentIssuanceEnabled();
-    const { id } = enrollmentParameters(request.params);
-    const input = reviewAgentEnrollmentRequestSchema.safeParse(request.body);
-    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid enrollment review");
-    return agentEnrollmentResponseSchema.parse({
-      enrollment: await requireEnrollmentModule().review(
-        enrollmentActor(identity),
-        id,
-        input.data.decision,
-      ),
+    routes.registerCredential({
+      method: "POST",
+      url: "/auth/session",
+      scopes: [],
+      request: { body: validateRequest(verifyMagicLinkSchema, "Invalid magic-link token") },
+      policy: {
+        name: "single-use-magic-link",
+        authenticate: async ({ body: result }, request) => {
+          const userAgent = request.headers["user-agent"];
+          const label = userAgent === undefined ? null : userAgent.slice(0, 200);
+          const session = await service.redeemMagicLink(result.token, label);
+          const currentUser = await service.authenticate(session.token);
+          if (currentUser === null) {
+            throw new ApiError(500, "INTERNAL_ERROR", "The session could not be created");
+          }
+          return { session, currentUser };
+        },
+      },
+      handler: async ({ identity: { session, currentUser }, request, reply }) => {
+        setSessionCookie(reply, session, cookieSecure);
+        return reply
+          .code(200)
+          .send(
+            desktopCurrentUserResponse(
+              currentUser,
+              supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
+            ),
+          );
+      },
     });
-  });
 
-  app.post("/agent-enrollments/:id/cancel", async (request) => {
-    const identity = await requireAuthenticatedIdentity(request, service);
-    requireAgentScope(identity, "agents:invite");
-    if (!agentEnrollmentNoBodyRequestSchema.safeParse(request.body).success) {
-      throw new ApiError(400, "BAD_REQUEST", "Enrollment cancellation does not accept a body");
-    }
-    const { id } = enrollmentParameters(request.params);
-    return agentEnrollmentResponseSchema.parse({
-      enrollment: await requireEnrollmentModule().cancel(enrollmentActor(identity), id),
+    routes.register({
+      method: "GET",
+      url: "/auth/me",
+      policy: workspace,
+      scopes: [],
+      request: {},
+      handler: async ({ identity, request }) => {
+        const memberProfiles = supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]);
+        return identity.credentialType === "session"
+          ? desktopCurrentUserResponse(identity.currentUser, memberProfiles)
+          : (() => {
+              const principal = currentPrincipalSchema.parse({
+                ...identity.currentUser,
+                ...(supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"])
+                  ? { effectiveScopes: identity.authorizationScopes }
+                  : {}),
+              });
+              return memberProfiles
+                ? principal
+                : { ...principal, user: withoutTitle(principal.user) };
+            })();
+      },
     });
-  });
 
-  app.post("/agent-enrollments/:id/redeem", async (request, reply) => {
-    const { id } = enrollmentParameters(request.params);
-    const credential = requiredEnrollmentCredential(request);
-    if (!agentEnrollmentNoBodyRequestSchema.safeParse(request.body).success) {
-      throw new ApiError(400, "BAD_REQUEST", "Enrollment redemption does not accept a body");
-    }
-    const enrollmentModule = requireEnrollmentModule();
-    await enrollmentModule.authenticateRedemptionCredential(id, credential);
-    requireEnrollmentIssuanceEnabled();
-    void reply.header("cache-control", "no-store");
-    return redeemAgentEnrollmentResponseSchema.parse(await enrollmentModule.redeem(id, credential));
-  });
-
-  app.get("/agents", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    const response = listAgentsResponseSchema.parse({
-      agents: await service.listAgents(identity.currentUser.user.id),
-    });
-    return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
-      ? response
-      : { ...response, agents: response.agents.map(withoutAgentTitle) };
-  });
-
-  app.post("/agents", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, service);
-    if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
-      throw new ApiError(
-        503,
-        "SERVICE_UNAVAILABLE",
-        "Agent provisioning is disabled during the server rollback window",
-      );
-    }
-    const input = createAgentRequestSchema.safeParse(request.body);
-    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent");
-    const agent = await service.createAgent(identity.currentUser.user.id, input.data);
-    const response = createAgentResponseSchema.parse({ agent });
-    return reply
-      .code(201)
-      .send(
-        supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+    routes.register({
+      method: "PATCH",
+      url: "/profile",
+      policy: currentUserPolicy,
+      scopes: [],
+      request: { body: validateRequest(updateProfileRequestSchema, "Invalid profile update") },
+      beforeValidation: ({ identity: { currentUser }, reply }) => {
+        const retryAfterMs = profileUpdateThrottle.recordAttempt(currentUser.user.id);
+        if (retryAfterMs > 0) {
+          void reply.header("retry-after", Math.ceil(retryAfterMs / 1_000).toString());
+          throw new ApiError(429, "RATE_LIMITED", "Too many requests");
+        }
+      },
+      handler: async ({ identity: { currentUser }, request, input: { body } }) => {
+        const response = updateProfileResponseSchema.parse({
+          user: await service.updateProfileTitle(currentUser.user.id, body.title),
+        });
+        return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
           ? response
-          : { ...response, agent: withoutAgentTitle(response.agent) },
-      );
-  });
-
-  app.delete("/agents/:id", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, service);
-    const agentId = entityIdSchema.safeParse(
-      typeof request.params === "object" && request.params !== null && "id" in request.params
-        ? request.params.id
-        : undefined,
-    );
-    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
-    if (!(await service.disableAgent(identity.currentUser.user.id, agentId.data))) {
-      throw new ApiError(404, "NOT_FOUND", "Agent not found");
-    }
-    return reply.code(204).send();
-  });
-
-  app.get("/agents/:id/tokens", async (request) => {
-    const identity = await requireHumanIdentity(request, service);
-    const agentId = entityIdSchema.safeParse(
-      typeof request.params === "object" && request.params !== null && "id" in request.params
-        ? request.params.id
-        : undefined,
-    );
-    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
-    return listAgentTokensResponseSchema.parse({
-      tokens: await service.listAgentTokens(
-        identity.currentUser.user.id,
-        agentId.data,
-        supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
-      ),
+          : { ...response, user: withoutTitle(response.user) };
+      },
     });
-  });
 
-  app.post("/agents/:id/tokens", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, service);
-    const agentId = entityIdSchema.safeParse(
-      typeof request.params === "object" && request.params !== null && "id" in request.params
-        ? request.params.id
-        : undefined,
-    );
-    if (!agentId.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent id");
-    const input = createAgentTokenRequestSchema.safeParse(request.body);
-    if (!input.success) throw new ApiError(400, "BAD_REQUEST", "Invalid agent token");
-    if (!defaultAgentAgencyEnabled) {
-      throw new ApiError(
-        503,
-        "SERVICE_UNAVAILABLE",
-        "Agent token creation is disabled during the server rollback window",
-      );
-    }
-    if (!agentProvisioningEnabled && includesRollbackUnsafeAgentScope(input.data.scopes)) {
-      requireEnrollmentIssuanceEnabled();
-    }
-    return reply
-      .code(201)
-      .send(
-        createAgentTokenResponseSchema.parse(
-          await service.createAgentToken(
+    routes.register({
+      method: "POST",
+      url: "/auth/session/refresh",
+      policy: {
+        name: "session-refresh",
+        authenticate: async (request) => {
+          const token = requiredSessionToken(request);
+          const session = await service.refreshSession(token, request.log);
+          return session;
+        },
+      },
+      scopes: [],
+      request: {},
+      handler: async ({ identity: session, reply }) => {
+        setSessionCookie(reply, session, cookieSecure);
+        return reply.code(204).send();
+      },
+    });
+
+    routes.register({
+      method: "DELETE",
+      url: "/auth/session",
+      policy: {
+        name: "idempotent-session-signout",
+        authenticate: async (request) => {
+          rejectAmbiguousCredentials(request);
+          const result = sessionTokenSchema.safeParse(cookieValue(request));
+          const providerSessionId = result.success ? await service.signOut(result.data) : null;
+          return providerSessionId;
+        },
+      },
+      scopes: [],
+      request: {},
+      beforeAuthentication: ({ reply }) => {
+        void reply.header("cache-control", "no-store");
+      },
+      handler: async ({ identity: providerSessionId, reply }) => {
+        if (providerSessionId !== null && authKitService !== undefined) {
+          const logoutUrl = authKitLogoutUrlSchema.safeParse(
+            authKitService.createLogoutUrl(providerSessionId),
+          );
+          if (logoutUrl.success) void reply.header(authKitLogoutUrlHeaderName, logoutUrl.data);
+        }
+        void reply.header("set-cookie", sessionCookie("", cookieSecure, { clear: true }));
+        return reply.code(204).send();
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/auth/devices",
+      policy: currentUserPolicy,
+      scopes: [],
+      request: {},
+      handler: async ({ identity: { currentUser } }) => {
+        return deviceSessionSchema.array().parse(await service.listDevices(currentUser.user.id));
+      },
+    });
+
+    routes.register({
+      method: "DELETE",
+      url: "/auth/devices/:id",
+      policy: currentUserPolicy,
+      scopes: [],
+      request: {
+        params: validateRequest(
+          z.object({ id: entityIdSchema }).strict(),
+          "Invalid device session id",
+        ),
+      },
+      handler: async ({
+        identity: { currentUser },
+        reply,
+        input: {
+          params: { id: parameters },
+        },
+      }) => {
+        if (!(await service.revokeDevice(currentUser.user.id, parameters))) {
+          throw new ApiError(404, "NOT_FOUND", "Device session not found");
+        }
+        return reply.code(204).send();
+      },
+    });
+
+    for (const url of ["/auth/invitations", "/invitations"]) {
+      routes.register({
+        method: "POST",
+        url,
+        policy: human,
+        scopes: [],
+        request: { body: validateRequest(createInvitationSchema, "Invalid invitation") },
+        handler: async ({ identity, input: { body }, reply }) => {
+          const invitation = await service.createInvitation(
             identity.currentUser.user.id,
-            agentId.data,
-            input.data,
+            body.email,
+            body.role,
+          );
+          return reply.code(201).send(invitationSchema.parse(invitation));
+        },
+      });
+    }
+
+    routes.register({
+      method: "GET",
+      url: "/invitations",
+      policy: human,
+      scopes: [],
+      request: {},
+      handler: async ({ identity }) => {
+        return listInvitationsResponseSchema.parse({
+          invitations: await service.listInvitations(identity.currentUser.user.id),
+        });
+      },
+    });
+
+    routes.register({
+      method: "DELETE",
+      url: "/invitations/:id",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(z.object({ id: entityIdSchema }).strict(), "Invalid invitation id"),
+      },
+      handler: async ({
+        identity,
+        reply,
+        input: {
+          params: { id: invitationId },
+        },
+      }) => {
+        if (!(await service.revokeInvitation(identity.currentUser.user.id, invitationId))) {
+          throw new ApiError(404, "NOT_FOUND", "Pending invitation not found");
+        }
+        return reply.code(204).send();
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/agent-enrollment-policy",
+      policy: human,
+      scopes: [],
+      request: {},
+      handler: async ({ identity }) => {
+        return agentEnrollmentPolicyResponseSchema.parse({
+          policy: await requireEnrollmentModule().getPolicy(enrollmentActor(identity)),
+        });
+      },
+    });
+
+    routes.register({
+      method: "PATCH",
+      url: "/agent-enrollment-policy",
+      policy: human,
+      scopes: [],
+      request: {
+        body: validateRequest(
+          updateAgentEnrollmentPolicyRequestSchema,
+          "Invalid agent enrollment policy",
+        ),
+      },
+      beforeValidation: () => {
+        requireEnrollmentIssuanceEnabled();
+      },
+      handler: async ({ identity, input: { body: input } }) => {
+        return agentEnrollmentPolicyResponseSchema.parse({
+          policy: await requireEnrollmentModule().setPolicy(enrollmentActor(identity), input.mode),
+        });
+      },
+    });
+
+    routes.register({
+      method: "POST",
+      url: "/agent-enrollments",
+      policy: workspace,
+      scopes: ["agents:invite"],
+      request: { body: validateRequest(requestAgentEnrollmentSchema, "Invalid agent enrollment") },
+      beforeValidation: () => {
+        requireEnrollmentIssuanceEnabled();
+      },
+      handler: async ({ identity, request, reply, input: { body: input } }) => {
+        const enrollment = await requireEnrollmentModule().request(
+          enrollmentActor(identity),
+          input,
+          requiredEnrollmentIdempotencyKey(request.headers["idempotency-key"]),
+        );
+        return reply.code(201).send(agentEnrollmentResponseSchema.parse({ enrollment }));
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/agent-enrollments",
+      policy: workspace,
+      scopes: ["agents:invite"],
+      request: {},
+      beforeAuthentication: ({ reply }) => {
+        void reply.header("cache-control", "no-store");
+      },
+      handler: async ({ identity, request }) => {
+        return listAgentEnrollmentsResponseSchema.parse({
+          enrollments: await requireEnrollmentModule().list(
+            enrollmentActor(identity),
+            supportsAgentEnrollmentReviewChannels(request.headers["x-hype-comms-capabilities"]),
+          ),
+        });
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/agent-enrollments/:id",
+      policy: workspace,
+      scopes: ["agents:invite"],
+      request: {
+        params: validateRequest(
+          z.object({ id: entityIdSchema }).strict(),
+          "Invalid agent enrollment id",
+        ),
+      },
+      handler: async ({
+        identity,
+        input: {
+          params: { id },
+        },
+      }) => {
+        return agentEnrollmentResponseSchema.parse({
+          enrollment: await requireEnrollmentModule().get(enrollmentActor(identity), id),
+        });
+      },
+    });
+
+    routes.register({
+      method: "POST",
+      url: "/agent-enrollments/:id/review",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(
+          z.object({ id: entityIdSchema }).strict(),
+          "Invalid agent enrollment id",
+        ),
+        body: validateRequest(reviewAgentEnrollmentRequestSchema, "Invalid enrollment review"),
+      },
+      beforeValidation: () => {
+        requireEnrollmentIssuanceEnabled();
+      },
+      handler: async ({
+        identity,
+        input: {
+          params: { id },
+          body: input,
+        },
+      }) => {
+        return agentEnrollmentResponseSchema.parse({
+          enrollment: await requireEnrollmentModule().review(
+            enrollmentActor(identity),
+            id,
+            input.decision,
+          ),
+        });
+      },
+    });
+
+    routes.register({
+      method: "POST",
+      url: "/agent-enrollments/:id/cancel",
+      policy: workspace,
+      scopes: ["agents:invite"],
+      request: {
+        body: validateRequest(
+          agentEnrollmentNoBodyRequestSchema,
+          "Enrollment cancellation does not accept a body",
+        ),
+        params: validateRequest(
+          z.object({ id: entityIdSchema }).strict(),
+          "Invalid agent enrollment id",
+        ),
+      },
+      handler: async ({
+        identity,
+        input: {
+          params: { id },
+        },
+      }) => {
+        return agentEnrollmentResponseSchema.parse({
+          enrollment: await requireEnrollmentModule().cancel(enrollmentActor(identity), id),
+        });
+      },
+    });
+
+    routes.registerCredential({
+      method: "POST",
+      url: "/agent-enrollments/:id/redeem",
+      scopes: [],
+      request: {
+        params: validateRequest(
+          z.object({ id: entityIdSchema }).strict(),
+          "Invalid agent enrollment id",
+        ),
+        headers: validateRequest(
+          z
+            .object({ authorization: z.string().optional(), cookie: z.string().optional() })
+            .transform((headers) => requiredEnrollmentCredential({ headers })),
+          "Invalid enrollment credential",
+        ),
+        body: validateRequest(
+          agentEnrollmentNoBodyRequestSchema,
+          "Enrollment redemption does not accept a body",
+        ),
+      },
+      policy: {
+        name: "enrollment-redemption-credential",
+        authenticate: async ({ params, headers: credential }) => {
+          const enrollmentModule = requireEnrollmentModule();
+          await enrollmentModule.authenticateRedemptionCredential(params.id, credential);
+          requireEnrollmentIssuanceEnabled();
+          return { credential, enrollmentModule };
+        },
+      },
+      handler: async ({
+        identity: { credential, enrollmentModule },
+        input: {
+          params: { id },
+        },
+        reply,
+      }) => {
+        void reply.header("cache-control", "no-store");
+        return redeemAgentEnrollmentResponseSchema.parse(
+          await enrollmentModule.redeem(id, credential),
+        );
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/agents",
+      policy: human,
+      scopes: [],
+      request: {},
+      handler: async ({ identity, request }) => {
+        const response = listAgentsResponseSchema.parse({
+          agents: await service.listAgents(identity.currentUser.user.id),
+        });
+        return supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+          ? response
+          : { ...response, agents: response.agents.map(withoutAgentTitle) };
+      },
+    });
+
+    routes.register({
+      method: "POST",
+      url: "/agents",
+      policy: human,
+      scopes: [],
+      request: { body: validateRequest(createAgentRequestSchema, "Invalid agent") },
+      beforeValidation: () => {
+        if (!agentProvisioningEnabled || !defaultAgentAgencyEnabled) {
+          throw new ApiError(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Agent provisioning is disabled during the server rollback window",
+          );
+        }
+      },
+      handler: async ({ identity, request, reply, input: { body: input } }) => {
+        const agent = await service.createAgent(identity.currentUser.user.id, input);
+        const response = createAgentResponseSchema.parse({ agent });
+        return reply
+          .code(201)
+          .send(
+            supportsMemberProfiles(request.headers["x-hype-comms-capabilities"])
+              ? response
+              : { ...response, agent: withoutAgentTitle(response.agent) },
+          );
+      },
+    });
+
+    routes.register({
+      method: "DELETE",
+      url: "/agents/:id",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(z.object({ id: entityIdSchema }).strict(), "Invalid agent id"),
+      },
+      handler: async ({
+        identity,
+        reply,
+        input: {
+          params: { id: agentId },
+        },
+      }) => {
+        if (!(await service.disableAgent(identity.currentUser.user.id, agentId))) {
+          throw new ApiError(404, "NOT_FOUND", "Agent not found");
+        }
+        return reply.code(204).send();
+      },
+    });
+
+    routes.register({
+      method: "GET",
+      url: "/agents/:id/tokens",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(z.object({ id: entityIdSchema }).strict(), "Invalid agent id"),
+      },
+      handler: async ({
+        identity,
+        request,
+        input: {
+          params: { id: agentId },
+        },
+      }) => {
+        return listAgentTokensResponseSchema.parse({
+          tokens: await service.listAgentTokens(
+            identity.currentUser.user.id,
+            agentId,
             supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
           ),
-        ),
-      );
-  });
+        });
+      },
+    });
 
-  app.delete("/agents/:agentId/tokens/:tokenId", async (request, reply) => {
-    const identity = await requireHumanIdentity(request, service);
-    const params =
-      typeof request.params === "object" && request.params !== null ? request.params : {};
-    const agentId = entityIdSchema.safeParse("agentId" in params ? params.agentId : undefined);
-    const tokenId = entityIdSchema.safeParse("tokenId" in params ? params.tokenId : undefined);
-    if (!agentId.success || !tokenId.success) {
-      throw new ApiError(400, "BAD_REQUEST", "Invalid agent token id");
-    }
-    if (
-      !(await service.revokeAgentToken(identity.currentUser.user.id, agentId.data, tokenId.data))
-    ) {
-      throw new ApiError(404, "NOT_FOUND", "Agent token not found");
-    }
-    return reply.code(204).send();
-  });
-};
+    routes.register({
+      method: "POST",
+      url: "/agents/:id/tokens",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(z.object({ id: entityIdSchema }).strict(), "Invalid agent id"),
+        body: validateRequest(createAgentTokenRequestSchema, "Invalid agent token"),
+      },
+      handler: async ({
+        identity,
+        request,
+        reply,
+        input: {
+          params: { id: agentId },
+          body: input,
+        },
+      }) => {
+        if (!defaultAgentAgencyEnabled) {
+          throw new ApiError(
+            503,
+            "SERVICE_UNAVAILABLE",
+            "Agent token creation is disabled during the server rollback window",
+          );
+        }
+        if (!agentProvisioningEnabled && includesRollbackUnsafeAgentScope(input.scopes)) {
+          requireEnrollmentIssuanceEnabled();
+        }
+        return reply
+          .code(201)
+          .send(
+            createAgentTokenResponseSchema.parse(
+              await service.createAgentToken(
+                identity.currentUser.user.id,
+                agentId,
+                input,
+                supportsAgentEffectiveScopes(request.headers["x-hype-comms-capabilities"]),
+              ),
+            ),
+          );
+      },
+    });
+
+    routes.register({
+      method: "DELETE",
+      url: "/agents/:agentId/tokens/:tokenId",
+      policy: human,
+      scopes: [],
+      request: {
+        params: validateRequest(
+          z.object({ agentId: entityIdSchema, tokenId: entityIdSchema }).strict(),
+          "Invalid agent token id",
+        ),
+      },
+      handler: async ({
+        identity,
+        reply,
+        input: {
+          params: { agentId, tokenId },
+        },
+      }) => {
+        if (!(await service.revokeAgentToken(identity.currentUser.user.id, agentId, tokenId))) {
+          throw new ApiError(404, "NOT_FOUND", "Agent token not found");
+        }
+        return reply.code(204).send();
+      },
+    });
+  },
+);
