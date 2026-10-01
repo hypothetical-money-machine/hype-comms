@@ -39,7 +39,6 @@
   },
   "devDependencies": {
     "@types/node": "24.13.3",
-    "@types/nodemailer": "^8.0.1",
     "@types/pg": "8.21.0",
     "@types/ws": "^8.18.0",
     "@workos/emulate": "0.7.1",
