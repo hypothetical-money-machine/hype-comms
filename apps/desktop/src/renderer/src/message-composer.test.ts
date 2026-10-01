@@ -372,6 +372,47 @@ describe("MessageComposer mentions", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it.each(["end", "middle"])(
+    "reveals the inserted mention caret when wrapping below the capped viewport at the %s",
+    (position) => {
+      const member = { ...alex, username: "alexander_with_a_long_username" };
+      const lines = Array.from({ length: 30 }, (_, index) => `Line ${String(index + 1)}`);
+      const mentionLine = position === "end" ? 29 : 5;
+      lines[mentionLine] = "Nearly fills this row @al";
+      const draft = lines.join("\n");
+      renderLiveComposer({ draft, members: [member] });
+      const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+      const overlay = document.querySelector<HTMLDivElement>(".composer-highlight");
+      expect(overlay).not.toBeNull();
+      if (overlay === null) throw new Error("Mention highlight is missing");
+      Object.defineProperties(overlay, {
+        clientHeight: { configurable: true, value: 130 },
+        clientTop: { configurable: true, value: 1 },
+      });
+      vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 20, 300, 132));
+      // The inserted username wraps onto the line below the visible band. The real Chromium
+      // comparison uses this same capped composer; happy-dom supplies no text layout.
+      vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
+        new DOMRect(10, 150, 0, 20),
+      );
+      const cursor = draft.indexOf("@al") + 3;
+      textbox.setSelectionRange(cursor, cursor);
+      fireEvent.select(textbox);
+      textbox.scrollTop = 40;
+
+      fireEvent.keyDown(textbox, { key: "Tab" });
+
+      const spacer = position === "end" ? " " : "";
+      expect(textbox.value).toContain(`@${member.username}${spacer}`);
+      expect(textbox.selectionStart).toBe(textbox.selectionEnd);
+      expect(textbox.selectionEnd).toBe(
+        draft.indexOf("@al") + member.username.length + 1 + spacer.length,
+      );
+      expect(textbox.scrollTop).toBe(59);
+      expect(overlay.scrollTop).toBe(textbox.scrollTop);
+    },
+  );
+
   it("keeps mention selection ahead of the configured send shortcut", () => {
     const { onDraftChange, onSubmit } = renderLiveComposer({
       platform: "linux",

@@ -119,6 +119,34 @@ function ComposerMentionHighlight({
   );
 }
 
+function revealComposerCaret(
+  element: HTMLTextAreaElement,
+  content: HTMLDivElement,
+  cursor: number,
+): void {
+  content.scrollTop = element.scrollTop;
+  const walker = content.ownerDocument.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+  let offset = cursor;
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const length = node.textContent?.length ?? 0;
+    if (offset > length) {
+      offset -= length;
+      continue;
+    }
+    const range = content.ownerDocument.createRange();
+    range.setStart(node, offset);
+    range.collapse(true);
+    const caret = range.getBoundingClientRect();
+    if (caret.height === 0) return;
+    const top = content.getBoundingClientRect().top + content.clientTop;
+    const bottom = top + content.clientHeight;
+    if (caret.bottom > bottom) element.scrollTop += Math.ceil(caret.bottom - bottom);
+    else if (caret.top < top) element.scrollTop -= Math.ceil(top - caret.top);
+    content.scrollTop = element.scrollTop;
+    return;
+  }
+}
+
 export function MessageComposer({
   contextKey,
   conversationName,
@@ -184,6 +212,7 @@ export function MessageComposer({
     readonly start: number;
     readonly end: number;
     readonly scrollTop: number;
+    readonly revealCaret?: boolean;
   } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAttaching, setIsAttaching] = useState(false);
@@ -214,6 +243,11 @@ export function MessageComposer({
     // Updating the controlled value temporarily puts the caret at the end, so autosizing can
     // scroll there before this effect restores the selected text. Restore its viewport too.
     element.scrollTop = nextSelection.scrollTop;
+    if (nextSelection.revealCaret === true && highlight.current !== null) {
+      // The highlight uses the textarea's text metrics, including wrapping. Reveal the inserted
+      // caret if a longer mention moved it outside the saved viewport, without jumping to the end.
+      revealComposerCaret(element, highlight.current, nextSelection.end);
+    }
     setCursor(nextSelection.end);
   }, [draft]);
 
@@ -256,6 +290,7 @@ export function MessageComposer({
         start: next.cursor,
         end: next.cursor,
         scrollTop: input.current?.scrollTop ?? 0,
+        revealCaret: true,
       };
       setDismissed(true);
       onDraftChange(next.text);
