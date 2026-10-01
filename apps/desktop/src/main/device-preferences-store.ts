@@ -13,7 +13,9 @@ import {
 export const MAX_DEVICE_PREFERENCES_FILE_BYTES = 4_096;
 
 async function readStoredDevicePreferences(filePath: string): Promise<DevicePreferences | null> {
-  const source = await readBoundedUtf8File(filePath, MAX_DEVICE_PREFERENCES_FILE_BYTES);
+  const source = await readBoundedUtf8File(filePath, MAX_DEVICE_PREFERENCES_FILE_BYTES, {
+    rejectReadErrors: true,
+  });
   if (source === null) return null;
   try {
     const parsed = devicePreferencesSchema.safeParse(JSON.parse(source) as unknown);
@@ -23,7 +25,10 @@ async function readStoredDevicePreferences(filePath: string): Promise<DevicePref
   }
 }
 
-/** Versioned, bounded, atomic storage for non-secret device preferences. */
+/**
+ * Versioned, bounded, atomic storage for non-secret device preferences. Missing or invalid files
+ * use defaults; read failures reject initialization so a partial update cannot replace unread data.
+ */
 export class DevicePreferencesStore {
   readonly #filePath: string;
   readonly #syncDirectory: SyncDirectory;
