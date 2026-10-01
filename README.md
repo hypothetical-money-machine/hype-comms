@@ -39,6 +39,12 @@ integrations       Separately distributed first-party platform adapters
 docs               Operational runbooks and showcase assets
 ```
 
+[WorkspaceRepository](apps/server/src/modules/workspace/repository.ts) is a delegating facade.
+The task, message, conversation, attachment, and sync operation modules own their database
+transactions and pass the same `PoolClient` to query and event helpers. `WorkspaceRetention`
+and `SystemChannelSeeder` own background cleanup and built-in publishing. System acceptance
+audits run after the database commit.
+
 ## Prerequisites for development
 
 - Node.js 24.18.x
