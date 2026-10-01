@@ -508,8 +508,10 @@ describe("conversation history loading", () => {
     expect(screen.queryByText("Loading conversation history…")).toBeNull();
 
     request.mockResolvedValueOnce({
+      snapshotPosition: testPosition("10"),
       messages: [launchMessage],
       attachments: [],
+      reactions: [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: null,
@@ -937,8 +939,10 @@ describe("main composer focus on conversation changes", () => {
     async ({ input, expectedScrollTop }) => {
       const harness = await renderWorkspace();
       const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+        snapshotPosition: testPosition("10"),
         messages: [launchMessage],
         attachments: [],
+        reactions: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: "older-launch",
@@ -978,8 +982,10 @@ describe("main composer focus on conversation changes", () => {
         bounds.mockReturnValue(new DOMRect(0, 600, 500, 30));
         await act(async () =>
           resolveHistory({
+            snapshotPosition: testPosition("10"),
             messages: [threadRoot, launchMessage],
             attachments: [],
+            reactions: [],
             threadSummaries: [],
             threadsSupported: true,
             nextCursor: null,
@@ -998,8 +1004,10 @@ describe("main composer focus on conversation changes", () => {
   it("keeps the reading position after a search jump when older history loads, but permits a new jump", async () => {
     const harness = await renderWorkspace();
     const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+      snapshotPosition: testPosition("10"),
       messages: [launchMessage],
       attachments: [],
+      reactions: [],
       threadSummaries: [],
       threadsSupported: true,
       nextCursor: "older-launch",
@@ -1023,8 +1031,10 @@ describe("main composer focus on conversation changes", () => {
     const scroll = vi.spyOn(row, "scrollIntoView");
     try {
       request.mockResolvedValue({
+        snapshotPosition: testPosition("10"),
         messages: [threadRoot, launchMessage],
         attachments: [],
+        reactions: [],
         threadSummaries: [],
         threadsSupported: true,
         nextCursor: null,
