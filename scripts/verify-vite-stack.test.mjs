@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EXPECTED_VITE_VERSION, validateViteStackLockfile } from "./verify-vite-stack.mjs";
+import {
+  EXPECTED_VITE_VERSION,
+  EXPECTED_ZOD_VERSION,
+  validateViteStackLockfile,
+  validateZodStackLockfile,
+} from "./verify-vite-stack.mjs";
 
 function compatibleLockfile() {
   return {
@@ -26,6 +31,9 @@ function compatibleLockfile() {
           vite: "^6.0.0 || ^7.0.0 || ^8.0.0",
         },
         version: "4.1.10",
+      },
+      "node_modules/zod": {
+        version: EXPECTED_ZOD_VERSION,
       },
     },
   };
@@ -66,5 +74,27 @@ test("rejects a peer range incompatible with the selected Vite", () => {
   assert.throws(
     () => validateViteStackLockfile(lockfile),
     /legacy-vite-plugin declares vite \^7\.0\.0/u,
+  );
+});
+
+test("accepts one zod version", () => {
+  assert.deepEqual(validateZodStackLockfile(compatibleLockfile()), {
+    zodPath: "node_modules/zod",
+    zodVersion: EXPECTED_ZOD_VERSION,
+  });
+});
+
+test("rejects duplicate zod installations", () => {
+  const lockfile = compatibleLockfile();
+  lockfile.packages["apps/desktop/node_modules/zod"] = {
+    version: "3.25.0",
+  };
+
+  assert.throws(
+    () => validateZodStackLockfile(lockfile),
+    new RegExp(
+      `Expected one zod ${EXPECTED_ZOD_VERSION.replaceAll(".", "\\.")} installation.*3\\.25\\.0`,
+      "u",
+    ),
   );
 });

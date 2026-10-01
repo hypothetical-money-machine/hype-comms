@@ -89,7 +89,7 @@ export function ThemeSelector({ theme, designButtonRef, onDesign }: ThemeSelecto
         >
           <span>
             <strong>Design a theme</strong>
-            <small>Choose a foundation and make the accent your own.</small>
+            <small>Choose a light or dark theme and an accent color.</small>
           </span>
           <b aria-hidden="true">›</b>
         </button>
