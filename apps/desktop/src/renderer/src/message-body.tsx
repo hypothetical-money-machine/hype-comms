@@ -126,7 +126,7 @@ const ChannelReferencesEnabledContext = createContext(true);
 interface MessageReferences {
   readonly channels: readonly ChannelReferenceTarget[];
   readonly members: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }
 
 const EMPTY_CHANNELS: readonly ChannelReferenceTarget[] = [];

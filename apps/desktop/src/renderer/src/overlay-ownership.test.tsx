@@ -11,15 +11,19 @@ function Dialog({
   name,
   close,
   children,
+  modal = true,
+  focusKey = 0,
 }: {
   name: string;
   close: () => void;
   children?: React.ReactNode;
+  modal?: boolean;
+  focusKey?: number;
 }) {
   const container = useRef<HTMLElement>(null);
-  useOwnedOverlay(true, { container, onEscape: close });
+  useOwnedOverlay(true, { container, onEscape: close, trapFocus: modal, focusKey });
   return (
-    <section ref={container} role="dialog" aria-label={name}>
+    <section ref={container} role={modal ? "dialog" : "region"} aria-label={name}>
       <button onClick={close}>Close {name}</button>
       {children}
     </section>
@@ -52,7 +56,137 @@ function NestedDialogs() {
   );
 }
 
+function MixedOverlays({
+  inside = false,
+  nested = false,
+  focusKey = 0,
+}: {
+  inside?: boolean;
+  nested?: boolean;
+  focusKey?: number;
+}) {
+  const [nonmodal, setNonmodal] = useState(false);
+  const [child, setChild] = useState(false);
+  const openNonmodal = <button onClick={() => setNonmodal(true)}>Open nonmodal</button>;
+  const nonmodalDialog = nonmodal && (
+    <Dialog name="nonmodal" modal={false} focusKey={focusKey} close={() => setNonmodal(false)}>
+      <button>Last nonmodal control</button>
+    </Dialog>
+  );
+  return (
+    <OverlayProvider>
+      <button>Background before</button>
+      <Dialog name="modal" close={() => undefined}>
+        {nested ? <button onClick={() => setChild(true)}>Open child</button> : openNonmodal}
+        {inside && nonmodalDialog}
+        {child && (
+          <Dialog name="child" close={() => setChild(false)}>
+            {openNonmodal}
+          </Dialog>
+        )}
+      </Dialog>
+      {!inside && nonmodalDialog}
+      <button>Background after</button>
+    </OverlayProvider>
+  );
+}
+
 describe("overlay ownership", () => {
+  it.each([false, true])(
+    "keeps Tab in the remaining modal when a later nonmodal is inside=%s",
+    (inside) => {
+      render(<MixedOverlays inside={inside} />);
+      const opener = screen.getByRole("button", { name: "Open nonmodal" });
+      opener.focus();
+      fireEvent.click(opener);
+      const first = screen.getByRole("button", { name: "Close modal" });
+      const last = inside ? screen.getByRole("button", { name: "Last nonmodal control" }) : opener;
+      last.focus();
+      expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(false);
+      expect(document.activeElement).toBe(first);
+      expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
+      expect(document.activeElement).toBe(last);
+      if (!inside) {
+        const outside = screen.getByRole("button", { name: "Close nonmodal" });
+        outside.focus();
+        expect(fireEvent.keyDown(outside, { key: "Tab" })).toBe(false);
+        expect(document.activeElement).toBe(first);
+        outside.focus();
+        expect(fireEvent.keyDown(outside, { key: "Tab", shiftKey: true })).toBe(false);
+        expect(document.activeElement).toBe(last);
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "fences a later nonmodal's initial target to the modal when inside=%s",
+    (inside) => {
+      render(<MixedOverlays inside={inside} />);
+      const opener = screen.getByRole("button", { name: "Open nonmodal" });
+      opener.focus();
+      fireEvent.click(opener);
+      const nonmodal = screen.getByRole("button", { name: "Close nonmodal" });
+      expect(document.activeElement).toBe(inside ? nonmodal : opener);
+      expect(screen.getByRole("dialog", { name: "modal" }).contains(document.activeElement)).toBe(
+        true,
+      );
+    },
+  );
+
+  it("gives Tab to the highest modal and Escape to the newer nonmodal", async () => {
+    render(<MixedOverlays nested />);
+    const childOpener = screen.getByRole("button", { name: "Open child" });
+    childOpener.focus();
+    fireEvent.click(childOpener);
+    const nonmodalOpener = screen.getByRole("button", { name: "Open nonmodal" });
+    nonmodalOpener.focus();
+    fireEvent.click(nonmodalOpener);
+    const first = screen.getByRole("button", { name: "Close child" });
+    expect(document.activeElement).toBe(nonmodalOpener);
+    expect(fireEvent.keyDown(nonmodalOpener, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(first);
+    expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(nonmodalOpener);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("region", { name: "nonmodal" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "child" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "child" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(childOpener));
+    const parentFirst = screen.getByRole("button", { name: "Close modal" });
+    expect(fireEvent.keyDown(childOpener, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(parentFirst);
+  });
+
+  it("fences initial focus when a later nonmodal reapplies its focus key", () => {
+    const view = render(<MixedOverlays focusKey={0} />);
+    const opener = screen.getByRole("button", { name: "Open nonmodal" });
+    opener.focus();
+    fireEvent.click(opener);
+    view.rerender(<MixedOverlays focusKey={1} />);
+    expect(document.activeElement).toBe(opener);
+    expect(screen.getByRole("dialog", { name: "modal" }).contains(document.activeElement)).toBe(
+      true,
+    );
+  });
+
+  it("leaves standalone nonmodal Tab behavior and initial focus unchanged", () => {
+    render(
+      <OverlayProvider>
+        <button>Background before</button>
+        <Dialog name="nonmodal" modal={false} close={() => undefined}>
+          <button>Last nonmodal control</button>
+        </Dialog>
+        <button>Background after</button>
+      </OverlayProvider>,
+    );
+    const first = screen.getByRole("button", { name: "Close nonmodal" });
+    const last = screen.getByRole("button", { name: "Last nonmodal control" });
+    expect(document.activeElement).toBe(first);
+    expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(true);
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(true);
+  });
+
   it("gives Escape and Tab to the top dialog and restores through nested openers", async () => {
     render(<NestedDialogs />);
     const opener = screen.getByRole("button", { name: "Open parent" });
