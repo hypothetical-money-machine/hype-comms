@@ -356,6 +356,49 @@ describe("seedSystemChannels", () => {
     );
   });
 
+  it("ranks and pages built-in channel search results in the canonical protocol", async () => {
+    const repository = repositoryFor(true);
+    await repository.seedSystemChannels([definition]);
+    const systemChannel = await channelRow();
+    const ordinaryChannel = await repository.createChannel(owner, {
+      name: "Release discussion",
+      slug: "release-discussion",
+      topic: null,
+      access: "workspace",
+    });
+    const ordinary = await repository.sendMessage(
+      owner,
+      ordinaryChannel.conversation.conversation.id,
+      {
+        threadRootId: null,
+        body: "release",
+        bodyFormat: "hype_comms_markdown_v1",
+        clientMessageId: randomUUID(),
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    );
+
+    const stored = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE conversation_id = $1`,
+      [systemChannel?.id],
+    );
+    const capable = await repository.searchMessages(member, "release", undefined, 50);
+    expect(new Set(capable.results.map(({ message }) => message.id))).toEqual(
+      new Set([ordinary.message.id, ...stored.rows.map(({ id }) => id)]),
+    );
+    expect(capable.results).toHaveLength(3);
+    const pagedIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.searchMessages(member, "release", cursor, 1);
+      expect(page.results).toHaveLength(1);
+      pagedIds.push(page.results[0]!.message.id);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(pagedIds).toEqual(capable.results.map(({ message }) => message.id));
+  });
+
   it("includes built-in channel events in canonical sync", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);

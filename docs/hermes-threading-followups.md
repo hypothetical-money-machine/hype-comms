@@ -116,18 +116,18 @@ mirroring Hermes's own matching rules, because a posted Hype Comms message canno
 here. Worth remembering when the pin moves: a change to how the gateway seals segments cannot
 reintroduce this, but a change to the marker set can, so the two lists have to move together.
 
-## What the follow-up switch costs
+## What ambient channel turns cost
 
-`HYPE_COMMS_THREAD_FOLLOWUPS` defaults to off, so nothing about the shipped trigger policy changes
-until an operator turns it on.
+The adapter now sends authorized channel messages to Hermes without requiring a mention, including
+top-level messages and replies in threads. `HYPE_COMMS_THREAD_FOLLOWUPS` has been removed; the model
+decides whether a useful answer is warranted and returns `NO_REPLY` when it should stay quiet.
 
-That default is deliberate. Deciding to stay quiet is a full inference turn, so a busy thread spends
-tokens and rate limit for no visible output, and there is no cheaper filter available — the decision
-is the model's by design. Turning it on also narrows a stated promise: unmentioned messages in
-participated threads now do reach Hermes and stay in its transcript, so "not added silently to Hermes
-context" stops holding for threads the agent has already joined. The allowlist still governs who may
-wake the agent, so that protection is unaffected. The README states the narrowed promise directly
-rather than leaving it implied.
+Deciding to stay quiet is a full inference turn, so busy channels spend tokens and rate limit even
+when no reply is posted. Unmentioned messages enter the conversation's Hermes transcript after
+authorization and fresh context validation. The allowlist still governs who may wake the agent.
+Ambient turns use the bounded FIFO and durable recovery anchors, while explicit mentions and direct
+messages keep Hermes's existing busy-input policy. Hype turns suppress progress, interim commentary,
+heartbeats, and streaming; useful final answers remain deliverable.
 
 ## Session scoping
 
@@ -138,13 +138,10 @@ start against a gateway that has both per-user group sessions and per-user threa
 a synthetic thread lane for channels so sessions key per conversation while keeping the real author
 ID for authorization and attribution.
 
-The coupling to follow-ups is the reason to keep watching this. Today one shared transcript per
-conversation stays clean because the agent only sees messages addressed to it. With follow-ups on,
-every side conversation in every thread it has touched enters that same transcript, most of it turns
-the model chose not to answer, and nothing dedupes or collapses repeated silent turns — the
-transcript grows linearly until compression fires. If follow-ups become the default, per-thread
-isolation is the thing to revisit, and it should be revisited as part of that change rather than
-before it.
+Ambient delivery now adds authorized side conversations to that shared transcript, including turns
+the model chooses not to answer. Repeated silent turns are not collapsed, so the transcript grows
+until compression fires. Per-thread isolation remains a follow-up to evaluate with this broader
+trigger policy.
 
 ## Answered while implementing
 

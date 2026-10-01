@@ -1,9 +1,11 @@
-import type {
-  ChannelMode,
-  ChannelMembershipMutationResponse,
-  ChannelMembersResponse,
-  PresenceState,
-  User,
+import {
+  compareSyncPositions,
+  type ChannelMode,
+  type ChannelMembershipMutationResponse,
+  type ChannelMembersResponse,
+  type PresenceState,
+  type SyncPosition,
+  type User,
 } from "@hype-comms/contracts";
 import {
   useEffect,
@@ -35,6 +37,7 @@ interface ChannelPeopleDialogProps extends PeopleDirectorySharedProps {
   readonly channelName: string;
   readonly channelMode?: ChannelMode | null;
   readonly conversationId: string;
+  readonly syncCursor: SyncPosition;
   readonly load: (conversationId: string) => Promise<ChannelMembersResponse>;
   readonly upsert: (
     conversationId: string,
@@ -56,6 +59,7 @@ export type ChannelMembersDialogProps = ChannelPeopleDialogProps | WorkspacePeop
 interface DirectoryEntry {
   readonly user: User;
   readonly role: "owner" | "member" | null;
+  readonly pending: boolean;
 }
 
 const FOCUSABLE_SELECTOR =
@@ -75,6 +79,20 @@ function kindLabel(kind: User["kind"]): string | null {
 
 function canMessage(user: User): boolean {
   return user.kind !== "bot";
+}
+
+function memberOptionLabel(member: User): string {
+  return member.title !== null && member.title !== undefined
+    ? `${member.displayName} · ${member.title}`
+    : member.displayName;
+}
+
+function matchesQuery(member: User, query: string): boolean {
+  return (
+    member.displayName.toLowerCase().includes(query) ||
+    member.username.toLowerCase().includes(query) ||
+    (member.title ?? "").toLowerCase().includes(query)
+  );
 }
 
 function DirectoryIdentity({
@@ -107,6 +125,17 @@ function DirectoryIdentity({
 }
 
 export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
+  const conversationId = props.source === "channel" ? props.conversationId : "workspace";
+  const replayEpoch = props.source === "channel" ? props.syncCursor.epoch : "workspace";
+  return (
+    <ChannelMembersDialogContent
+      key={`${props.source}:${props.currentUserId}:${conversationId}:${replayEpoch}`}
+      {...props}
+    />
+  );
+}
+
+function ChannelMembersDialogContent(props: ChannelMembersDialogProps) {
   const {
     currentUserId,
     workspaceMembers,
@@ -118,10 +147,20 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     onOpenChange,
   } = props;
   const dialogRef = useRef<HTMLElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [details, setDetails] = useState<ChannelMembersResponse | null>(null);
-  const [selectedUserId, setSelectedUserId] = useState("");
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(new Set());
+  const [pendingAddIds, setPendingAddIds] = useState<ReadonlySet<string>>(new Set());
+  const [busyUserIds, setBusyUserIds] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState("");
+  const snapshotSeqRef = useRef(0);
+  const appliedSeqRef = useRef(0);
+  const pendingAddIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const busyUserIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const mutationEpochRef = useRef(0);
+  const mutationCursorRef = useRef<SyncPosition | null>(null);
+  const requestOwnerRef = useRef<object | null>(null);
   const isChannel = source === "channel";
   const conversationId = source === "channel" ? props.conversationId : null;
   const isAnnouncementChannel = source === "channel" && props.channelMode === "announcement";
@@ -129,17 +168,82 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const upsert = source === "channel" ? props.upsert : null;
   const remove = source === "channel" ? props.remove : null;
 
+  useLayoutEffect(() => {
+    const owner = {};
+    requestOwnerRef.current = owner;
+    return () => {
+      if (requestOwnerRef.current === owner) requestOwnerRef.current = null;
+    };
+  }, []);
+
   useOpenChangeNotifier(true, onOpenChange);
+
+  const isRequestCurrent = (owner: object | null): boolean =>
+    owner !== null && requestOwnerRef.current === owner;
+
+  const nextSnapshotSeq = (): number => {
+    snapshotSeqRef.current += 1;
+    return snapshotSeqRef.current;
+  };
+
+  const setPendingAdds = (ids: ReadonlySet<string>): void => {
+    pendingAddIdsRef.current = ids;
+    setPendingAddIds(ids);
+  };
+
+  const hasPendingMutation = (): boolean =>
+    pendingAddIdsRef.current.size > 0 || busyUserIdsRef.current.size > 0;
+
+  const applySnapshot = (
+    seq: number,
+    snapshot: ChannelMembersResponse,
+    syncCursor?: SyncPosition,
+    mutationEpoch?: number,
+  ): void => {
+    if (syncCursor !== undefined) {
+      if (props.source !== "channel" || syncCursor.epoch !== props.syncCursor.epoch) return;
+      if (
+        mutationCursorRef.current !== null &&
+        compareSyncPositions(syncCursor, mutationCursorRef.current) <= 0
+      ) {
+        return;
+      }
+      mutationCursorRef.current = syncCursor;
+    } else if (
+      seq <= appliedSeqRef.current ||
+      mutationEpoch !== mutationEpochRef.current ||
+      hasPendingMutation()
+    ) {
+      return;
+    }
+    appliedSeqRef.current = Math.max(appliedSeqRef.current, seq);
+    const pending = pendingAddIdsRef.current;
+    if (pending.size === 0) {
+      setDetails(snapshot);
+      return;
+    }
+    const present = new Set(snapshot.members.map((member) => member.user.id));
+    const joinedAt = new Date().toISOString();
+    const optimistic = workspaceMembers
+      .filter((member) => pending.has(member.id) && !present.has(member.id))
+      .map((member) => ({ user: member, role: "member" as const, joinedAt }));
+    setDetails({ ...snapshot, members: [...snapshot.members, ...optimistic] });
+  };
 
   useEffect(() => {
     if (load === null || conversationId === null) return;
+    const owner = requestOwnerRef.current;
     let active = true;
+    const seq = nextSnapshotSeq();
+    const mutationEpoch = mutationEpochRef.current;
     void load(conversationId)
       .then((response) => {
-        if (active) setDetails(response);
+        if (active && isRequestCurrent(owner)) {
+          applySnapshot(seq, response, undefined, mutationEpoch);
+        }
       })
       .catch((loadError: unknown) => {
-        if (active) setError(errorMessage(loadError));
+        if (active && isRequestCurrent(owner)) setError(errorMessage(loadError));
       });
     return () => {
       active = false;
@@ -148,11 +252,11 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && busyUserId === null) onClose();
+      if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [busyUserId, onClose]);
+  }, [onClose]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -191,45 +295,164 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     const current = new Set(details?.members.map((member) => member.user.id) ?? []);
     return workspaceMembers.filter((member) => !current.has(member.id));
   }, [details, workspaceMembers]);
-  const effectiveSelectedUserId = availableMembers.some((member) => member.id === selectedUserId)
-    ? selectedUserId
-    : (availableMembers[0]?.id ?? "");
+
+  const filteredMembers = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (query === "") return availableMembers;
+    return availableMembers.filter((member) => matchesQuery(member, query));
+  }, [availableMembers, searchQuery]);
+
+  const checkedAvailableIds = useMemo(
+    () => availableMembers.filter((member) => checkedIds.has(member.id)).map((member) => member.id),
+    [availableMembers, checkedIds],
+  );
 
   const directory: readonly DirectoryEntry[] | null = isChannel
     ? details === null
       ? null
-      : details.members.map((member) => ({ user: member.user, role: member.role }))
-    : workspaceMembers.map((user) => ({ user, role: null }));
+      : details.members.map((member) => ({
+          user: member.user,
+          role: member.role,
+          pending: pendingAddIds.has(member.user.id),
+        }))
+    : workspaceMembers.map((user) => ({ user, role: null, pending: false }));
   const showChannelRole = details?.access === "members";
   const canManageChannel = details?.canManage === true && details.access === "members";
   const loadingChannel = isChannel && details === null && error === "";
+  const anyBusy = busyUserIds.size > 0 || pendingAddIds.size > 0;
+
+  const toggleChecked = (userId: string): void => {
+    setCheckedIds((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+
+  const reconcileFromServer = async (): Promise<void> => {
+    if (load === null || conversationId === null || hasPendingMutation()) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
+    const seq = nextSnapshotSeq();
+    const mutationEpoch = mutationEpochRef.current;
+    try {
+      const response = await load(conversationId);
+      if (isRequestCurrent(owner)) applySnapshot(seq, response, undefined, mutationEpoch);
+    } catch {
+      // Keep the reconciled local state when the refresh fails.
+    }
+  };
+
+  const runBatchAdd = async (ids: readonly string[]): Promise<void> => {
+    if (upsert === null || conversationId === null) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
+    const results = await Promise.allSettled(
+      ids.map(async (userId) => {
+        const seq = nextSnapshotSeq();
+        const response = await upsert(conversationId, userId, "member");
+        if (isRequestCurrent(owner)) {
+          applySnapshot(seq, response.channelMembers, response.syncCursor);
+        }
+      }),
+    );
+    if (!isRequestCurrent(owner)) return;
+    const failedIds = ids.filter((_, index) => results.at(index)?.status === "rejected");
+    const nextPending = new Set(pendingAddIdsRef.current);
+    for (const userId of ids) nextPending.delete(userId);
+    setPendingAdds(nextPending);
+    if (failedIds.length > 0) {
+      const failed = new Set(failedIds);
+      setDetails((current) =>
+        current === null
+          ? current
+          : {
+              ...current,
+              members: current.members.filter((member) => !failed.has(member.user.id)),
+            },
+      );
+      const names = failedIds.map(
+        (userId) => workspaceMembers.find((member) => member.id === userId)?.displayName ?? userId,
+      );
+      const firstRejection = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      setError(`Could not add ${names.join(", ")}: ${errorMessage(firstRejection?.reason)}`);
+    }
+    await reconcileFromServer();
+  };
+
+  const addCheckedMembers = (): void => {
+    if (upsert === null || conversationId === null) return;
+    const ids = checkedAvailableIds.filter(
+      (userId) => !pendingAddIdsRef.current.has(userId) && !busyUserIdsRef.current.has(userId),
+    );
+    if (ids.length === 0) return;
+    mutationEpochRef.current += 1;
+    setCheckedIds(new Set());
+    setError("");
+    const nextPending = new Set(pendingAddIdsRef.current);
+    for (const userId of ids) nextPending.add(userId);
+    setPendingAdds(nextPending);
+    const joinedAt = new Date().toISOString();
+    setDetails((current) => {
+      if (current === null) return current;
+      const present = new Set(current.members.map((member) => member.user.id));
+      const added = workspaceMembers
+        .filter((member) => ids.includes(member.id) && !present.has(member.id))
+        .map((member) => ({ user: member, role: "member" as const, joinedAt }));
+      return { ...current, members: [...current.members, ...added] };
+    });
+    searchInputRef.current?.focus();
+    void runBatchAdd(ids);
+  };
 
   const mutate = async (
     userId: string,
     operation: () => Promise<ChannelMembershipMutationResponse>,
   ): Promise<void> => {
-    setBusyUserId(userId);
+    if (busyUserIdsRef.current.has(userId) || pendingAddIdsRef.current.has(userId)) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
+    mutationEpochRef.current += 1;
+    const busy = new Set(busyUserIdsRef.current);
+    busy.add(userId);
+    busyUserIdsRef.current = busy;
+    setBusyUserIds(busy);
     setError("");
+    const seq = nextSnapshotSeq();
     try {
-      setDetails((await operation()).channelMembers);
+      const response = await operation();
+      if (!isRequestCurrent(owner)) return;
+      applySnapshot(seq, response.channelMembers, response.syncCursor);
     } catch (mutationError) {
-      setError(errorMessage(mutationError));
+      if (isRequestCurrent(owner)) setError(errorMessage(mutationError));
     } finally {
-      setBusyUserId(null);
+      if (isRequestCurrent(owner)) {
+        const remaining = new Set(busyUserIdsRef.current);
+        remaining.delete(userId);
+        busyUserIdsRef.current = remaining;
+        setBusyUserIds(remaining);
+      }
     }
+    if (!isRequestCurrent(owner)) return;
+    // Only the last outstanding mutation reloads. A reload started before another action must
+    // not replace that action's snapshot when it finishes.
+    await reconcileFromServer();
   };
 
   const titleId = isChannel ? "channel-members-title" : "workspace-people-title";
 
   return createPortal(
-    <div className="dialog-backdrop" onMouseDown={busyUserId === null ? onClose : undefined}>
+    <div className="dialog-backdrop" onMouseDown={onClose}>
       <section
         ref={dialogRef}
         className="channel-members-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-busy={busyUserId !== null}
+        aria-busy={anyBusy}
         tabIndex={-1}
         onKeyDown={trapFocus}
         onMouseDown={(event) => event.stopPropagation()}
@@ -242,7 +465,6 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
           <button
             type="button"
             aria-label={isChannel ? "Close channel access" : "Close people"}
-            disabled={busyUserId !== null}
             onClick={onClose}
           >
             ×
@@ -272,35 +494,59 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
         )}
         {canManageChannel && conversationId !== null && upsert !== null && (
           <div className="channel-member-add">
-            <label htmlFor="channel-member-select">Add a workspace member</label>
-            <div>
-              <select
-                id="channel-member-select"
-                value={effectiveSelectedUserId}
-                disabled={busyUserId !== null || availableMembers.length === 0}
-                onChange={(event) => setSelectedUserId(event.target.value)}
+            <label id="channel-member-add-label" htmlFor="channel-member-search">
+              Add workspace members
+            </label>
+            <input
+              ref={searchInputRef}
+              id="channel-member-search"
+              type="search"
+              placeholder="Search by name, username, or title"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                // Escape in a search field clears the query; only an empty field lets the
+                // keystroke bubble to the document listener that closes the dialog.
+                if (event.key === "Escape" && searchQuery !== "") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setSearchQuery("");
+                }
+              }}
+            />
+            {availableMembers.length === 0 ? (
+              <p className="channel-member-add-empty" role="status">
+                Everyone available is already here
+              </p>
+            ) : filteredMembers.length === 0 ? (
+              <p className="channel-member-add-empty" role="status">
+                No matches
+              </p>
+            ) : (
+              <ul
+                className="channel-member-add-options"
+                role="group"
+                aria-labelledby="channel-member-add-label"
               >
-                {availableMembers.length === 0 ? (
-                  <option value="">Everyone available is already here</option>
-                ) : (
-                  availableMembers.map((member) => (
-                    <option key={member.id} value={member.id}>
-                      {member.displayName}
-                      {member.title !== null && member.title !== undefined
-                        ? ` · ${member.title}`
-                        : ""}
-                    </option>
-                  ))
-                )}
-              </select>
+                {filteredMembers.map((member) => (
+                  <li key={member.id}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={checkedIds.has(member.id)}
+                        onChange={() => toggleChecked(member.id)}
+                      />
+                      <span>{memberOptionLabel(member)}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="channel-member-add-actions">
               <button
                 type="button"
-                disabled={effectiveSelectedUserId === "" || busyUserId !== null}
-                onClick={() =>
-                  void mutate(effectiveSelectedUserId, () =>
-                    upsert(conversationId, effectiveSelectedUserId, "member"),
-                  )
-                }
+                disabled={checkedAvailableIds.length === 0}
+                onClick={addCheckedMembers}
               >
                 Add
               </button>
@@ -312,9 +558,10 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
           <ul className="channel-member-list">
             {directory.map((entry) => {
               const kind = kindLabel(entry.user.kind);
+              const rowBusy = entry.pending || busyUserIds.has(entry.user.id);
               const messageable = canMessage(entry.user);
               const openDirectMessage = (): void => {
-                if (!messageable || busyUserId !== null) return;
+                if (!messageable || rowBusy) return;
                 onMessage(entry.user.id);
               };
               const identity = (
@@ -327,14 +574,21 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
               return (
                 <li
                   key={entry.user.id}
-                  className={messageable ? "channel-member-row messageable" : "channel-member-row"}
+                  className={[
+                    "channel-member-row",
+                    messageable ? "messageable" : "",
+                    entry.pending ? "pending" : "",
+                  ]
+                    .filter((part) => part !== "")
+                    .join(" ")}
+                  aria-busy={entry.pending}
                   onClick={openDirectMessage}
                 >
                   {messageable ? (
                     <button
                       type="button"
                       className="channel-member-open"
-                      disabled={busyUserId !== null}
+                      disabled={rowBusy}
                       onClick={(event) => {
                         event.stopPropagation();
                         openDirectMessage();
@@ -346,7 +600,8 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                     identity
                   )}
                   {kind !== null && <span className="member-kind">{kind}</span>}
-                  {showChannelRole && entry.role !== null && (
+                  {entry.pending && <span className="channel-member-pending">Adding…</span>}
+                  {showChannelRole && entry.role !== null && !entry.pending && (
                     <span className={`channel-role ${entry.role}`}>{entry.role}</span>
                   )}
                   <div
@@ -356,7 +611,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                     {messageable && (
                       <button
                         type="button"
-                        disabled={busyUserId !== null}
+                        disabled={rowBusy}
                         onClick={() => onMessage(entry.user.id)}
                       >
                         Message
@@ -366,11 +621,12 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                       conversationId !== null &&
                       upsert !== null &&
                       remove !== null &&
-                      entry.role !== null && (
+                      entry.role !== null &&
+                      !entry.pending && (
                         <>
                           <button
                             type="button"
-                            disabled={busyUserId !== null}
+                            disabled={rowBusy}
                             onClick={() =>
                               void mutate(entry.user.id, () =>
                                 upsert(
@@ -386,7 +642,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
                           <button
                             className="danger-button"
                             type="button"
-                            disabled={busyUserId !== null}
+                            disabled={rowBusy}
                             onClick={() =>
                               void mutate(entry.user.id, () =>
                                 remove(conversationId, entry.user.id),
@@ -410,7 +666,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
           </p>
         )}
         <footer>
-          <button type="button" disabled={busyUserId !== null} onClick={onClose}>
+          <button type="button" onClick={onClose}>
             Done
           </button>
         </footer>
