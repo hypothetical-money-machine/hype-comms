@@ -1,0 +1,195 @@
+{
+  "run": "https://github.com/hypothetical-money-machine/hype-comms/actions/runs/34697228682",
+  "sourceRevision": "e28770d473a39066c38d86c8d8232cb57849e3ec",
+  "verifiedDownloadedBytes": true,
+  "platforms": [
+    {
+      "packageManifest": {
+        "revision": "e28770d473a39066c38d86c8d8232cb57849e3ec",
+        "desktopVersion": "0.1.37",
+        "platform": "linux",
+        "architecture": "arm64",
+        "signing": "unsigned under existing platform policy",
+        "nativeNotifications": false,
+        "artifacts": [
+          {
+            "name": "hype-comms-0.1.37-linux-amd64.deb",
+            "size": 105281044,
+            "sha256": "e46dd60e0abda57a44d4f9c79d7ad485870b31515d850fe306bc4ab6da1f6466"
+          },
+          {
+            "name": "hype-comms-0.1.37-linux-arm64.AppImage",
+            "size": 133265810,
+            "sha256": "08079cf23771914a44498a1fd964d45a901d28408d89013849eef037693c1764"
+          },
+          {
+            "name": "hype-comms-0.1.37-linux-arm64.deb",
+            "size": 98488340,
+            "sha256": "e1ca55d55ebcab29ad520eddefe8cf0cd6dee060b1fc96838cd1f3e113e5c7e4"
+          },
+          {
+            "name": "hype-comms-0.1.37-linux-x86_64.AppImage",
+            "size": 134814643,
+            "sha256": "3a4e8824869dcdd9a96558d94314a2b0f2f791564120f23aa484601dd0004042"
+          },
+          {
+            "name": "latest-linux-arm64.yml",
+            "size": 562,
+            "sha256": "1d17b482ce19752e59ee6c230d02f37799d495d8b9254ae046f1d6424ef86e45"
+          },
+          {
+            "name": "latest-linux.yml",
+            "size": 565,
+            "sha256": "23a43e6f044d117bfe7f45ea0cc6244a0d141a14ed94e67655f90017d5ddbd63"
+          }
+        ],
+        "publication": "No public feed or GitHub Release was changed by this rehearsal"
+      },
+      "nativeCache": {
+        "platform": "linux",
+        "architecture": "arm64",
+        "backend": "gnome_libsecret",
+        "completedAt": "2026-09-12T13:44:43.465Z",
+        "passed": [
+          "real Chromium IndexedDB",
+          "native OS wrapping",
+          "interrupted upgrade rollback",
+          "original ciphertext and key bytes",
+          "pending work after two process restarts",
+          "idempotent replica reset",
+          "preferences"
+        ],
+        "limits": "Synthetic version-5 database in a private development Electron profile. This does not install a previous production app or exercise its updater or signing identity."
+      }
+    },
+    {
+      "packageManifest": {
+        "revision": "e28770d473a39066c38d86c8d8232cb57849e3ec",
+        "desktopVersion": "0.1.37",
+        "platform": "darwin",
+        "architecture": "arm64",
+        "signing": "Developer ID and notarization verified",
+        "nativeNotifications": true,
+        "artifacts": [
+          {
+            "name": "hype-comms-0.1.37-mac-arm64.dmg",
+            "size": 133621462,
+            "sha256": "d7815470d6f8465559d1d1c8d13a1af8bcef6ca98baaac2bf5a7bc8eb3acbc55"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-arm64.dmg.blockmap",
+            "size": 137013,
+            "sha256": "4d038c4bba6a27a03e13c6f97c893d77074cc0e6734ead61b634dd3f9b64e586"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-arm64.zip",
+            "size": 129839827,
+            "sha256": "d8f665ee90dc4cdd19d7d6a83a4da0d59e00d44a72e4c2283a49a23fe478cc37"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-arm64.zip.blockmap",
+            "size": 134954,
+            "sha256": "06ed5efc67bf4e1f1eb7ff8e045829c16875ed115280f11c8c782f93181c6157"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-x64.dmg",
+            "size": 137441299,
+            "sha256": "292984a4a37863e4b9f2b7fdbad9d2a6b87412926c2865e3042e10752b6aa87f"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-x64.dmg.blockmap",
+            "size": 140665,
+            "sha256": "508b75a9046ee9619d069508efc9d684e04f04ac44049d07504e6ffc19b6eb1c"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-x64.zip",
+            "size": 133687689,
+            "sha256": "5b04ae448f05d471998be088f21383c32e2102a2628cebbe6d937bed4f95476f"
+          },
+          {
+            "name": "hype-comms-0.1.37-mac-x64.zip.blockmap",
+            "size": 140351,
+            "sha256": "00c4eeedc3f2e9a77a627a052e84dcf26573ffb0a65799fa8dbdaab22ea08ee2"
+          },
+          {
+            "name": "latest-mac.yml",
+            "size": 840,
+            "sha256": "975b756f05dfd3962f4fdc23822538bbc2a54df31b4bc7dc76dd5e4953fdf1b4"
+          }
+        ],
+        "publication": "No public feed or GitHub Release was changed by this rehearsal"
+      },
+      "nativeCache": {
+        "platform": "darwin",
+        "architecture": "arm64",
+        "backend": "darwin",
+        "completedAt": "2026-09-12T13:44:51.600Z",
+        "passed": [
+          "real Chromium IndexedDB",
+          "native OS wrapping",
+          "interrupted upgrade rollback",
+          "original ciphertext and key bytes",
+          "pending work after two process restarts",
+          "idempotent replica reset",
+          "preferences"
+        ],
+        "limits": "Synthetic version-5 database in a private development Electron profile. This does not install a previous production app or exercise its updater or signing identity."
+      }
+    },
+    {
+      "packageManifest": {
+        "revision": "e28770d473a39066c38d86c8d8232cb57849e3ec",
+        "desktopVersion": "0.1.37",
+        "platform": "win32",
+        "architecture": "arm64",
+        "signing": "unsigned under existing platform policy",
+        "nativeNotifications": false,
+        "artifacts": [
+          {
+            "name": "hype-comms-0.1.37-win-arm64.exe",
+            "size": 101338344,
+            "sha256": "bc5584e8da0caa737a00b63eb8d2d9d44e8e5bd95714fd4631b5d3ea0960cc54"
+          },
+          {
+            "name": "hype-comms-0.1.37-win-arm64.exe.blockmap",
+            "size": 106290,
+            "sha256": "fc951cd160780d8e4020b75960f5a10853935b552e5acac86986394723ff01eb"
+          },
+          {
+            "name": "hype-comms-0.1.37-win-x64.exe",
+            "size": 105040331,
+            "sha256": "9ce4478482e22473fc84912cb124fb0b01342df9a713778e354bf6cebc378742"
+          },
+          {
+            "name": "hype-comms-0.1.37-win-x64.exe.blockmap",
+            "size": 111447,
+            "sha256": "598496cd32b15c30994970355c23c9290fee477fe6ff0b80cca69f68230d2122"
+          },
+          {
+            "name": "latest.yml",
+            "size": 518,
+            "sha256": "2ed0d3a58cd15998284f1fbf35969d07de20b48cf1b1aaa62ca40036eba0c0c2"
+          }
+        ],
+        "publication": "No public feed or GitHub Release was changed by this rehearsal"
+      },
+      "nativeCache": {
+        "platform": "win32",
+        "architecture": "arm64",
+        "backend": "win32",
+        "completedAt": "2026-09-12T13:48:50.553Z",
+        "passed": [
+          "real Chromium IndexedDB",
+          "native OS wrapping",
+          "interrupted upgrade rollback",
+          "original ciphertext and key bytes",
+          "pending work after two process restarts",
+          "idempotent replica reset",
+          "preferences"
+        ],
+        "limits": "Synthetic version-5 database in a private development Electron profile. This does not install a previous production app or exercise its updater or signing identity."
+      }
+    }
+  ],
+  "limits": "Candidate version0.1.37 is rehearsal-only. No installed production update or public feed changed. Actions artifacts expire after7days."
+}
