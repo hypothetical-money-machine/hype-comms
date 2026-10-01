@@ -908,18 +908,22 @@ export class ChatSession {
       cache: "no-store",
       credentials: "include",
       redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal:
+        init.signal == null
+          ? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          : AbortSignal.any([init.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
     });
   }
 
   /**
    * Ends only the session whose credential the server rejected, checking after queued changes.
-   * Returns false when the response was superseded, so callers can retry instead of requiring login.
+   * Returns false when the response or initiating scope was superseded.
    */
-  markSignedOut(response: Response): Promise<boolean> {
+  markSignedOut(response: Response, isCurrent: () => boolean = () => true): Promise<boolean> {
     const credential = this.#responseCredentials.get(response);
     return this.#runMutation(async () => {
       if (
+        !isCurrent() ||
         response.status !== 401 ||
         credential === undefined ||
         credential.sessionEpoch !== this.#sessionEpoch ||

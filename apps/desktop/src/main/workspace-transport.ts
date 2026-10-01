@@ -194,7 +194,7 @@ const alwaysCurrentRequestScope: RequestScopeGuard = () => undefined;
 export class WorkspaceTransport {
   constructor(
     private readonly apiOrigin: string,
-    private readonly session: ChatSession,
+    private readonly session: Pick<ChatSession, "fetch" | "markSignedOut">,
   ) {}
 
   async #payload(response: Response): Promise<unknown> {

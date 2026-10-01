@@ -1,3 +1,6 @@
+import { deferred } from "./test-support/deferred";
+import { scopedWorkspaceSession } from "./scoped-workspace-session";
+import { OwnedWorkspaceSession } from "./workspace-session-owner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -1310,5 +1313,78 @@ describe("describeNetworkError", () => {
     const second = new Error("second", { cause: first });
     Object.defineProperty(first, "cause", { value: second });
     expect(describeNetworkError(first)).toBeNull();
+  });
+});
+
+describe("ChatSession request lifetime", () => {
+  it("passes caller cancellation to the actual network request", async () => {
+    const entered = deferred<AbortSignal>();
+    const request: SessionFetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init.signal!;
+        entered.resolve(signal);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    const session = createSession(request);
+    const controller = new AbortController();
+    const response = session.fetch(API_ORIGIN + "/v1/bootstrap", { signal: controller.signal });
+    const signal = await entered.promise;
+    controller.abort(new Error("caller cancelled"));
+    expect(signal.aborted).toBe(true);
+    await expect(response).rejects.toThrow("caller cancelled");
+  });
+
+  it("ignores a queued rejection after its lifetime retires without a credential rotation", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    const session = createSession(
+      async (url) => {
+        if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+        if (url === SESSION_REFRESH_URL) {
+          entered.resolve();
+          await release.promise;
+          return emptyResponse(503);
+        }
+        return emptyResponse(401);
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+    const lifetime = new OwnedWorkspaceSession({
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+      generation: 1,
+    });
+    const scoped = scopedWorkspaceSession(session, lifetime);
+    try {
+      await session.restore();
+      const response = await scoped.fetch(API_ORIGIN + "/v1/product");
+      const renewal = session.renewSession();
+      await entered.promise;
+      const oldRejection = scoped.markSignedOut(response);
+      await lifetime.dispose();
+      release.resolve();
+      await renewal;
+      await expect(oldRejection).resolves.toBe(false);
+      expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
+      expect(cookies.removals).toEqual([]);
+      expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+      expect(contexts.session?.userId).toBe(CURRENT_USER.user.id);
+
+      const currentLifetime = new OwnedWorkspaceSession({ ...lifetime.scope, generation: 2 });
+      const current = scopedWorkspaceSession(session, currentLifetime);
+      const currentResponse = await current.fetch(API_ORIGIN + "/v1/product");
+      await expect(current.markSignedOut(currentResponse)).resolves.toBe(true);
+      expect(session.state).toEqual({ status: "signed-out" });
+      expect(cookies.values.has("hype_comms_session")).toBe(false);
+      await currentLifetime.dispose();
+    } finally {
+      release.resolve();
+      session.stop();
+      await lifetime.dispose();
+    }
   });
 });

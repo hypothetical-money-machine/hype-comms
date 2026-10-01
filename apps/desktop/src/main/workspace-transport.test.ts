@@ -25,6 +25,8 @@ import {
 
 import { ChatSession, type SessionCookieStore, type SessionFetch } from "./chat-session";
 import { WorkspaceTransport, WorkspaceRequestError } from "./workspace-transport";
+import { scopedWorkspaceSession } from "./scoped-workspace-session";
+import { OwnedWorkspaceSession } from "./workspace-session-owner";
 
 const API_ORIGIN = "https://chat.example";
 const NOW = "2026-07-24T12:00:00.000Z";
@@ -286,9 +288,14 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
 }
 
 describe("WorkspaceTransport credential rotation", () => {
-  it.each(["sync", "send"] as const)(
-    "keeps %s retryable when its retry is rejected after another credential rotation",
-    async (operation) => {
+  it.each([
+    ["sync", false],
+    ["send", false],
+    ["sync", true],
+    ["send", true],
+  ] as const)(
+    "keeps %s retryable after another credential rotation (session scoped: %s)",
+    async (operation, useScope) => {
       const cookies = new MemoryCookies();
       cookies.values.set("hype_comms_session", "initial-cookie");
       let startFirst!: () => void;
@@ -346,7 +353,15 @@ describe("WorkspaceTransport credential rotation", () => {
             : jsonResponse({ message: THREAD_REPLY, syncCursor: "43" });
         },
       });
-      const transport = new WorkspaceTransport(API_ORIGIN, session);
+      const lifetime = new OwnedWorkspaceSession({
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+        generation: 1,
+      });
+      const transport = new WorkspaceTransport(
+        API_ORIGIN,
+        useScope ? scopedWorkspaceSession(session, lifetime) : session,
+      );
       const attempt = () =>
         operation === "sync" ? transport.sync("41") : transport.send(SEND_OPERATION);
 
@@ -393,13 +408,19 @@ describe("WorkspaceTransport credential rotation", () => {
         finishFirst();
         finishRetry();
         session.stop();
+        await lifetime.dispose();
       }
     },
   );
 
-  it.each(["bootstrap", "channel creation"] as const)(
-    "keeps general %s requests transient when another rotation supersedes the rejected retry",
-    async (operation) => {
+  it.each([
+    ["bootstrap", false],
+    ["channel creation", false],
+    ["bootstrap", true],
+    ["channel creation", true],
+  ] as const)(
+    "keeps general %s transient after a second credential rotation (session scoped: %s)",
+    async (operation, useScope) => {
       const cookies = new MemoryCookies();
       cookies.values.set("hype_comms_session", "initial-cookie");
       let startFirst!: () => void;
@@ -470,7 +491,15 @@ describe("WorkspaceTransport credential rotation", () => {
           return jsonResponse(accepted);
         },
       });
-      const transport = new WorkspaceTransport(API_ORIGIN, session);
+      const lifetime = new OwnedWorkspaceSession({
+        userId: CURRENT_USER.user.id,
+        workspaceId: CURRENT_USER.workspaceId,
+        generation: 1,
+      });
+      const transport = new WorkspaceTransport(
+        API_ORIGIN,
+        useScope ? scopedWorkspaceSession(session, lifetime) : session,
+      );
       const attempt = () =>
         operation === "bootstrap"
           ? transport.bootstrap()
@@ -534,6 +563,7 @@ describe("WorkspaceTransport credential rotation", () => {
         finishFirst();
         finishRetry();
         session.stop();
+        await lifetime.dispose();
       }
     },
   );
