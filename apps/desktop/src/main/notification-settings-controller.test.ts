@@ -1,5 +1,5 @@
 import type { NotificationPreference, NotificationState } from "@hype-comms/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NotificationPreferenceStore } from "./notification-preference-store";
 import { createTemporaryDirectory } from "./test-support/temporary-directory";
@@ -9,6 +9,10 @@ import {
   type NotificationCapabilitySource,
   type NotificationPreferencePersistence,
 } from "./notification-settings-controller";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const DISABLED: NotificationPreference = {
   version: 1,
@@ -209,6 +213,27 @@ describe("NotificationSettingsController", () => {
       nativeSupport: "unsupported",
       osPermission: "unknown",
     });
+  });
+
+  it("isolates listener failures after committing state", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const persistence = new FakePersistence();
+    const controller = createController(persistence);
+    await controller.initialize();
+    const listenerFailure = new Error("renderer closed");
+    controller.subscribe(() => {
+      throw listenerFailure;
+    });
+    const delivered: NotificationState[] = [];
+    controller.subscribe((state) => delivered.push(state));
+
+    await expect(controller.setPreference(ENABLED)).resolves.toMatchObject(ENABLED);
+
+    expect(delivered).toEqual([expect.objectContaining(ENABLED)]);
+    expect(consoleError).toHaveBeenCalledWith(
+      "Notification settings listener failed",
+      listenerFailure,
+    );
   });
 
   it("rejects malformed preferences and new work after disposal", async () => {

@@ -98,8 +98,6 @@ interface ActiveConnection {
   readonly socket: RealtimeSocket;
   readonly pendingReplay: ProductRealtimeEvent[];
   pendingReplayBytes: number;
-  readonly pendingDelivery: { readonly position: SyncPosition; readonly bytes: number }[];
-  pendingDeliveryBytes: number;
   connectionId: string | null;
 }
 
@@ -153,6 +151,8 @@ export class WorkspaceRealtimeClient {
   #scope: RealtimeSessionScope | null = null;
   readonly #nextSessionEpoch: () => number;
   #connection: ActiveConnection | null = null;
+  #pendingDelivery: { readonly position: SyncPosition; readonly bytes: number }[] = [];
+  #pendingDeliveryBytes = 0;
   #ticketEpoch: number | null = null;
   #ticketAbort: AbortController | null = null;
   #timer: ReconnectTimer | null = null;
@@ -352,17 +352,15 @@ export class WorkspaceRealtimeClient {
       return;
     }
     if (compareSyncPositions(input, this.#cursor) > 0) this.#cursor = input;
-    const connection = this.#connection;
     let acknowledgedDelivery = false;
-    if (connection !== null) {
-      while (
-        connection.pendingDelivery[0] !== undefined &&
-        compareSyncPositions(connection.pendingDelivery[0].position, this.#cursor) <= 0
-      ) {
-        connection.pendingDeliveryBytes -= connection.pendingDelivery.shift()!.bytes;
+    this.#pendingDelivery = this.#pendingDelivery.filter((delivery) => {
+      if (compareSyncPositions(delivery.position, this.#position) <= 0) {
+        this.#pendingDeliveryBytes -= delivery.bytes;
         acknowledgedDelivery = true;
+        return false;
       }
-    }
+      return true;
+    });
     if (acknowledgedDelivery) this.#failures = 0;
   }
 
@@ -454,6 +452,8 @@ export class WorkspaceRealtimeClient {
     this.#stopped = true;
     this.#incompatible = false;
     this.#scope = null;
+    this.#pendingDelivery = [];
+    this.#pendingDeliveryBytes = 0;
     this.#consumerDeliveryReady = false;
     this.#windowless = false;
     if (clearRecovery) this.#pendingAuthoritativeRecovery = null;
@@ -469,6 +469,11 @@ export class WorkspaceRealtimeClient {
   }
 
   #beginEpoch(after: SyncPosition, expectedScope: RealtimeSessionScope): void {
+    if (this.#cursor !== null && after.epoch === this.#cursor.epoch) this.acknowledge(after);
+    else {
+      this.#pendingDelivery = [];
+      this.#pendingDeliveryBytes = 0;
+    }
     this.#epoch += 1;
     const epoch = this.#epoch;
     this.#stopped = false;
@@ -556,8 +561,6 @@ export class WorkspaceRealtimeClient {
       socket,
       pendingReplay: [],
       pendingReplayBytes: 0,
-      pendingDelivery: [],
-      pendingDeliveryBytes: 0,
       connectionId: null,
     };
     this.#connection = connection;
@@ -746,14 +749,14 @@ export class WorkspaceRealtimeClient {
     ) {
       const bytes = new TextEncoder().encode(JSON.stringify(event)).byteLength;
       if (
-        connection.pendingDelivery.length >= REALTIME_REPLAY_MAX_EVENTS ||
-        connection.pendingDeliveryBytes + bytes > REALTIME_REPLAY_MAX_BYTES
+        this.#pendingDelivery.length >= REALTIME_REPLAY_MAX_EVENTS ||
+        this.#pendingDeliveryBytes + bytes > REALTIME_REPLAY_MAX_BYTES
       ) {
         this.#requireAuthoritativeRecovery(connection, event.occurredAt);
         return false;
       }
-      connection.pendingDelivery.push({ position: event.position, bytes });
-      connection.pendingDeliveryBytes += bytes;
+      this.#pendingDelivery.push({ position: event.position, bytes });
+      this.#pendingDeliveryBytes += bytes;
     }
     try {
       if (!this.#consumerDeliveryReady || !this.#onEvent({ scope: connection.scope, event })) {
