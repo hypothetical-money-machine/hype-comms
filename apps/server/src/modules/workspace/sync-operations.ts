@@ -47,6 +47,7 @@ interface EventRow extends QueryResultRow {
   occurred_at: Date | string;
   visible: boolean;
   participated_thread_notification: boolean;
+  conversation_human_only: boolean;
 }
 
 interface TicketRow extends QueryResultRow {
@@ -204,6 +205,15 @@ export class WorkspaceSyncOperations {
       }
       const rows = await client.query<EventRow>(
         `SELECT event.*,
+                coalesce(
+                  (
+                    SELECT conversation.human_only
+                      FROM conversations AS conversation
+                     WHERE conversation.id = event.conversation_id
+                       AND conversation.workspace_id = event.workspace_id
+                  ),
+                  false
+                ) AS conversation_human_only,
                 (
                   EXISTS (
                     SELECT 1
@@ -443,7 +453,7 @@ export class WorkspaceSyncOperations {
     return { status: "valid" };
   }
   #mapEvent(row: EventRow): WorkspaceEvent {
-    const event = workspaceEventSchema.parse({
+    let event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
       type: row.event_type,
@@ -456,6 +466,20 @@ export class WorkspaceSyncOperations {
       delivery: "at_least_once",
       payload: row.payload,
     });
+    // Pre-upgrade events stored the members enum for humans-only channels. Keep retained JSON
+    // unchanged while delivering the same access mode as the authoritative conversation snapshot.
+    if (
+      row.conversation_human_only &&
+      (event.type === "channel.created" || event.type === "channel.archived")
+    ) {
+      event = workspaceEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          conversation: { ...event.payload.conversation, access: "humans" },
+        },
+      });
+    }
     if (event.type !== "message.created") return event;
     // Recipient-specific reasons come only from this principal's scoped relation, never shared JSON.
     return workspaceEventSchema.parse({

@@ -3163,6 +3163,66 @@ describe("WorkspaceRepository", () => {
     expect(agentSync.events.some((event) => event.conversationId === conversationId)).toBe(false);
   });
 
+  it("normalizes retained pre-upgrade humans-only channel events without rewriting them", async () => {
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ humansOnlyChannelsEnabled: true }),
+    );
+    const beforeCreate = (await repository.bootstrap(owner)).syncCursor;
+    const created = await repository.createChannel(owner, {
+      name: "Retained people",
+      slug: "retained-people",
+      topic: null,
+      access: "humans",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.archiveChannel(owner, conversationId);
+
+    // The previous server used channel_access, and stripped channelMode before persisting events.
+    await pool.query(
+      `UPDATE sync_events
+          SET payload = jsonb_set(
+            payload #- '{conversation,channelMode}', '{conversation,access}', '"members"'
+          )
+        WHERE conversation_id = $1
+          AND event_type IN ('channel.created', 'channel.archived')`,
+      [conversationId],
+    );
+    const readStored = () =>
+      pool.query<{ payload: { conversation: { access: string; channelMode?: string } } }>(
+        `SELECT payload FROM sync_events WHERE conversation_id = $1
+         AND event_type IN ('channel.created', 'channel.archived')
+         ORDER BY workspace_sequence`,
+        [conversationId],
+      );
+    const storedBefore = await readStored();
+    expect(storedBefore.rows.map((row) => row.payload.conversation.access)).toEqual([
+      "members",
+      "members",
+    ]);
+    for (const row of storedBefore.rows) {
+      expect(row.payload.conversation).not.toHaveProperty("channelMode");
+    }
+
+    const snapshot = await repository.bootstrap(member);
+    expect(
+      snapshot.conversations.find((summary) => summary.conversation.id === conversationId)
+        ?.conversation.access,
+    ).toBe("humans");
+    for (const response of [
+      await repository.sync(member, beforeCreate, 100),
+      await repository.syncPrincipal({ workspaceId, userId: memberId }, beforeCreate, 100),
+    ]) {
+      const events = response.events.filter((event) => event.conversationId === conversationId);
+      expect(events.map((event) => event.type)).toEqual(["channel.created", "channel.archived"]);
+      for (const event of events) {
+        expect(event.payload).toMatchObject({ conversation: { access: "humans" } });
+      }
+      expect(response.nextCursor).toBe(snapshot.syncCursor);
+    }
+    expect((await readStored()).rows).toEqual(storedBefore.rows);
+  });
+
   it("always retains an owner for a member-only channel", async () => {
     const created = await repository.createChannel(owner, {
       name: "Steering",
