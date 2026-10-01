@@ -1350,8 +1350,16 @@ export class WorkspaceRuntime {
   }
 
   async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
-    this.#cancelCollectionLoads("A task mutation superseded the collection read");
     if (!this.#isProjectionCurrent(projection)) return;
+    for (const journal of this.#collectionJournals) {
+      const identity = journal.identity;
+      if (
+        identity.kind === "my_tasks" ||
+        (identity.kind === "tasks" &&
+          tasks.some((task) => task.conversationId === identity.conversationId))
+      )
+        journal.cancel("A task mutation superseded the collection read");
+    }
     const accepted = await projection.cache.upsertTasks(tasks, projection.signal);
     if (!this.#isProjectionCurrent(projection)) return;
     const authorized = accepted.filter((task) =>
@@ -1511,6 +1519,7 @@ export class WorkspaceRuntime {
             };
           },
           (records) => {
+            if (this.#state.selectedConversationId !== conversationId) return;
             const retractedIds = retractedMessageIds(
               this.#state.messages,
               retractReservationMap(this.#retractReservations),
@@ -1528,6 +1537,7 @@ export class WorkspaceRuntime {
           },
         );
         if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        if (this.#state.selectedConversationId !== conversationId) return;
         const next = this.collectionState(identity).nextCursor;
         if (next === null) return;
         if (seen.has(next) || next === cursor)
@@ -1537,14 +1547,20 @@ export class WorkspaceRuntime {
       }
       throw new Error("The collection exceeded local capacity");
     } catch (error) {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({
           conversationFilesError: errorMessage(error, "Could not load shared files"),
         });
       }
       throw error;
     } finally {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({ conversationFilesBusy: false });
       }
     }
@@ -1592,6 +1608,12 @@ export class WorkspaceRuntime {
               ...(cursor === null ? {} : { after: cursor }),
               limit: 200,
             });
+            for (const task of page.tasks) {
+              if (task.workspaceId !== this.#scope?.workspaceId)
+                throw new Error("The workspace task catalog crossed workspace scope");
+              if (task.conversationId !== conversationId)
+                throw new Error("The workspace task catalog crossed conversation scope");
+            }
             if (page.hasMore !== (page.nextCursor !== null))
               throw new Error("The collection has inconsistent pagination");
             return {
@@ -2755,7 +2777,9 @@ export class WorkspaceRuntime {
           collectionStates.set(`tasks:${summary.conversation.id}`, {
             identity: { kind: "tasks", conversationId: summary.conversation.id },
             loaded: true,
-            snapshotPosition: page.snapshotPosition,
+            snapshotPosition:
+              collectionStates.get(`tasks:${summary.conversation.id}`)?.snapshotPosition ??
+              page.snapshotPosition,
             nextCursor: page.nextCursor,
             invalidatedAt: null,
           });
@@ -3679,12 +3703,28 @@ export class WorkspaceRuntime {
         history.messages,
         hydrated.reactions,
         projection.signal,
+        {
+          state: {
+            identity: { kind: "timeline", conversationId },
+            loaded: true,
+            snapshotPosition: history.snapshotPosition,
+            nextCursor: history.nextCursor,
+            invalidatedAt: null,
+          },
+          expectedPosition: this.#syncCursor,
+          requestCursor: null,
+        },
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return false;
+      const collections = await cache.readCollections();
+      if (!this.#isProjectionCurrent(projection, conversationId)) return false;
+      for (const message of history.messages)
+        this.#threadSummaryPositions.set(message.id, history.snapshotPosition);
       const retainedMessages = this.#retainMessages(history.messages);
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#invalidatedThreadSummaryConversationIds.delete(conversationId);
       this.#setState({
+        collections,
         messages: mergeMessages(this.#state.messages, retainedMessages),
         threadSummaries: history.threadsSupported
           ? mergeThreadSummaries(

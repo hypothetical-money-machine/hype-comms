@@ -1610,6 +1610,170 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("keeps later file pages scoped to the selected conversation", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "other"),
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const file: Attachment = {
+      id: "90000000-0000-4000-8000-000000000001",
+      messageId: null,
+      uploadedBy: USER_ID,
+      fileName: "first.txt",
+      contentType: "text/plain",
+      sizeBytes: 3,
+      status: "ready",
+      downloadUrl: "/download/first",
+      createdAt: NOW,
+    };
+    const later = deferred<ConversationFilesResponse>();
+    api.conversationFileResults.push(
+      { files: [file], nextCursor: NEXT_PAGE_CURSOR, hasMore: true },
+      later.promise,
+    );
+    const loadingFirst = runtime.loadConversationFiles(CONVERSATION_ID);
+    await settle(() => api.conversationFileRequests.length === 2, "second file page requested");
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    const otherFile = {
+      ...file,
+      id: "90000000-0000-4000-8000-000000000002",
+      fileName: "other.txt",
+    };
+    api.conversationFileResults.push({ files: [otherFile], nextCursor: null, hasMore: false });
+    await runtime.loadConversationFiles(SECOND_CONVERSATION_ID);
+    later.resolve({
+      files: [{ ...file, id: "90000000-0000-4000-8000-000000000003" }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await loadingFirst;
+    expect(runtime.state.conversationFiles).toEqual([otherFile]);
+    expect(runtime.state.conversationFilesBusy).toBe(false);
+    runtime.stop();
+  });
+
+  it("does not restart an unrelated file fetch when a task mutation commits", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const page = deferred<ConversationFilesResponse>();
+    api.conversationFileResults.push(page.promise);
+    const loading = runtime.loadConversationFiles(CONVERSATION_ID);
+    await settle(() => api.conversationFileRequests.length === 1, "file page requested");
+    api.taskMutationResults.push({ task, syncCursor: testPosition("11") });
+    await runtime.createTask({ conversationId: CONVERSATION_ID, title: task.title });
+    page.resolve({ files: [], nextCursor: null, hasMore: false });
+    await loading;
+    expect(api.conversationFileRequests).toEqual([CONVERSATION_ID]);
+    runtime.stop();
+  });
+
+  it.each([
+    ["workspace", { ...task, workspaceId: OTHER_WORKSPACE_ID }],
+    ["conversation", { ...task, conversationId: SECOND_CONVERSATION_ID }],
+  ] as const)("rejects on-demand task pages crossing %s scope", async (kind, wrongTask) => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    api.conversationTaskResults.push({ tasks: [wrongTask], nextCursor: null, hasMore: false });
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow(
+      `crossed ${kind} scope`,
+    );
+    expect(runtime.state.tasks).toEqual([]);
+    expect((await cache.load()).tasks).toEqual([]);
+    expect(
+      runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }).snapshotPosition,
+    ).toEqual(testPosition("10"));
+    runtime.stop();
+  });
+
+  it("keeps the first task-page position for an eager multi-page catalog", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.conversationTaskResults.push(
+      {
+        snapshotPosition: testPosition("10"),
+        tasks: [catalogTask(0)],
+        nextCursor: NEXT_PAGE_CURSOR,
+        hasMore: true,
+      },
+      {
+        snapshotPosition: testPosition("12"),
+        tasks: [catalogTask(1)],
+        nextCursor: null,
+        hasMore: false,
+      },
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    expect(runtime.state.tasks).toHaveLength(2);
+    expect(
+      runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }),
+    ).toMatchObject({ snapshotPosition: testPosition("10"), nextCursor: null });
+    runtime.stop();
+  });
+
+  it("anchors source-less repair snapshots before queued replies and reactions publish", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const repaired = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [repaired.promise]);
+    const historyCount = api.historyRequests.length;
+    api.bootstrap = bootstrapAt("11");
+    api.emitWorkspaceEvent({
+      ...peerEvent,
+      id: "20000000-0000-4000-8000-000000000098",
+      type: "message.retracted",
+      position: testPosition("11"),
+      entityVersion: 2,
+      payload: { messageId: "20000000-0000-4000-8000-000000000099", deletedAt: NOW },
+    });
+    await settle(() => api.historyRequests.length === historyCount + 1, "repair history requested");
+    api.emitWorkspaceEvent({
+      ...peerEvent,
+      position: testPosition("12"),
+      conversationSequence: threadReply.conversationSequence,
+      payload: { message: threadReply, mentionedUserIds: [] },
+    });
+    api.emitWorkspaceEvent({ ...reactionAddedEvent, position: testPosition("13") });
+    const latestReply: Message = {
+      ...threadReply,
+      id: "20000000-0000-4000-8000-000000000097",
+      clientMessageId: "20000000-0000-4000-8000-000000000096",
+      conversationSequence: "4",
+    };
+    repaired.resolve({
+      snapshotPosition: testPosition("14"),
+      attachments: [],
+      messages: [ownMessage],
+      reactions: [],
+      threadSummaries: [{ threadRootId: OWN_MESSAGE_ID, replyCount: 2, latestReply }],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    await settle(() => api.acknowledged.includes("13"), "queued events acknowledged");
+    expect(runtime.state.threadSummaries[0]?.replyCount).toBe(2);
+    expect(runtime.state.reactions).toEqual([]);
+    expect(
+      runtime.collectionState({ kind: "timeline", conversationId: CONVERSATION_ID })
+        .snapshotPosition,
+    ).toEqual(testPosition("14"));
+    runtime.stop();
+  });
+
   it.each([
     ["20000000-0000-4000-8000-000000000099", 1],
     [THREAD_REPLY_ID, 0],
