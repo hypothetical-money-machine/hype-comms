@@ -39,9 +39,16 @@ const baselinePackageEntries = () =>
 
 const desktopBuildMetadata = (apiOrigin) => Buffer.from(JSON.stringify({ apiOrigin }, null, 2));
 
-test("does not allow bundled Codex packages or executables", () => {
+test("requires the active Claude worker and rejects bundled Codex packages or executables", () => {
   const asarPath = "/tmp/hype-comms/resources/app.asar";
   assert.doesNotThrow(() => verifyPackageEntries(asarPath, baselinePackageEntries()));
+
+  const missingWorker = baselinePackageEntries();
+  missingWorker.delete("/dist/main/claude-acp-worker.js");
+  assert.throws(
+    () => verifyPackageEntries(asarPath, missingWorker),
+    /missing \/dist\/main\/claude-acp-worker\.js/u,
+  );
 
   const bundledPackage = baselinePackageEntries();
   bundledPackage.add("/node_modules/@openai/codex/package.json");
@@ -50,7 +57,12 @@ test("does not allow bundled Codex packages or executables", () => {
     /contains bundled official Codex packages/u,
   );
 
-  for (const executable of ["/vendor/codex", "/vendor/codex.exe"]) {
+  for (const executable of [
+    "/vendor/codex",
+    "/vendor/codex.exe",
+    "/node_modules/.bin/codex.cmd",
+    "/node_modules/.bin/codex.ps1",
+  ]) {
     const bundledExecutable = baselinePackageEntries();
     bundledExecutable.add(executable);
     assert.throws(

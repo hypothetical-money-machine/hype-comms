@@ -1209,17 +1209,6 @@ export class WorkspaceRuntime {
     const targetMessage = summary.lastMessage;
     if (targetMessage === null) return;
 
-    this.#setState({
-      bootstrap: replaceConversation(this.#state.bootstrap, conversationId, (current) => {
-        if (current === undefined) return null;
-        return {
-          ...current,
-          unreadCount: 0,
-          mentionCount: 0,
-        };
-      }),
-    });
-
     this.markConversationReadThrough(conversationId, targetMessage.id);
   }
 
