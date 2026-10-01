@@ -18,6 +18,7 @@ import {
   type AuthCapabilities,
   type ChannelAccess,
   type ChannelMode,
+  type ConversationSummary,
   type ChatSessionState,
   type TimestampFormatPreference,
   type Message,
@@ -39,6 +40,7 @@ import { BrandMark } from "./brand-mark";
 import { ChannelCreatePopover } from "./channel-create-popover";
 import { isBuiltInConversation, missingAuthorName } from "./built-in-channels";
 import { ChannelMembersDialog } from "./channel-members-dialog";
+import { ConversationContextMenu } from "./conversation-context-menu";
 import type { ChannelReferenceTarget } from "./channel-references";
 import { ClientVersion } from "./client-version";
 import { CompactHotzone } from "./compact-hotzone";
@@ -852,6 +854,52 @@ export function App({
   const [threadComposerError, setThreadComposerError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [peopleSource, setPeopleSource] = useState<"workspace" | "channel" | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    conversationId: string;
+    position: { x: number; y: number };
+  } | null>(null);
+  const contextMenuTrigger = useRef<HTMLButtonElement | null>(null);
+
+  const openConversationContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>, conversationId: string): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      contextMenuTrigger.current = event.currentTarget;
+      const rect = event.currentTarget.getBoundingClientRect();
+      const position =
+        event.clientX === 0 && event.clientY === 0
+          ? {
+              x: rect.left + 16,
+              y: rect.bottom,
+            }
+          : { x: event.clientX, y: event.clientY };
+      setContextMenu({
+        conversationId,
+        position,
+      });
+    },
+    [],
+  );
+
+  const closeConversationContextMenu = useCallback((): void => {
+    setContextMenu(null);
+  }, []);
+
+  const activeContextMenuSummary = useMemo((): ConversationSummary | null => {
+    if (contextMenu === null) return null;
+    return (
+      runtimeState.bootstrap?.conversations.find(
+        (summary) => summary.conversation.id === contextMenu.conversationId,
+      ) ?? null
+    );
+  }, [contextMenu, runtimeState.bootstrap]);
+
+  const markConversationAsRead = useCallback(
+    (conversationId: string): void => {
+      runtime.markConversationAsRead(conversationId);
+    },
+    [runtime],
+  );
   const previousSelectedConversationId = useRef<string | null>(runtimeState.selectedConversationId);
   const peopleTrigger = useRef<HTMLButtonElement>(null);
   const channelMembersTrigger = useRef<HTMLButtonElement>(null);
@@ -1149,7 +1197,9 @@ export function App({
   const channelReferences = useMemo<ChannelReferenceTarget[]>(
     () =>
       (bootstrap?.conversations ?? []).flatMap((summary) =>
-        summary.conversation.kind !== "channel" || summary.conversation.slug === null
+        summary.conversation.kind !== "channel" ||
+        isBuiltInConversation(summary.conversation) ||
+        summary.conversation.slug === null
           ? []
           : [{ conversationId: summary.conversation.id, slug: summary.conversation.slug }],
       ),
@@ -2490,6 +2540,9 @@ export function App({
                   type="button"
                   key={summary.conversation.id}
                   onClick={() => selectConversation(summary.conversation.id)}
+                  onContextMenu={(event) =>
+                    openConversationContextMenu(event, summary.conversation.id)
+                  }
                 >
                   <span
                     className="conversation-label conversation-label-channel"
@@ -2534,6 +2587,7 @@ export function App({
               type="button"
               key={summary.conversation.id}
               onClick={() => selectConversation(summary.conversation.id)}
+              onContextMenu={(event) => openConversationContextMenu(event, summary.conversation.id)}
             >
               <span
                 className="conversation-label conversation-label-channel"
@@ -2572,6 +2626,9 @@ export function App({
                 type="button"
                 key={summary.conversation.id}
                 onClick={() => selectConversation(summary.conversation.id)}
+                onContextMenu={(event) =>
+                  openConversationContextMenu(event, summary.conversation.id)
+                }
               >
                 <span
                   className="conversation-label conversation-label-direct-message"
@@ -3269,6 +3326,16 @@ export function App({
           load={loadChannelMembers}
           upsert={upsertChannelMember}
           remove={removeChannelMember}
+        />
+      )}
+      {contextMenu !== null && activeContextMenuSummary !== null && (
+        <ConversationContextMenu
+          conversation={activeContextMenuSummary}
+          position={contextMenu.position}
+          triggerRef={contextMenuTrigger}
+          onClose={closeConversationContextMenu}
+          onMarkAsRead={markConversationAsRead}
+          onOpenChange={chrome.onPopoverOpenChange}
         />
       )}
     </main>

@@ -23,7 +23,7 @@ import {
   type RequestAgentEnrollment,
 } from "@hype-comms/contracts";
 import { escapeIdentifier, Pool, type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { runMigrations } from "../src/db/migrate.js";
@@ -40,9 +40,13 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
+import {
+  describeWithPostgres,
+  resetDatabase,
+  schemaScopedUrl,
+  testDatabaseUrl,
+} from "./helpers/database.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
 const workspaceId = "10000000-0000-4000-8000-000000000003";
@@ -53,12 +57,6 @@ const ownerSessionToken = "o".repeat(43);
 
 class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
-}
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
 }
 
 function ownerActor(
@@ -143,15 +141,32 @@ describeWithPostgres("AgentEnrollmentModule", () => {
       "http://127.0.0.1:3000",
     );
     enrollment = new AgentEnrollmentModule(pool, () => now);
-    await pool.query(`
-      TRUNCATE agent_enrollment_policy_transitions, agent_enrollment_transitions,
-               agent_enrollment_restricted_channels, agent_enrollments, agent_tokens, agents,
-               realtime_tickets, api_idempotency_records, sync_event_audiences, sync_events,
-               conversation_read_cursors, message_mentions, attachments, messages,
-               conversation_memberships, conversations, device_sessions, magic_link_tokens,
-               invitations, workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "agent_enrollment_policy_transitions",
+        "agent_enrollment_transitions",
+        "agent_enrollment_restricted_channels",
+        "agent_enrollments",
+        "agent_tokens",
+        "agents",
+        "realtime_tickets",
+        "api_idempotency_records",
+        "sync_event_audiences",
+        "sync_events",
+        "conversation_read_cursors",
+        "message_mentions",
+        "attachments",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.test', 'owner', 'Owner'),

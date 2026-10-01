@@ -5,12 +5,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import type { Pool } from "pg";
 
 import { messageBodySchema, type CurrentUser, type WorkspaceEvent } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { loadReleaseNoteBulletins } from "../src/modules/system-channels/release-notes.js";
 import {
@@ -22,20 +21,12 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "20000000-0000-4000-8000-000000000001";
 const memberId = "20000000-0000-4000-8000-000000000002";
 const workspaceId = "20000000-0000-4000-8000-000000000004";
 const otherWorkspaceId = "20000000-0000-4000-8000-000000000005";
 const RELEASE_NOTES_SLUG = "hype/release-notes";
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 function identity(
   id: string,
@@ -154,8 +145,7 @@ describe("loadReleaseNoteBulletins", () => {
 });
 
 describeWithPostgres("seedSystemChannels", () => {
-  const schemaName = `system_channels_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let audits: AnnouncementAuditRecord[];
 
@@ -178,21 +168,27 @@ describeWithPostgres("seedSystemChannels", () => {
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "system_channels", poolSize: 8 });
+    pool = schema.pool;
   });
 
   beforeEach(async () => {
     audits = [];
-    await pool.query(`
-      TRUNCATE realtime_tickets, sync_event_audiences, sync_events, system_bulletins,
-               conversation_read_cursors, messages, conversation_memberships, conversations,
-               workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "realtime_tickets",
+        "sync_event_audiences",
+        "sync_events",
+        "system_bulletins",
+        "conversation_read_cursors",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     // Truncating users also removes the publisher migration 0031 installs, so restore it.
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
@@ -219,10 +215,7 @@ describeWithPostgres("seedSystemChannels", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
   });
 
   async function channelRow(workspace = workspaceId) {
@@ -388,6 +381,62 @@ describeWithPostgres("seedSystemChannels", () => {
     expect(legacyList.conversations.map((summary) => summary.conversation.slug)).not.toContain(
       RELEASE_NOTES_SLUG,
     );
+  });
+
+  it("filters built-in channels before ranking search pages for legacy clients", async () => {
+    const repository = repositoryFor(true);
+    await repository.seedSystemChannels([definition]);
+    const systemChannel = await channelRow();
+    const ordinaryChannel = await repository.createChannel(owner, {
+      name: "Release discussion",
+      slug: "release-discussion",
+      topic: null,
+      access: "workspace",
+    });
+    const ordinary = await repository.sendMessage(
+      owner,
+      ordinaryChannel.conversation.conversation.id,
+      {
+        threadRootId: null,
+        body: "release",
+        bodyFormat: "hype_comms_markdown_v1",
+        clientMessageId: randomUUID(),
+        mentionedUserIds: [],
+        attachmentIds: [],
+      },
+    );
+
+    for (const includeSystemChannels of [undefined, false]) {
+      const legacy = await repository.searchMessages(
+        member,
+        "release",
+        undefined,
+        1,
+        true,
+        includeSystemChannels,
+      );
+      expect(legacy.results.map(({ message }) => message.id)).toEqual([ordinary.message.id]);
+      expect(legacy.nextCursor).toBeNull();
+    }
+
+    const stored = await pool.query<{ id: string }>(
+      `SELECT id FROM messages WHERE conversation_id = $1`,
+      [systemChannel?.id],
+    );
+    const capable = await repository.searchMessages(member, "release", undefined, 50, true, true);
+    expect(new Set(capable.results.map(({ message }) => message.id))).toEqual(
+      new Set([ordinary.message.id, ...stored.rows.map(({ id }) => id)]),
+    );
+    expect(capable.results).toHaveLength(3);
+    const pagedIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.searchMessages(member, "release", cursor, 1, true, true);
+      expect(page.results).toHaveLength(1);
+      pagedIds.push(page.results[0]!.message.id);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(pagedIds).toEqual(capable.results.map(({ message }) => message.id));
   });
 
   it("withholds built-in channel events from sync until the client advertises support", async () => {

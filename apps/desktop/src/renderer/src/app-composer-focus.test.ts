@@ -906,7 +906,7 @@ describe("main composer focus on conversation changes", () => {
 
   it("lets the reader scroll while older history is still loading", async () => {
     const harness = await renderWorkspace();
-    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValueOnce({
+    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
       messages: [launchMessage],
       attachments: [],
       threadSummaries: [],
@@ -915,7 +915,11 @@ describe("main composer focus on conversation changes", () => {
     });
     act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
     await screen.findByText(launchMessage.body);
-    await screen.findByRole("button", { name: "Load older messages" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: "Load older messages" }).disabled,
+      ).toBe(false),
+    );
     const row = document.getElementById(`message-${launchMessage.id}`);
     const list = row?.closest<HTMLElement>(".message-list");
     if (row === null || list === null || list === undefined) throw new Error("Missing timeline");
@@ -929,8 +933,7 @@ describe("main composer focus on conversation changes", () => {
     const history = new Promise<MessageHistoryResponse>((resolve) => {
       resolveHistory = resolve;
     });
-    request.mockClear();
-    request.mockReturnValue(history);
+    request.mockClear().mockReturnValue(history);
     try {
       fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
       await waitFor(() => expect(request).toHaveBeenCalled());
@@ -957,7 +960,7 @@ describe("main composer focus on conversation changes", () => {
 
   it("keeps the reading position after a search jump when older history loads, but permits a new jump", async () => {
     const harness = await renderWorkspace();
-    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValueOnce({
+    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
       messages: [launchMessage],
       attachments: [],
       threadSummaries: [],
@@ -973,7 +976,11 @@ describe("main composer focus on conversation changes", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     };
     await openResult();
-    await screen.findByRole("button", { name: "Load older messages" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: "Load older messages" }).disabled,
+      ).toBe(false),
+    );
     const row = document.getElementById(`message-${launchMessage.id}`);
     if (row === null) throw new Error("Search target did not render");
     const scroll = vi.spyOn(row, "scrollIntoView");
