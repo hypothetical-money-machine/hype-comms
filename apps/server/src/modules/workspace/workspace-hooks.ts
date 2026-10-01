@@ -8,8 +8,6 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
-  /** Test hook after search establishes its access and message snapshot. */
-  readonly afterSearchVisibilityRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
