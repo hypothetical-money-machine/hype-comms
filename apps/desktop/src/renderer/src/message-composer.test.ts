@@ -372,6 +372,47 @@ describe("MessageComposer mentions", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it.each(["end", "middle"])(
+    "reveals the inserted mention caret when wrapping below the capped viewport at the %s",
+    (position) => {
+      const member = { ...alex, username: "alexander_with_a_long_username" };
+      const lines = Array.from({ length: 30 }, (_, index) => `Line ${String(index + 1)}`);
+      const mentionLine = position === "end" ? 29 : 5;
+      lines[mentionLine] = "Nearly fills this row @al";
+      const draft = lines.join("\n");
+      renderLiveComposer({ draft, members: [member] });
+      const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+      const overlay = document.querySelector<HTMLDivElement>(".composer-highlight");
+      expect(overlay).not.toBeNull();
+      if (overlay === null) throw new Error("Mention highlight is missing");
+      Object.defineProperties(overlay, {
+        clientHeight: { configurable: true, value: 130 },
+        clientTop: { configurable: true, value: 1 },
+      });
+      vi.spyOn(overlay, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 20, 300, 132));
+      // The inserted username wraps onto the line below the visible band. The real Chromium
+      // comparison uses this same capped composer; happy-dom supplies no text layout.
+      vi.spyOn(Range.prototype, "getBoundingClientRect").mockReturnValue(
+        new DOMRect(10, 150, 0, 20),
+      );
+      const cursor = draft.indexOf("@al") + 3;
+      textbox.setSelectionRange(cursor, cursor);
+      fireEvent.select(textbox);
+      textbox.scrollTop = 40;
+
+      fireEvent.keyDown(textbox, { key: "Tab" });
+
+      const spacer = position === "end" ? " " : "";
+      expect(textbox.value).toContain(`@${member.username}${spacer}`);
+      expect(textbox.selectionStart).toBe(textbox.selectionEnd);
+      expect(textbox.selectionEnd).toBe(
+        draft.indexOf("@al") + member.username.length + 1 + spacer.length,
+      );
+      expect(textbox.scrollTop).toBe(59);
+      expect(overlay.scrollTop).toBe(textbox.scrollTop);
+    },
+  );
+
   it("keeps mention selection ahead of the configured send shortcut", () => {
     const { onDraftChange, onSubmit } = renderLiveComposer({
       platform: "linux",
@@ -495,6 +536,41 @@ describe("MessageComposer formatting", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Bold" }));
     expect(onDraftChange).toHaveBeenLastCalledWith("make it pop");
+  });
+
+  it("keeps the edited lines visible when formatting a capped draft", () => {
+    renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    const contentHeight = 694;
+    const clientHeight = 130;
+    let scrollTop = 0;
+    Object.defineProperties(textbox, {
+      scrollHeight: { configurable: true, value: contentHeight },
+      offsetHeight: { configurable: true, value: 132 },
+      clientHeight: { configurable: true, value: clientHeight },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.min(Math.max(value, 0), contentHeight - clientHeight);
+        },
+      },
+    });
+    const prompt = Array.from(
+      { length: 30 },
+      (_, index) => `Line ${String(index + 1)} for long prompt`,
+    ).join("\n");
+    typeDraft(textbox, prompt);
+    const selectionStart = prompt.indexOf("Line 6");
+    textbox.setSelectionRange(selectionStart, selectionStart + 4);
+    textbox.scrollTop = 60;
+
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+
+    expect(textbox.style.height).toBe("132px");
+    expect(textbox.selectionStart).toBe(selectionStart + 2);
+    expect(textbox.selectionEnd).toBe(selectionStart + 6);
+    expect(textbox.scrollTop).toBe(60);
   });
 
   it("applies bold from the keyboard without sending", () => {

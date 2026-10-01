@@ -3,6 +3,7 @@
 import { homedir } from "node:os";
 
 import { executeCli } from "./cli.js";
+import { EventWriter } from "./output.js";
 
 const exitCode = await executeCli(process.argv.slice(2), {
   env: process.env,
@@ -22,3 +23,12 @@ const exitCode = await executeCli(process.argv.slice(2), {
 });
 
 process.exitCode = exitCode;
+if (EventWriter.isOutputAbandoned(process.stdout)) {
+  // Node's process stdout cannot cancel an active OS pipe write. Watch disposal marks that
+  // blocked output as abandoned; flush the diagnostic stream before forcing bounded shutdown.
+  const deadline = setTimeout(() => process.exit(exitCode), 1_000);
+  process.stderr.write("", () => {
+    clearTimeout(deadline);
+    process.exit(exitCode);
+  });
+}

@@ -1,0 +1,28 @@
+{
+  "version": 3,
+  "cursor": "9999",
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  },
+  "pendingAmbientWakes": {
+    "00000000-0000-4000-8000-000000000500": {
+      "workspaceSequence": "601",
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "500",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z"
+    },
+    "00000000-0000-4000-8000-000000000100": {
+      "workspaceSequence": "602",
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "100",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z"
+    }
+  }
+}

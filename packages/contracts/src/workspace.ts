@@ -22,6 +22,8 @@ import {
   userKindSchema,
   userSchema,
   workspaceSchema,
+  type Message,
+  type Reaction,
 } from "./entities.js";
 import { ATTACHMENTS_PER_MESSAGE_MAX } from "./files.js";
 import { currentPrincipalSchema, currentUserSchema } from "./identity.js";
@@ -454,13 +456,43 @@ export const messageThreadSummarySchema = z
     }
   });
 
+function bundledReactionsSchema() {
+  return z
+    .array(reactionSchema)
+    .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * REACTIONS_PER_MESSAGE_MAX)
+    .refine(
+      (reactions) => new Set(reactions.map((reaction) => reaction.id)).size === reactions.length,
+      "Reaction IDs must be unique",
+    )
+    .refine(
+      (reactions) =>
+        new Set(
+          reactions.map((reaction) => `${reaction.messageId}:${reaction.userId}:${reaction.emoji}`),
+        ).size === reactions.length,
+      "Member reactions must be unique per message and emoji",
+    )
+    .default([]);
+}
+
+function validateBundledReactionScope(
+  reactions: readonly Reaction[],
+  messages: readonly Message[],
+  context: z.RefinementCtx,
+): void {
+  const ids = new Set(messages.map((message) => message.id));
+  for (const [index, reaction] of reactions.entries())
+    if (!ids.has(reaction.messageId))
+      context.addIssue({
+        code: "custom",
+        path: ["reactions", index, "messageId"],
+        message: "Bundled reactions must belong to a message in this page",
+      });
+}
+
 export const messageHistoryResponseSchema = z
   .object({
     snapshotPosition: syncPositionSchema,
-    reactions: z
-      .array(reactionSchema)
-      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * REACTIONS_PER_MESSAGE_MAX)
-      .default([]),
+    reactions: bundledReactionsSchema(),
     messages: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     threadSummaries: z.array(messageThreadSummarySchema).max(MESSAGE_HISTORY_MAX_LIMIT).default([]),
     threadsSupported: z.boolean().default(false),
@@ -472,6 +504,7 @@ export const messageHistoryResponseSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    validateBundledReactionScope(value.reactions, value.messages, context);
     const roots = new Map(value.messages.map((message) => [message.id, message]));
     const summarizedRoots = new Set<string>();
     for (const [index, summary] of value.threadSummaries.entries()) {
@@ -734,10 +767,7 @@ export const agentContextHistoryResponseSchema = z
 export const messageThreadResponseSchema = z
   .object({
     snapshotPosition: syncPositionSchema,
-    reactions: z
-      .array(reactionSchema)
-      .max((MESSAGE_HISTORY_MAX_LIMIT + 1) * REACTIONS_PER_MESSAGE_MAX)
-      .default([]),
+    reactions: bundledReactionsSchema(),
     root: messageSchema,
     replies: z.array(messageSchema).max(MESSAGE_HISTORY_MAX_LIMIT),
     attachments: z
@@ -748,6 +778,7 @@ export const messageThreadResponseSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    validateBundledReactionScope(value.reactions, [value.root, ...value.replies], context);
     if (value.root.threadRootId !== null) {
       context.addIssue({
         code: "custom",
