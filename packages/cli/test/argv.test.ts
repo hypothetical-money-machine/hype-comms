@@ -47,4 +47,25 @@ describe("Node argument parsing with CLI policies", () => {
       json: true,
     });
   });
+  it("preserves an inline dash-prefixed verifier through global and command parsing", () => {
+    const verifier = `--${"A".repeat(41)}`;
+    const global = extractGlobalOptions([
+      "--profile",
+      "owner",
+      "agent-enrollments",
+      "request",
+      "blocked-atlas",
+      `--credential-verifier=${verifier}`,
+      "--json",
+    ]);
+    expect(global.options).toMatchObject({ profile: "owner", json: true });
+    expect(
+      parseCommandArguments(global.args.slice(2), {
+        "credential-verifier": { kind: "string" },
+      }),
+    ).toEqual({
+      positionals: ["blocked-atlas"],
+      options: { "credential-verifier": verifier },
+    });
+  });
 });
