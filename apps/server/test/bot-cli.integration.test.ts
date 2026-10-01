@@ -2,7 +2,7 @@ import { Writable } from "node:stream";
 
 import { botAccessTokenSchema, emailSchema } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { runBotCli, type BotCliOutput } from "../src/modules/bots/cli.js";
 import { BotService } from "../src/modules/bots/service.js";
@@ -10,7 +10,7 @@ import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 class TestOutput {
   stdout = "";
@@ -36,7 +36,7 @@ class NullEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-describeWithPostgres("bot CLI", () => {
+describe("bot CLI", () => {
   let database: TestDatabase;
   let pool: Pool;
   let databaseUrl: string;

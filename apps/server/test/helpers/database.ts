@@ -1,23 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import { describe } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import { runMigrations } from "../../src/db/migrate.js";
 import { createPool } from "../../src/db/pool.js";
 
-/**
- * The Postgres test database URL, when the test host has one configured. Suites that need
- * Postgres should skip via {@link describeWithPostgres} rather than reading this directly.
- */
+/** The configured PostgreSQL parent URL; integration setup validates it before suites run. */
 export const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-
-/**
- * Use in place of `describe` for any suite that needs a live Postgres database. Skips the whole
- * suite when `HYPE_COMMS_TEST_DATABASE_URL` is not set, matching every server test file's
- * previous local `describeWithPostgres` definition.
- */
-export const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 /**
  * Rewrites a Postgres connection URL so that new connections default to the given schema (falling
@@ -50,8 +39,7 @@ export interface CreateTestSchemaOptions {
 
 /**
  * Creates an isolated schema in the shared Postgres test database, points a pool at it, and runs
- * migrations against it. Callers must have already confirmed `testDatabaseUrl` is defined (i.e.
- * this is only invoked inside a `describeWithPostgres` block).
+ * migrations against it. Integration setup requires a test database URL before suites run.
  */
 export async function createTestSchema(options: CreateTestSchemaOptions): Promise<TestSchema> {
   if (testDatabaseUrl === undefined) {

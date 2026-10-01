@@ -3,13 +3,13 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { runMigrations } from "../src/db/migrate.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
-describeWithPostgres("read-only agent attachment migration", () => {
+describe("read-only agent attachment migration", () => {
   it("adds compatibility markers without changing legacy scope arrays", async () => {
     const migrationsDirectory = await mkdtemp(
       path.join(os.tmpdir(), "agent-attachment-migrations-"),

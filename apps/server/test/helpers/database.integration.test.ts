@@ -5,18 +5,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { escapeIdentifier, type Pool } from "pg";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import * as poolModule from "../../src/db/pool.js";
 
-import {
-  createTestSchema,
-  describeWithPostgres,
-  resetDatabase,
-  type TestSchema,
-} from "./database.js";
+import { createTestSchema, resetDatabase, type TestSchema } from "./database.js";
 
-describeWithPostgres("resetDatabase discovery", () => {
+describe("resetDatabase discovery", () => {
   let schema: TestSchema;
 
   beforeAll(async () => {

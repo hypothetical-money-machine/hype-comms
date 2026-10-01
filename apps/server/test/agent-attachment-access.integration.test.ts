@@ -14,7 +14,7 @@ import {
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
@@ -25,7 +25,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore, sha256Hex } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const ownerId = "a1000000-0000-4000-8000-000000000001";
 const agentId = "a1000000-0000-4000-8000-000000000002";
@@ -45,7 +45,7 @@ class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-describeWithPostgres("default agent attachment access", () => {
+describe("default agent attachment access", () => {
   const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
   let database: TestDatabase;
   let pool: Pool;

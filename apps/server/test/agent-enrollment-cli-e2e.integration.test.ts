@@ -16,7 +16,7 @@ import {
   requestAgentEnrollmentSchema,
 } from "@hype-comms/contracts";
 import { type Pool, type QueryResultRow } from "pg";
-import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
+import { describe, afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
 
 import { executeCli } from "../../../packages/cli/src/cli.js";
@@ -35,7 +35,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
@@ -130,7 +130,7 @@ const cliErrorOutputSchema = z
   })
   .strict();
 
-describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API boundary", () => {
+describe("zero-copy Atlas enrollment through the listening CLI/API boundary", () => {
   const temporaryDirectories: string[] = [];
   let database: TestDatabase;
   let pool: Pool;

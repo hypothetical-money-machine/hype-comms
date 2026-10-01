@@ -1,15 +1,15 @@
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
 
 import { IdentityRepository } from "../src/modules/identity/repository.js";
-import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
 const now = "2026-07-24T12:00:00.000Z";
 const later = "2026-07-25T12:00:00.000Z";
 const userId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 
-describeWithPostgres("IdentityRepository", () => {
+describe("IdentityRepository", () => {
   let database: TestDatabase;
   let pool: Pool;
   let repository: IdentityRepository;

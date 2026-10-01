@@ -20,7 +20,9 @@
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",
     "test": "npm run --prefix ../.. build:contracts && vitest run",
-    "typecheck": "tsc --build --pretty false"
+    "typecheck": "tsc --build --pretty false",
+    "test:unit": "npm run --prefix ../.. build:contracts && vitest run --project unit",
+    "test:integration": "npm run --prefix ../.. build:contracts && vitest run --project integration"
   },
   "engines": {
     "node": ">=24"
