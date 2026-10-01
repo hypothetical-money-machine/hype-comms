@@ -235,12 +235,12 @@ describe("createClaudeAiAgentHost", () => {
           id: "tool-raw",
           title: "Edit file",
           kind: "edit",
-          status: undefined,
-          locations: undefined,
         },
         options: [{ id: "allow-raw", name: "Allow once", kind: "allow_once" }],
       },
     ]);
+    expect(Object.hasOwn(harness.permissionRequests[0]!.tool, "status")).toBe(false);
+    expect(Object.hasOwn(harness.permissionRequests[0]!.tool, "locations")).toBe(false);
     harness.callbacks.onExit({ reason: "exited", exitCode: 137 });
     expect(harness.exits).toEqual([{ reason: "exited" }]);
   });
