@@ -53,6 +53,7 @@ interface OverlayEntry {
 
 export interface OverlayLease {
   readonly isTop: () => boolean;
+  readonly isTopModal: () => boolean;
   readonly release: (restoreFocus: boolean) => void;
 }
 
@@ -65,6 +66,11 @@ export class OverlayOwnership {
   hasOpen = (): boolean => this.#entries.length > 0;
 
   hasModalOpen = (): boolean => this.#entries.some((entry) => entry.modal);
+
+  allowsFocus = (target: HTMLElement): boolean => {
+    const modal = [...this.#entries].reverse().find((entry) => entry.modal);
+    return modal === undefined || modal.container.contains(target);
+  };
 
   /** Listeners receive whether focus actually landed on the opener, not whether it was asked for. */
   onClosed = (listener: (restored: boolean) => void): (() => void) => {
@@ -79,6 +85,7 @@ export class OverlayOwnership {
     this.#entries.push(entry);
     return {
       isTop: () => this.#entries.at(-1) === entry,
+      isTopModal: () => [...this.#entries].reverse().find((remaining) => remaining.modal) === entry,
       release: (restoreFocus) => {
         const index = this.#entries.indexOf(entry);
         if (index < 0) return;
@@ -94,15 +101,11 @@ export class OverlayOwnership {
         // Cleanup can run before React removes the focused portal. Restore after that commit.
         queueMicrotask(() => {
           if (this.#containerRevisions.get(entry.container) !== entry.revision) return;
-          const modal = [...this.#entries].reverse().find((remaining) => remaining.modal);
           const focused = document.activeElement;
           const stillOwned = focused === document.body || entry.container.contains(focused);
           const target = entry.returnTarget;
           const restored =
-            restoreFocus &&
-            stillOwned &&
-            available(target) &&
-            (modal === undefined || modal.container.contains(target));
+            restoreFocus && stillOwned && available(target) && this.allowsFocus(target);
           if (restored) target.focus();
           for (const listener of this.#closed) listener(restored);
         });
@@ -156,8 +159,9 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
     const lease = ownership.acquire(container, previous, current.trapFocus !== false);
     activeLease.current = lease;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (!lease.isTop() || event.defaultPrevented) return;
+      if (event.defaultPrevented) return;
       if (event.key === "Escape") {
+        if (!lease.isTop()) return;
         if (
           latest.current.escapeWithinContainer === true &&
           !container.contains(document.activeElement)
@@ -166,7 +170,7 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
         event.preventDefault();
         event.stopImmediatePropagation();
         latest.current.onEscape(event);
-      } else if (event.key === "Tab" && latest.current.trapFocus !== false) {
+      } else if (event.key === "Tab" && latest.current.trapFocus !== false && lease.isTopModal()) {
         const focusable = controls(container);
         const first = focusable[0];
         const last = focusable.at(-1);
@@ -199,7 +203,8 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
     const current = latest.current;
     const container = current.container.current;
     if (!open || container === null || activeLease.current?.isTop() !== true) return;
-    (current.initialFocus?.() ?? controls(container)[0] ?? container).focus();
+    const target = current.initialFocus?.() ?? controls(container)[0] ?? container;
+    if (ownership.allowsFocus(target)) target.focus();
   }, [open, options.focusKey, ownership]);
   const leaveForNavigation = useCallback(() => {
     restore.current = false;
