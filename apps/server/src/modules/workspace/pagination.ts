@@ -1,17 +1,23 @@
 import { createHash } from "node:crypto";
+import { z } from "zod";
+import { createCursorCodec, cursorIdSchema, cursorTimestampSchema } from "./cursor-codec.js";
+export { UUID_PATTERN } from "./cursor-codec.js";
 import type { TaskListFilters } from "@hype-comms/contracts";
 import { DomainError } from "../../domain-errors.js";
 import { iso } from "./records.js";
 import type { TaskRow } from "./task-records.js";
 import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 
-export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-interface TaskCursor {
-  readonly createdAt: string;
-  readonly id: string;
-  readonly filterHash: string;
-}
+const taskCursorCodec = createCursorCodec(
+  "task",
+  z
+    .object({
+      createdAt: cursorTimestampSchema,
+      id: cursorIdSchema,
+      filterHash: z.string(),
+    })
+    .strict(),
+);
 
 export function taskFilterHash(filters: TaskListFilters): string {
   return createHash("sha256")
@@ -29,45 +35,15 @@ export function taskFilterHash(filters: TaskListFilters): string {
     .digest("base64url");
 }
 
-const EMPTY_TASK_FILTER_HASH = taskFilterHash({});
-
 export function encodeTaskCursor(row: TaskRow, filterHash: string): string {
-  return Buffer.from(
-    JSON.stringify({ createdAt: iso(row.created_at), id: row.id, filterHash } satisfies TaskCursor),
-    "utf8",
-  ).toString("base64url");
+  return taskCursorCodec.encode({ createdAt: iso(row.created_at), id: row.id, filterHash });
 }
 
-export function decodeTaskCursor(
-  cursor: string | undefined,
-  expectedFilterHash: string,
-): TaskCursor | null {
-  if (cursor === undefined) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("createdAt" in parsed) ||
-      typeof parsed.createdAt !== "string" ||
-      !Number.isFinite(Date.parse(parsed.createdAt)) ||
-      !("id" in parsed) ||
-      typeof parsed.id !== "string" ||
-      !UUID_PATTERN.test(parsed.id) ||
-      ("filterHash" in parsed &&
-        (typeof parsed.filterHash !== "string" || parsed.filterHash !== expectedFilterHash)) ||
-      (!("filterHash" in parsed) && expectedFilterHash !== EMPTY_TASK_FILTER_HASH)
-    ) {
-      throw new Error("Invalid cursor");
-    }
-    return {
-      createdAt: new Date(parsed.createdAt).toISOString(),
-      id: parsed.id,
-      filterHash: expectedFilterHash,
-    };
-  } catch {
+export function decodeTaskCursor(cursor: string | undefined, expectedFilterHash: string) {
+  const parsed = taskCursorCodec.decode(cursor);
+  if (parsed !== null && parsed.filterHash !== expectedFilterHash)
     throw new DomainError("invalid_input", "Invalid task cursor");
-  }
+  return parsed;
 }
 
 export function taskListFilterParameters(

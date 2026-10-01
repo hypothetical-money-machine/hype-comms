@@ -1,3 +1,4 @@
+import { readWorkflow, workflowJob, workflowStep } from "./workflow-test-support.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -957,14 +958,20 @@ test(
 test("wires the preparation command and blocks its unreviewed scaffold", async () => {
   const [rootPackageContents, workflow, readme, scriptSource] = await Promise.all([
     readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readFile(new URL("../.github/workflows/desktop-release.yml", import.meta.url), "utf8"),
+    readWorkflow("desktop-release.yml"),
     readFile(new URL("../README.md", import.meta.url), "utf8"),
     readFile(new URL("./prepare-desktop-release.mjs", import.meta.url), "utf8"),
   ]);
   const rootPackage = JSON.parse(rootPackageContents);
 
   assert.equal(rootPackage.scripts.release, "node scripts/prepare-desktop-release.mjs");
-  assert.match(workflow, /grep -Fq '<!-- release-notes:todo'/u);
+  assert.equal(
+    workflowStep(
+      workflowJob(workflow, "validate"),
+      "Require a tag matching the desktop package version",
+    ).run,
+    "node scripts/desktop-release.mjs validate-version",
+  );
   assert.match(readme, /npm run release -- <version>/u);
   assert.match(scriptSource, /spawnSync\([\s\S]*"git"[\s\S]*"status"/u);
   const lockAcquisition = scriptSource.indexOf("await acquireReleaseLockImplementation");

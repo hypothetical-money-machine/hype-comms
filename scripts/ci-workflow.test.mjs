@@ -1,110 +1,81 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const workflowJob = (workflow, jobName) => {
-  const marker = `  ${jobName}:\n`;
-  const start = workflow.indexOf(marker);
-  assert.notEqual(start, -1, `Expected workflow job ${jobName}`);
+import {
+  commands,
+  readWorkflow,
+  stepBefore,
+  workflowJob,
+  workflowStep,
+} from "./workflow-test-support.mjs";
 
-  const remainingWorkflow = workflow.slice(start + marker.length);
-  const nextJob = remainingWorkflow.search(/^ {2}[a-zA-Z0-9_-]+:\n/mu);
-  return nextJob === -1
-    ? workflow.slice(start)
-    : workflow.slice(start, start + marker.length + nextJob);
-};
-
-test("isolates a workflow job from neighboring jobs", () => {
-  const workflow = `jobs:
-  check:
-    runs-on: [self-hosted, Linux, ARM64]
-  package:
-    runs-on: [self-hosted, Linux, X64]
-    run: sudo apt-get install package
-`;
-
-  assert.equal(
-    workflowJob(workflow, "check"),
-    `  check:
-    runs-on: [self-hosted, Linux, ARM64]
-`,
-  );
-});
+const cacheAction = "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 
 test("runs public PostgreSQL CI on disposable GitHub-hosted infrastructure", async () => {
-  const ciWorkflow = await readFile(
-    new URL("../.github/workflows/ci.yml", import.meta.url),
-    "utf8",
+  const workflow = await readWorkflow("ci.yml");
+  const job = workflowJob(workflow, "check");
+  assert.deepEqual(workflow.on.merge_group.types, ["checks_requested"]);
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job.services.postgres.image, "postgres:16");
+  assert.equal(job.services.postgres.env.POSTGRES_DB, "hype_comms_test");
+  assert.equal(job.services.postgres.env.POSTGRES_USER, "hype_comms");
+  assert.deepEqual(job.services.postgres.ports, ["55432:5432"]);
+  const cache = workflowStep(job, "Restore dependency downloads");
+  assert.equal(cache.uses, cacheAction);
+  assert.deepEqual(cache.with.path.trim().split("\n"), ["~/.npm", "~/.cache/electron"]);
+  assert.equal(
+    cache.with.key,
+    "ci-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}",
   );
-  const postgresJob = workflowJob(ciWorkflow, "check");
-
-  assert.match(ciWorkflow, /^ {2}merge_group:\n {4}types: \[checks_requested\]$/mu);
-  assert.match(ciWorkflow, /^permissions:\n {2}contents: read$/mu);
-  assert.match(postgresJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.match(postgresJob, /^ {4}services:\n {6}postgres:\n {8}image: postgres:16$/mu);
-  assert.match(postgresJob, /^ {10}POSTGRES_DB: hype_comms_test$/mu);
-  assert.match(postgresJob, /^ {10}POSTGRES_USER: hype_comms$/mu);
-  assert.match(postgresJob, /^ {10}- 55432:5432$/mu);
-  assert.match(postgresJob, /HYPE_COMMS_TEST_DATABASE_URL: postgresql:\/\//u);
-  assert.match(postgresJob, /npm ci --no-audit --prefer-offline/u);
-  // Cache dependency downloads only; node_modules is rebuilt from the verified lockfile each run.
-  assert.match(
-    postgresJob,
-    /uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0/u,
+  assert.equal(
+    cache.with["restore-keys"].trim(),
+    "ci-downloads-${{ runner.os }}-${{ runner.arch }}-",
   );
-  assert.match(
-    postgresJob,
-    /key: ci-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('package-lock\.json'\) \}\}/u,
+  assert.equal(workflowStep(job, "Install dependencies").run, "npm ci --no-audit --prefer-offline");
+  stepBefore(job, "Restore dependency downloads", "Install dependencies");
+  const check = workflowStep(
+    job,
+    "Check formatting, types, unit and integration tests, and production builds",
   );
-  assert.match(postgresJob, /^ {10}path: \|\n {12}~\/\.npm\n {12}~\/\.cache\/electron$/mu);
-  assert.match(
-    postgresJob,
-    /^ {10}restore-keys: \|\n {12}ci-downloads-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-$/mu,
-  );
-  // Downloads must be restored before npm ci runs, or the cache never serves the install.
-  assert.match(
-    postgresJob,
-    /name: Restore dependency downloads[\s\S]*npm ci --no-audit --prefer-offline/u,
-  );
-  assert.match(postgresJob, /npm run check/u);
+  assert.equal(check.run, "npm run check");
+  assert.match(check.env.HYPE_COMMS_TEST_DATABASE_URL, /^postgresql:\/\//u);
+  assert.equal(job.environment, undefined);
   assert.doesNotMatch(
-    postgresJob,
-    /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|initdb|pg_ctl|secrets\.|^ {4}environment:/mu,
+    JSON.stringify(job),
+    /self-hosted|hmm-ci|hype-comms-release|head\.repo\.full_name|secrets\./u,
   );
+  assert.doesNotMatch(commands(job), /initdb|pg_ctl/u);
 });
 
-test("runs the display-server-free demo smokes on Ubuntu x64", async () => {
-  const ciWorkflow = await readFile(
-    new URL("../.github/workflows/ci.yml", import.meta.url),
-    "utf8",
+test("runs headless demo smokes on disposable Ubuntu x64 and keeps diagnostics", async () => {
+  const job = workflowJob(await readWorkflow("ci.yml"), "headless-linux-smoke");
+  assert.equal(job["runs-on"], "ubuntu-24.04");
+  assert.equal(job["timeout-minutes"], 30);
+  assert.equal(
+    workflowStep(job, "Check out source").uses,
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   );
-  const headlessSmokeJob = workflowJob(ciWorkflow, "headless-linux-smoke");
-
-  assert.match(headlessSmokeJob, /^ {4}name: Headless Linux smoke \(Ubuntu x64\)$/mu);
-  assert.match(headlessSmokeJob, /^ {4}runs-on: ubuntu-24\.04$/mu);
-  assert.match(headlessSmokeJob, /^ {4}timeout-minutes: 30$/mu);
-  assert.match(
-    headlessSmokeJob,
-    /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7/u,
+  const node = workflowStep(job, "Set up Node.js");
+  assert.equal(node.uses, "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+  assert.deepEqual(node.with, {
+    "node-version-file": ".node-version",
+    "package-manager-cache": false,
+  });
+  assert.equal(
+    workflowStep(job, "Run display-server-free demo smokes").run,
+    "npm run test:demo:headless:linux",
   );
-  assert.match(
-    headlessSmokeJob,
-    /uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7/u,
-  );
-  assert.match(headlessSmokeJob, /^ {10}node-version-file: \.node-version$/mu);
-  assert.match(headlessSmokeJob, /^ {10}package-manager-cache: false$/mu);
-  assert.match(headlessSmokeJob, /^ {8}run: npm run test:demo:headless:linux$/mu);
-  assert.match(
-    headlessSmokeJob,
-    /^ {8}if: always\(\)\n {8}uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4$/mu,
-  );
-  assert.match(
-    headlessSmokeJob,
-    /^ {10}name: headless-linux-smoke-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/mu,
-  );
-  assert.match(headlessSmokeJob, /^ {10}path: \.dev-data\/demo\/docker-headless\/$/mu);
-  assert.match(headlessSmokeJob, /^ {10}include-hidden-files: true$/mu);
-  assert.match(headlessSmokeJob, /^ {10}if-no-files-found: warn$/mu);
-  assert.match(headlessSmokeJob, /^ {10}retention-days: 7$/mu);
-  assert.doesNotMatch(headlessSmokeJob, /self-hosted|secrets\.|^ {4}environment:/mu);
+  const upload = workflowStep(job, "Upload headless Linux smoke diagnostics");
+  assert.equal(upload.if, "always()");
+  assert.equal(upload.uses, "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02");
+  assert.deepEqual(upload.with, {
+    name: "headless-linux-smoke-${{ github.run_id }}-${{ github.run_attempt }}",
+    path: ".dev-data/demo/docker-headless/",
+    "include-hidden-files": true,
+    "if-no-files-found": "warn",
+    "retention-days": 7,
+  });
+  assert.equal(job.environment, undefined);
+  assert.doesNotMatch(JSON.stringify(job), /self-hosted|secrets\./u);
 });

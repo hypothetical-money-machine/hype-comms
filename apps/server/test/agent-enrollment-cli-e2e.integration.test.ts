@@ -304,8 +304,7 @@ describe("zero-copy Atlas enrollment through the listening CLI/API boundary", ()
       offer.request.displayName,
       "--label",
       offer.request.label,
-      "--credential-verifier",
-      offer.request.credentialVerifier,
+      `--credential-verifier=${offer.request.credentialVerifier}`,
       "--json",
     ]);
     expect(requestRun.exitCode).toBe(EXIT_SUCCESS);
@@ -485,8 +484,7 @@ describe("zero-copy Atlas enrollment through the listening CLI/API boundary", ()
       blockedOffer.request.displayName,
       "--label",
       blockedOffer.request.label,
-      "--credential-verifier",
-      blockedOffer.request.credentialVerifier,
+      `--credential-verifier=${blockedOffer.request.credentialVerifier}`,
       "--json",
     ]);
     expect(blockedRequest.exitCode).toBe(EXIT_TRANSIENT);

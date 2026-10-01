@@ -5,7 +5,6 @@ import path from "node:path";
 import semver from "semver";
 
 const defaultReleaseDirectory = path.join("apps", "desktop", "release");
-
 export function requireEnvironment(name, environment = process.env) {
   const value = environment[name];
   if (value === undefined || value === "") {
