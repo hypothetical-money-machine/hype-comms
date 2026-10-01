@@ -9055,7 +9055,14 @@ describe("WorkspaceRuntime", () => {
     ).toEqual([]);
     expectRetainedUnsent(purged.outbox, operation);
     expect(purged.outbox[0]?.attemptCount).toBe(1);
-    expect(runtime.state.outbox).toEqual([]);
+    expectRetainedUnsent(runtime.state.outbox, operation);
+    expect(runtime.state.outbox[0]?.attemptCount).toBe(1);
+    expect(
+      runtime.state.bootstrap?.conversations.some(
+        (summary) => summary.conversation.id === SECOND_CONVERSATION_ID,
+      ),
+    ).toBe(false);
+    expect(runtime.state.selectedConversationId).not.toBe(SECOND_CONVERSATION_ID);
     expect(purged.repairMarker?.conversationId).toBe(SECOND_CONVERSATION_ID);
     expect(api.acknowledged).not.toContain("11");
     expect(api.sent).toEqual([]);
