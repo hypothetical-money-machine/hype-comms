@@ -1,14 +1,14 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AuthenticatedSessionContext } from "@hype-comms/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   AuthenticatedSessionContextStore,
   type SessionContextSafeStorage,
 } from "./authenticated-session-context-store";
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 const API_ORIGIN = "https://chat.example";
 const CREDENTIAL = "first-exact-protected-credential";
@@ -19,7 +19,6 @@ const session: AuthenticatedSessionContext = {
   userId: "10000000-0000-4000-8000-000000000001",
   workspaceId: "10000000-0000-4000-8000-000000000002",
 };
-const directories: string[] = [];
 
 class FakeSafeStorage implements SessionContextSafeStorage {
   constructor(
@@ -45,9 +44,7 @@ class FakeSafeStorage implements SessionContextSafeStorage {
 }
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-session-context-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hype-comms-session-context-");
 }
 
 function storeIn(
@@ -73,10 +70,6 @@ async function onlyRecordPath(userDataPath: string): Promise<string> {
   if (name === undefined) throw new Error("Expected a protected session context record");
   return path.join(directory, name);
 }
-
-afterEach(async () => {
-  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
-});
 
 describe("AuthenticatedSessionContextStore", () => {
   it("protects a salted credential-and-origin-bound identity record", async () => {

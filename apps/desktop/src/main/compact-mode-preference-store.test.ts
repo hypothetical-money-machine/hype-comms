@@ -1,20 +1,16 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CompactModePreferenceStore,
   MAX_COMPACT_MODE_FILE_BYTES,
 } from "./compact-mode-preference-store";
-
-const directories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hmm-compact-mode-preference-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hmm-compact-mode-preference-");
 }
 
 function preferenceDirectory(userDataPath: string): string {
@@ -29,12 +25,6 @@ async function writeStoredValue(userDataPath: string, value: string): Promise<vo
   await mkdir(preferenceDirectory(userDataPath), { recursive: true });
   await writeFile(preferenceFile(userDataPath), value, "utf8");
 }
-
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
 
 describe("CompactModePreferenceStore", () => {
   it("defaults to disabled when the file is missing", async () => {

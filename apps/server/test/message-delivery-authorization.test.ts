@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { escapeIdentifier, Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import type {
   AgentCurrentPrincipal,
@@ -9,7 +9,6 @@ import type {
   SendConversationMessageRequest,
 } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import type { ApiError } from "../src/errors.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
@@ -18,12 +17,7 @@ import { IdentityService } from "../src/modules/identity/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import {
-  describeWithPostgres,
-  resetDatabase,
-  schemaScopedUrl,
-  testDatabaseUrl,
-} from "./helpers/database.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = "2026-08-09T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
@@ -109,23 +103,17 @@ async function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
 }
 
 describeWithPostgres("message-delivery authorization", () => {
-  const schemaName = `message_delivery_authorization_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const applicationName = `delivery_${process.pid}_${randomUUID().slice(0, 8)}`;
+  let database: TestDatabase;
   let adminPool: Pool;
   let pool: Pool;
   let identityService: IdentityService;
   let repository: WorkspaceRepository;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = new Pool({
-      application_name: applicationName,
-      connectionString: schemaScopedUrl(testDatabaseUrl, schemaName),
-      max: 8,
-    });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 8, applicationName });
+    pool = database.pool;
+    adminPool = createPool({ url: database.url, poolSize: 2 });
     identityService = new IdentityService(
       new IdentityRepository(pool),
       new NoopEmailSender(),
@@ -137,27 +125,7 @@ describeWithPostgres("message-delivery authorization", () => {
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_reactions",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
@@ -186,10 +154,8 @@ describeWithPostgres("message-delivery authorization", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await adminPool?.end();
+    await database?.dispose();
   });
 
   async function waitForBlockedTransaction(): Promise<void> {

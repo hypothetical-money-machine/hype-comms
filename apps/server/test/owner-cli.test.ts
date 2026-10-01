@@ -6,13 +6,6 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  describeWithPostgres,
-  createTestSchema,
-  resetDatabase,
-  schemaScopedUrl,
-  testDatabaseUrl,
-} from "./helpers/database.js";
-import {
   parseOwnerCommand,
   runOwnerCli,
   type OwnerCliOutput,
@@ -21,6 +14,7 @@ import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 class TestOutput {
   stdout = "";
@@ -65,30 +59,22 @@ describe("owner CLI argument parsing", () => {
 });
 
 describeWithPostgres("owner CLI", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let databaseUrl: string;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "owner_cli", poolSize: 4 });
-    pool = schema.pool;
-    databaseUrl = schemaScopedUrl(testDatabaseUrl ?? "", schema.schemaName);
+    database = await createTestDatabase({ poolSize: 4 });
+    pool = database.pool;
+    databaseUrl = database.url;
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "bot_channel_grants",
-        "bot_credentials",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   function cliEnv(): Record<string, string> {

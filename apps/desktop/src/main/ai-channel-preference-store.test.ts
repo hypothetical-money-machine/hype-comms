@@ -1,32 +1,22 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   AiChannelPreferenceStore,
   MAX_AI_CHANNEL_PREFERENCE_FILE_BYTES,
   parseStoredAiChannelPreference,
 } from "./ai-channel-preference-store";
-
-const directories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function scratchDirectory(): Promise<string> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-ai-channel-preference-"));
-  directories.push(directory);
-  return directory;
+  return createTemporaryDirectory("hype-comms-ai-channel-preference-");
 }
 
 function preferenceFile(userDataPath: string): string {
   return path.join(userDataPath, "hype-comms-settings", "ai-channel.json");
 }
-
-afterEach(async () => {
-  await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
 
 describe("AiChannelPreferenceStore", () => {
   it("defaults to an unconfigured channel", async () => {

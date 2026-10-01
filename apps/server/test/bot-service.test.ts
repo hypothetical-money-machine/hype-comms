@@ -10,7 +10,7 @@ import { BotService } from "../src/modules/bots/service.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
-import { createTestSchema, describeWithPostgres, resetDatabase } from "./helpers/database.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = new Date("2026-08-05T12:00:00.000Z");
 const expiresAt = "2026-11-03T12:00:00.000Z";
@@ -43,42 +43,20 @@ const owner: AuthenticatedIdentity = {
 };
 
 describeWithPostgres("BotService", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let service: BotService;
   let workspaceRepository: WorkspaceRepository;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "bot_service", poolSize: 8 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     service = new BotService(pool, () => now);
     workspaceRepository = new WorkspaceRepository(pool, { humansOnlyChannelsEnabled: true });
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "bot_channel_grants",
-        "bot_credentials",
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_reactions",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
        VALUES ($1, 'owner@example.com', 'human', 'owner', 'Owner'),
@@ -113,7 +91,7 @@ describeWithPostgres("BotService", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   it("creates a hash-only principal with least-privilege channel visibility", async () => {

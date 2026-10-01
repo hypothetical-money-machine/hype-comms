@@ -22,7 +22,6 @@ import {
   type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { ApiError } from "../src/errors.js";
 import type {
   AuthenticatedAgentIdentity,
@@ -41,6 +40,7 @@ import {
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
@@ -171,7 +171,7 @@ async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> 
 }
 
 describeWithPostgres("WorkspaceRepository", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let repository: WorkspaceRepository;
   let attachmentRoot: string;
@@ -184,8 +184,8 @@ describeWithPostgres("WorkspaceRepository", () => {
   }
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "workspace_repository", poolSize: 8 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
     attachmentStore = new LocalAttachmentStore(attachmentRoot);
     repository = new WorkspaceRepository(pool, repositoryHooks());
@@ -193,27 +193,7 @@ describeWithPostgres("WorkspaceRepository", () => {
 
   beforeEach(async () => {
     repository = new WorkspaceRepository(pool, repositoryHooks());
-    await resetDatabase(pool, {
-      only: [
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_reactions",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
@@ -248,7 +228,7 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
     if (attachmentRoot !== undefined) await rm(attachmentRoot, { recursive: true, force: true });
   });
 

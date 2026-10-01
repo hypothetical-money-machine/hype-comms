@@ -11,7 +11,6 @@ import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { BotService } from "../src/modules/bots/service.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
@@ -20,6 +19,7 @@ import { hashToken } from "../src/modules/identity/tokens.js";
 import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { FixedWindowAttemptThrottle, SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = "2026-08-23T12:00:00.000Z";
 const publicApiUrl = "http://127.0.0.1:3000";
@@ -49,15 +49,15 @@ function webhookPath(webhookUrl: string): string {
 
 describeWithPostgres("per-channel incoming webhooks", () => {
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let identityService: IdentityService;
   let botService: BotService;
   let workspaceRepository: WorkspaceRepository;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "channel_webhooks", poolSize: 10 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 10 });
+    pool = database.pool;
     identityService = new IdentityService(
       new IdentityRepository(pool),
       new NoopEmailSender(),
@@ -70,32 +70,7 @@ describeWithPostgres("per-channel incoming webhooks", () => {
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "channel_webhooks",
-        "bot_channel_grants",
-        "bot_credentials",
-        "agent_tokens",
-        "agents",
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_reactions",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
        VALUES ($1, 'owner@example.test', 'human', 'owner', 'Owner'),
@@ -147,7 +122,7 @@ describeWithPostgres("per-channel incoming webhooks", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   async function appWithWebhookThrottle(throttle?: FixedWindowAttemptThrottle) {

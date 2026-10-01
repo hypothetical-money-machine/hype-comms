@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
 
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import {
   AuthKitAdmissionDeniedError,
   AuthKitCredentialRejectedError,
@@ -16,6 +15,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import type { AuthenticatedHumanIdentity } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const encryptionKey = Buffer.alloc(32, 19);
 const ownerId = "10000000-0000-4000-8000-000000000101";
@@ -24,28 +24,26 @@ const desktopVerifier = "desktop-verifier-value-that-is-long-enough-1234";
 const desktopChallenge = deriveAuthKitPkceCodeChallenge(desktopVerifier);
 
 describeWithPostgres("AuthKitRepository", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
-  let schemaName: string;
   let repository: AuthKitRepository;
   let identityRepository: IdentityRepository;
   let now: Date;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "authkit_repository", poolSize: 8 });
-    pool = schema.pool;
-    schemaName = schema.schemaName;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     repository = new AuthKitRepository(pool, encryptionKey);
     identityRepository = new IdentityRepository(pool);
   });
 
   beforeEach(async () => {
+    await database.reset();
     now = new Date();
-    await resetDatabase(pool, { only: ["authkit_transactions", "workos_events", "users"] });
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   async function seedOwner(email = "owner@example.com", username = "owner"): Promise<void> {
@@ -140,14 +138,18 @@ describeWithPostgres("AuthKitRepository", () => {
     const stored = await pool.query<{
       provider_state_hash: Buffer;
       verifier_ciphertext: Buffer;
-    }>("SELECT provider_state_hash, verifier_ciphertext FROM authkit_transactions");
+      created_at: Date;
+    }>("SELECT provider_state_hash, verifier_ciphertext, created_at FROM authkit_transactions");
     expect(stored.rows[0]?.provider_state_hash.byteLength).toBe(32);
     expect(stored.rows[0]?.provider_state_hash.toString("utf8")).not.toContain(providerState);
     expect(stored.rows[0]?.verifier_ciphertext.toString("utf8")).not.toContain(
       providerCodeVerifier,
     );
 
-    const consumedAt = new Date(now.getTime() + 1_000);
+    const transaction = stored.rows[0];
+    if (transaction === undefined) throw new Error("AuthKit transaction was not stored");
+    // Consumption follows the database creation time even when fixture setup is slow.
+    const consumedAt = new Date(transaction.created_at.getTime() + 1_000);
     const outcomes = await Promise.all([
       repository.consumeTransaction(providerState, consumedAt),
       repository.consumeTransaction(providerState, consumedAt),
@@ -567,7 +569,7 @@ describeWithPostgres("AuthKitRepository", () => {
                      AND namespace.nspname = $1
                 )
            ) AS waiting`,
-          [schemaName],
+          ["public"],
         );
         if (activity.rows[0]?.waiting === true) {
           waitingOnConversation = true;

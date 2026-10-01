@@ -4,13 +4,6 @@ import { emailSchema, magicLinkTokenSchema, type Email } from "@hype-comms/contr
 import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  describeWithPostgres,
-  createTestSchema,
-  resetDatabase,
-  schemaScopedUrl,
-  testDatabaseUrl,
-} from "./helpers/database.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import {
   parseInviteArguments,
@@ -20,6 +13,7 @@ import {
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 class TestOutput {
   stdout = "";
@@ -61,31 +55,22 @@ describe("invite CLI argument parsing", () => {
 });
 
 describeWithPostgres("invite CLI", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let databaseUrl: string;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "invite_cli", poolSize: 4 });
-    pool = schema.pool;
-    databaseUrl = schemaScopedUrl(testDatabaseUrl ?? "", schema.schemaName);
+    database = await createTestDatabase({ poolSize: 4 });
+    pool = database.pool;
+    databaseUrl = database.url;
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   function cliEnv(): Record<string, string> {

@@ -1,20 +1,17 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { chmod, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV,
   HEADLESS_NOTIFICATION_CAPTURE_RECORD_LIMIT,
   openHeadlessNotificationCaptureArtifact,
 } from "./headless-notification-capture";
-
-const temporaryDirectories: string[] = [];
+import { createTemporaryDirectory } from "./test-support/temporary-directory";
 
 async function privateArtifactDirectory(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "hmm-headless-notifications-"));
-  temporaryDirectories.push(root);
+  const root = await createTemporaryDirectory("hmm-headless-notifications-");
   const directory = path.join(root, "artifacts");
   await mkdir(directory, { mode: 0o700 });
   await chmod(directory, 0o700);
@@ -27,14 +24,6 @@ function environment(directory: string): Record<string, string> {
     [HEADLESS_NOTIFICATION_CAPTURE_DIRECTORY_ENV]: directory,
   };
 }
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
 
 describe("openHeadlessNotificationCaptureArtifact", () => {
   it("is disabled for an ordinary desktop and rejects a leaked artifact directory", async () => {

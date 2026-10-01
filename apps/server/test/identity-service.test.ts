@@ -1,8 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-import type { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-
 import {
   apiErrorEnvelopeSchema,
   currentUserSchema,
@@ -11,9 +8,10 @@ import {
   magicLinkTokenSchema,
   type Email,
 } from "@hype-comms/contracts";
+import type { Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -21,6 +19,7 @@ import { hashToken } from "../src/modules/identity/tokens.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const initialNow = Date.parse("2026-07-24T12:00:00.000Z");
 
@@ -39,9 +38,8 @@ class FakeEmailSender implements EmailSender {
 }
 
 describeWithPostgres("IdentityService and identity routes", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
-  let schemaName: string;
   let repository: IdentityRepository;
   let sender: FakeEmailSender;
   let nowMs: number;
@@ -49,22 +47,12 @@ describeWithPostgres("IdentityService and identity routes", () => {
   let reuseDetections: number;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "identity_service", poolSize: 8 });
-    pool = schema.pool;
-    schemaName = schema.schemaName;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     repository = new IdentityRepository(pool);
     sender = new FakeEmailSender();
     nowMs = initialNow;
@@ -85,7 +73,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   async function seedOwner(email = "owner@example.com") {
@@ -410,7 +398,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
                      AND namespace.nspname = $1
                 )
            ) AS waiting`,
-          [schemaName],
+          ["public"],
         );
         if (activity.rows[0]?.waiting === true) {
           waitingOnConversation = true;
@@ -518,7 +506,7 @@ describeWithPostgres("IdentityService and identity routes", () => {
                      AND namespace.nspname = $1
                 )
            ) AS waiting`,
-          [schemaName],
+          ["public"],
         );
         if (activity.rows[0]?.waiting === true) {
           waitingOnWorkspace = true;

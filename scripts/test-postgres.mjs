@@ -8,47 +8,17 @@ import { Client } from "pg";
 const DEFAULT_ATTEMPTS = 60;
 const DEFAULT_DELAY_MS = 500;
 
-class NonTestDatabaseError extends Error {}
+import {
+  NonTestDatabaseError,
+  assertTestDatabaseName,
+  requireTestDatabaseUrl,
+} from "./test-database-config.mjs";
 
-function assertTestDatabaseName(name) {
-  if (name === "" || !/(^|[_-])test($|[_-])/i.test(name)) {
-    throw new NonTestDatabaseError(
-      `Refusing to run PostgreSQL tests against non-test database ${name || "<empty>"}`,
-    );
-  }
-}
+export { requireTestDatabaseUrl } from "./test-database-config.mjs";
 
-function databaseName(databaseUrl) {
-  const parsed = new URL(databaseUrl);
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL");
-  }
-  const name = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-  assertTestDatabaseName(name);
-  return name;
-}
-
-/**
- * Environment passed to the spawned server test suite: always opts into
- * apps/server/test/setup/require-test-database.mjs, so `npm run test:postgres` enforces its own
- * database requirement regardless of what the caller (a workflow, a developer's shell) set.
- */
+/** Ensures direct PostgreSQL execution requires the database even if the caller omits the gate. */
 export function serverSuiteEnvironment(environment = process.env) {
   return { ...environment, HYPE_COMMS_REQUIRE_TEST_DATABASE: "1" };
-}
-
-export function requireTestDatabaseUrl(environment) {
-  const databaseUrl = environment.HYPE_COMMS_TEST_DATABASE_URL?.trim() ?? "";
-  if (databaseUrl === "") throw new Error("HYPE_COMMS_TEST_DATABASE_URL is required");
-  try {
-    databaseName(databaseUrl);
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new Error("HYPE_COMMS_TEST_DATABASE_URL must be a PostgreSQL URL", { cause: error });
-    }
-    throw error;
-  }
-  return databaseUrl;
 }
 
 function delay(delayMs) {

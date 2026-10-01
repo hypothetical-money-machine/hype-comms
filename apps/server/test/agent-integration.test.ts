@@ -32,13 +32,12 @@ import {
   userSchema,
   workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
-import type { Pool, QueryResultRow } from "pg";
+import { type Pool, type QueryResultRow } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { z } from "zod";
 
 import { buildApp } from "../src/app.js";
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
@@ -47,6 +46,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -77,7 +77,7 @@ class NoopEmailSender implements EmailSender {
 describeWithPostgres("agent identity and owner administration", () => {
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
   const openSockets: WebSocket[] = [];
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let identityRepository: IdentityRepository;
   let identityService: IdentityService;
@@ -85,8 +85,8 @@ describeWithPostgres("agent identity and owner administration", () => {
   let attachmentRoot: string;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "agents", poolSize: 10 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 10 });
+    pool = database.pool;
     identityRepository = new IdentityRepository(pool);
     identityService = new IdentityService(
       identityRepository,
@@ -102,27 +102,7 @@ describeWithPostgres("agent identity and owner administration", () => {
   });
 
   beforeEach(async () => {
-    await resetDatabase(pool, {
-      only: [
-        "agent_tokens",
-        "agents",
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.test', 'owner', 'Owner'),
@@ -168,7 +148,7 @@ describeWithPostgres("agent identity and owner administration", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
     await rm(attachmentRoot, { recursive: true, force: true });
   });
 

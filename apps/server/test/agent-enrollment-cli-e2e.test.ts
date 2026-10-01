@@ -15,7 +15,7 @@ import {
   redeemAgentEnrollmentResponseSchema,
   requestAgentEnrollmentSchema,
 } from "@hype-comms/contracts";
-import type { Pool, QueryResultRow } from "pg";
+import { type Pool, type QueryResultRow } from "pg";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -35,7 +35,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
-import { createTestSchema, describeWithPostgres } from "./helpers/database.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
@@ -132,7 +132,7 @@ const cliErrorOutputSchema = z
 
 describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API boundary", () => {
   const temporaryDirectories: string[] = [];
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let identityService: IdentityService;
   let enrollment: AgentEnrollmentModule;
@@ -174,8 +174,8 @@ describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API b
   }
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "agent_cli_e2e", poolSize: 8 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     const identityRepository = new IdentityRepository(pool);
     identityService = new IdentityService(
       identityRepository,
@@ -218,7 +218,7 @@ describeWithPostgres("zero-copy Atlas enrollment through the listening CLI/API b
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   it("keeps the replacement secret child-owned through cutover, revocation, and the rollback gate", async () => {

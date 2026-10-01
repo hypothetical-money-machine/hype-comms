@@ -22,11 +22,11 @@ import {
   syncResponseSchema,
   type RequestAgentEnrollment,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, Pool, type QueryResultRow } from "pg";
+import type { Pool } from "pg";
+import { type QueryResultRow } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import { runMigrations } from "../src/db/migrate.js";
 import { createPool } from "../src/db/pool.js";
 import {
   AgentEnrollmentModule,
@@ -40,12 +40,7 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { LocalAttachmentStore } from "../src/modules/workspace/file-store.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { SignInThrottle } from "../src/throttle.js";
-import {
-  describeWithPostgres,
-  resetDatabase,
-  schemaScopedUrl,
-  testDatabaseUrl,
-} from "./helpers/database.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -91,9 +86,9 @@ function candidateInput(
 }
 
 describeWithPostgres("AgentEnrollmentModule", () => {
-  const schemaName = `agent_enrollment_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const applicationName = `agent_enrollment_${process.pid}_${randomUUID().slice(0, 8)}`;
   const apps: Awaited<ReturnType<typeof buildApp>>[] = [];
+  let database: TestDatabase;
   let adminPool: Pool;
   let pool: Pool;
   let identityService: IdentityService;
@@ -119,15 +114,9 @@ describeWithPostgres("AgentEnrollmentModule", () => {
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = new Pool({
-      application_name: applicationName,
-      connectionString: schemaScopedUrl(testDatabaseUrl, schemaName),
-      max: 12,
-    });
-    await runMigrations(pool);
+    database = await createTestDatabase({ poolSize: 12, applicationName });
+    pool = database.pool;
+    adminPool = createPool({ url: database.url, poolSize: 2 });
   });
 
   beforeEach(async () => {
@@ -141,32 +130,7 @@ describeWithPostgres("AgentEnrollmentModule", () => {
       "http://127.0.0.1:3000",
     );
     enrollment = new AgentEnrollmentModule(pool, () => now);
-    await resetDatabase(pool, {
-      only: [
-        "agent_enrollment_policy_transitions",
-        "agent_enrollment_transitions",
-        "agent_enrollment_restricted_channels",
-        "agent_enrollments",
-        "agent_tokens",
-        "agents",
-        "realtime_tickets",
-        "api_idempotency_records",
-        "sync_event_audiences",
-        "sync_events",
-        "conversation_read_cursors",
-        "message_mentions",
-        "attachments",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.test', 'owner', 'Owner'),
@@ -209,10 +173,8 @@ describeWithPostgres("AgentEnrollmentModule", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await adminPool?.end();
+    await database?.dispose();
   });
 
   it("defaults to required approval, keeps pending requests principal-free, and redeems exactly once", async () => {

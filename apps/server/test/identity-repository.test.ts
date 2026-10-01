@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
 
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = "2026-07-24T12:00:00.000Z";
 const later = "2026-07-25T12:00:00.000Z";
@@ -10,27 +10,18 @@ const userId = "10000000-0000-4000-8000-000000000001";
 const workspaceId = "10000000-0000-4000-8000-000000000002";
 
 describeWithPostgres("IdentityRepository", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let repository: IdentityRepository;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "identity_repository", poolSize: 6 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 6 });
+    pool = database.pool;
     repository = new IdentityRepository(pool);
   });
 
   beforeEach(async () => {
-    await resetDatabase(schema.pool, {
-      only: [
-        "device_sessions",
-        "magic_link_tokens",
-        "invitations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     await repository.insertUser({
       id: userId,
       email: "owner@example.com",
@@ -42,7 +33,7 @@ describeWithPostgres("IdentityRepository", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   it("maps a pre-title user row to a null title", async () => {

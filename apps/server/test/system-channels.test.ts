@@ -9,7 +9,6 @@ import type { Pool } from "pg";
 
 import { messageBodySchema, type CurrentUser, type WorkspaceEvent } from "@hype-comms/contracts";
 
-import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { loadReleaseNoteBulletins } from "../src/modules/system-channels/release-notes.js";
 import {
@@ -20,6 +19,7 @@ import {
   type AnnouncementAuditRecord,
   WorkspaceRepository,
 } from "../src/modules/workspace/repository.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "20000000-0000-4000-8000-000000000001";
@@ -145,7 +145,7 @@ describe("loadReleaseNoteBulletins", () => {
 });
 
 describeWithPostgres("seedSystemChannels", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let audits: AnnouncementAuditRecord[];
 
@@ -168,27 +168,13 @@ describeWithPostgres("seedSystemChannels", () => {
   }
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "system_channels", poolSize: 8 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
   });
 
   beforeEach(async () => {
     audits = [];
-    await resetDatabase(pool, {
-      only: [
-        "realtime_tickets",
-        "sync_event_audiences",
-        "sync_events",
-        "system_bulletins",
-        "conversation_read_cursors",
-        "messages",
-        "conversation_memberships",
-        "conversations",
-        "workspace_memberships",
-        "workspaces",
-        "users",
-      ],
-    });
+    await database.reset();
     // Truncating users also removes the publisher migration 0031 installs, so restore it.
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
@@ -215,7 +201,7 @@ describeWithPostgres("seedSystemChannels", () => {
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
   });
 
   async function channelRow(workspace = workspaceId) {

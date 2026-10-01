@@ -7,33 +7,28 @@ import type { Pool } from "pg";
 
 import { loadConfig } from "../src/config.js";
 import { seedDevelopmentDemo, writeDevelopmentDemoCallbacks } from "../src/dev-seed.js";
-import {
-  describeWithPostgres,
-  createTestSchema,
-  schemaScopedUrl,
-  testDatabaseUrl,
-} from "./helpers/database.js";
+import { createTestDatabase, describeWithPostgres, type TestDatabase } from "./support/database.js";
 
 describeWithPostgres("development demo seed", () => {
-  let schema: Awaited<ReturnType<typeof createTestSchema>>;
+  let database: TestDatabase;
   let pool: Pool;
   let callbackDirectory: string;
 
   beforeAll(async () => {
-    schema = await createTestSchema({ prefix: "dev_seed", poolSize: 8 });
-    pool = schema.pool;
+    database = await createTestDatabase({ poolSize: 8 });
+    pool = database.pool;
     callbackDirectory = await mkdtemp(path.join(os.tmpdir(), "hype-comms-demo-callbacks-"));
   });
 
   afterAll(async () => {
-    await schema.drop();
+    await database?.dispose();
     await rm(callbackDirectory, { recursive: true, force: true });
   });
 
   it("seeds two sign-in-ready clients and stable conversation data", async () => {
     const config = loadConfig({
       NODE_ENV: "test",
-      HYPE_COMMS_DATABASE_URL: schemaScopedUrl(testDatabaseUrl ?? "", schema.schemaName),
+      HYPE_COMMS_DATABASE_URL: database.url,
       HYPE_COMMS_PUBLIC_API_URL: "http://127.0.0.1:3000",
     });
 
