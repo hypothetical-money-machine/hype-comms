@@ -421,6 +421,41 @@ describe("MessageComposer formatting", () => {
     expect(onDraftChange).toHaveBeenLastCalledWith("make it pop");
   });
 
+  it("keeps the edited lines visible when formatting a capped draft", () => {
+    renderLiveComposer();
+    const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });
+    const contentHeight = 694;
+    const clientHeight = 130;
+    let scrollTop = 0;
+    Object.defineProperties(textbox, {
+      scrollHeight: { configurable: true, value: contentHeight },
+      offsetHeight: { configurable: true, value: 132 },
+      clientHeight: { configurable: true, value: clientHeight },
+      scrollTop: {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.min(Math.max(value, 0), contentHeight - clientHeight);
+        },
+      },
+    });
+    const prompt = Array.from(
+      { length: 30 },
+      (_, index) => `Line ${String(index + 1)} for long prompt`,
+    ).join("\n");
+    typeDraft(textbox, prompt);
+    const selectionStart = prompt.indexOf("Line 6");
+    textbox.setSelectionRange(selectionStart, selectionStart + 4);
+    textbox.scrollTop = 60;
+
+    fireEvent.click(screen.getByRole("button", { name: "Bold" }));
+
+    expect(textbox.style.height).toBe("132px");
+    expect(textbox.selectionStart).toBe(selectionStart + 2);
+    expect(textbox.selectionEnd).toBe(selectionStart + 6);
+    expect(textbox.scrollTop).toBe(60);
+  });
+
   it("applies bold from the keyboard without sending", () => {
     const { onDraftChange, onSubmit } = renderLiveComposer();
     const textbox = screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message" });

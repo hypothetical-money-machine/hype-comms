@@ -172,7 +172,11 @@ export function MessageComposer({
   const selectedOption = useRef<HTMLButtonElement | null>(null);
   const submitting = useRef(false);
   const attaching = useRef(false);
-  const pendingSelection = useRef<{ readonly start: number; readonly end: number } | null>(null);
+  const pendingSelection = useRef<{
+    readonly start: number;
+    readonly end: number;
+    readonly scrollTop: number;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAttaching, setIsAttaching] = useState(false);
   const [cursor, setCursor] = useState(draft.length);
@@ -199,6 +203,9 @@ export function MessageComposer({
     if (element === null || nextSelection === null) return;
     pendingSelection.current = null;
     element.setSelectionRange(nextSelection.start, nextSelection.end);
+    // Updating the controlled value temporarily puts the caret at the end, so autosizing can
+    // scroll there before this effect restores the selected text. Restore its viewport too.
+    element.scrollTop = nextSelection.scrollTop;
     setCursor(nextSelection.end);
   }, [draft]);
 
@@ -237,7 +244,11 @@ export function MessageComposer({
     (member: User): void => {
       if (mentionQuery === null) return;
       const next = insertMention(draft, mentionQuery, member.username);
-      pendingSelection.current = { start: next.cursor, end: next.cursor };
+      pendingSelection.current = {
+        start: next.cursor,
+        end: next.cursor,
+        scrollTop: input.current?.scrollTop ?? 0,
+      };
       setDismissed(true);
       onDraftChange(next.text);
     },
@@ -252,7 +263,11 @@ export function MessageComposer({
       const end = element.selectionEnd ?? start;
       const result = applyComposerFormat(draft, start, end, action);
       if (result.text.length > MESSAGE_BODY_MAX_LENGTH) return;
-      pendingSelection.current = { start: result.selectionStart, end: result.selectionEnd };
+      pendingSelection.current = {
+        start: result.selectionStart,
+        end: result.selectionEnd,
+        scrollTop: element.scrollTop,
+      };
       onDraftChange(result.text);
       if (document.activeElement !== element) element.focus();
     },
