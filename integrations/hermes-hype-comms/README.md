@@ -367,6 +367,12 @@ On restart, the adapter refetches unfinished ambient anchors' context packs.
 It repeats current sender authorization and strict pack validation before
 each model handoff. It admits the backlog until Hermes's FIFO fills, then
 starts watch and retries the remaining anchors in one bounded background task.
+A newer unmentioned message in that channel waits behind those unfinished
+admissions, even if a FIFO slot opens before the next recovery retry. Its
+anchor is persisted and watch continues; context is refetched and read progress
+is recorded only when that turn is actually admitted. A blocked channel does
+not prevent recovery or live traffic in other channels, and mentions and direct
+messages retain their normal busy-input policy.
 A transient context failure or draining gateway also defers recovery without
 keeping the adapter offline. The task preserves Retry-After within the capped
 backoff policy and makes progress when capacity frees even without new watch
@@ -377,9 +383,9 @@ without inference. Recovery never rewinds the accepted workspace cursor.
 This is at-least-once model processing: a crash after a decision or reply but
 before its durable completion write can repeat that turn. Anchors also remain
 durable when FIFO admission is full or the gateway is draining. Each recovery
-batch tracks admission separately from successful decisions, so a failed model
+queue tracks admission separately from successful decisions, so a failed model
 turn remains durable for the next connection without entering an automatic
-inference retry loop during the current connection.
+inference retry loop or blocking newer live turns during the current connection.
 
 When `read-cursors:write` is present, `handle_message` must return successfully
 before the adapter marks anything read. It then writes the triggering workspace
@@ -471,7 +477,8 @@ v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
 authorization, write/fsync failure rollback, reconnect admission deduplication,
 per-turn completion across mixed failed/successful FIFO decisions, isolated
 Hype display configuration, deferred recovery beyond live FIFO capacity,
-failed-turn retry isolation, recovery-task cancellation/reaping and fatal
+failed-turn retry isolation, ordered deferred live admission, cross-channel
+recovery progress, current-policy checks, recovery-task cancellation/reaping and fatal
 teardown ownership, metadata cache updates, equal-cursor resync,
 cursor-expiry recovery, malformed NDJSON cleanup, transient respawn recovery,
 private-stdin send, thread-root resolution for top-level and in-thread wakes,
