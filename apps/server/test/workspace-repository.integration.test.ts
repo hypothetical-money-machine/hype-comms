@@ -36,6 +36,7 @@ import type {
 } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
+  ATTACHMENT_UPLOAD_TTL_MS,
   LocalAttachmentStore,
   sha256Hex,
   type AttachmentStore,
@@ -642,6 +643,48 @@ describe("WorkspaceRepository", () => {
     ]);
     expect(JSON.stringify(sync)).not.toContain(secret);
     expect(JSON.stringify(sync)).not.toContain(reaction.reaction.id);
+  });
+
+  it("skips malformed and noncanonical message references without aborting sync pages", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Canonical sync reference"),
+      mentionedUserIds: [],
+    });
+    await repository.addReaction(member, sent.message.id, "🎉");
+    const canonical = await repository.sync(observer, testPosition("0"), 100);
+    expect(canonical.events.map((event) => event.type)).toEqual([
+      "message.created",
+      "reaction.added",
+    ]);
+    const invalidReferences: readonly unknown[] = [
+      "not-a-uuid",
+      `${sent.message.id.slice(0, -1)}z`,
+      `{${sent.message.id}}`,
+      sent.message.id.replaceAll("-", ""),
+      sent.message.id.toUpperCase(),
+      `${sent.message.id} `,
+      `${sent.message.id}\n`,
+      null,
+      42,
+      { id: sent.message.id },
+    ];
+    for (const reference of invalidReferences) {
+      // A UUID containing only digits has no distinct uppercase spelling.
+      if (reference === sent.message.id) continue;
+      await pool.query(
+        `UPDATE sync_events
+            SET payload = jsonb_set(payload,
+              CASE WHEN event_type = 'message.created' THEN '{message,id}'::text[]
+                   ELSE '{reaction,messageId}'::text[] END,
+              $2::jsonb)
+          WHERE workspace_id = $1 AND event_type IN ('message.created', 'reaction.added')`,
+        [workspaceId, JSON.stringify(reference)],
+      );
+      const page = await repository.sync(observer, testPosition("0"), 100);
+      expect(page.events).toEqual([]);
+      expect(page.nextCursor).toEqual(canonical.nextCursor);
+      expect(page.hasMore).toBe(false);
+    }
   });
 
   it("rejects retracting another member's message and an author retract after five minutes", async () => {
@@ -2827,6 +2870,137 @@ describe("WorkspaceRepository", () => {
     ).rejects.toMatchObject({ kind: "invalid_input" } satisfies Partial<DomainError>);
   });
 
+  it("pages ranked search results after filtering visibility and retractions", async () => {
+    const send = async (conversationId: string, repeats: number) =>
+      (
+        await repository.sendMessage(owner, conversationId, {
+          ...message(randomUUID(), Array(repeats).fill("perfrank").join(" ")),
+          mentionedUserIds: [],
+        })
+      ).message;
+    const highestPublic = await send(generalId, 10);
+    const earlierTie = await send(generalId, 1);
+    const laterTie = await send(generalId, 1);
+    const privateChannel = await repository.createChannel(owner, {
+      name: "Private ranking",
+      slug: "private-ranking",
+      topic: null,
+      access: "members",
+    });
+    await send(privateChannel.conversation.conversation.id, 20);
+    const retracted = await send(generalId, 30);
+    await repository.retractMessage(owner, retracted.id);
+    const group = await repository.createGroupDirectConversation(
+      owner,
+      { memberIds: [memberId, observerId] },
+      randomUUID(),
+    );
+    const groupMessage = await send(group.conversation.conversation.id, 15);
+
+    const expected = [groupMessage.id, highestPublic.id, laterTie.id, earlierTie.id];
+    const unpaged = await repository.searchMessages(member, "perfrank", undefined, 50);
+    expect(unpaged.results.map(({ message: result }) => result.id)).toEqual(expected);
+    expect(unpaged.nextCursor).toBeNull();
+    const pagedIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await repository.searchMessages(member, "perfrank", cursor, 1);
+      expect(page.results).toHaveLength(1);
+      pagedIds.push(page.results[0]!.message.id);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    expect(pagedIds).toEqual(expected);
+  });
+
+  it("keeps database results bounded when searching thousands of visible conversations", async () => {
+    await pool.query(
+      `INSERT INTO conversations (id, workspace_id, kind, name, slug, channel_access, created_by)
+       SELECT gen_random_uuid(), $1, 'channel', 'Empty channel', 'empty-' || ordinal,
+              'workspace', $2
+         FROM generate_series(1, 5000) AS ordinal`,
+      [workspaceId, ownerId],
+    );
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "boundedrank result"),
+      mentionedUserIds: [],
+    });
+    const client = await pool.connect();
+    const query = vi.spyOn(client, "query");
+    const release = vi.spyOn(client, "release").mockImplementation(() => undefined);
+    const connect = vi.spyOn(pool, "connect").mockResolvedValue(client);
+    try {
+      const matched = await repository.searchMessages(member, "boundedrank", undefined, 1);
+      expect(matched.results.map(({ message: result }) => result.id)).toEqual([sent.message.id]);
+      expect(matched.nextCursor).toBeNull();
+      const empty = await repository.searchMessages(member, "no-boundedrank-match", undefined, 1);
+      expect(empty.results).toEqual([]);
+      expect(empty.nextCursor).toBeNull();
+
+      const responses: readonly unknown[] = await Promise.all(
+        query.mock.results.map((result) => result.value),
+      );
+      expect(responses.length).toBeGreaterThan(0);
+      for (const response of responses) {
+        if (
+          typeof response !== "object" ||
+          response === null ||
+          !("rows" in response) ||
+          !Array.isArray(response.rows)
+        ) {
+          throw new Error("Expected a database query result");
+        }
+        // Include the pagination look-ahead row, but never transfer the complete access set.
+        expect(response.rows.length).toBeLessThanOrEqual(2);
+      }
+    } finally {
+      connect.mockRestore();
+      query.mockRestore();
+      release.mockRestore();
+      client.release();
+    }
+  });
+
+  it("searches access and message contents from one snapshot during membership revocation", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Search snapshot",
+      slug: "search-snapshot",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "member" });
+    const before = await repository.sendMessage(owner, conversationId, {
+      ...message(randomUUID(), "snapshotrank before revocation"),
+      mentionedUserIds: [],
+    });
+    let afterId: string | undefined;
+    const racingRepository = new WorkspaceRepository(pool, {
+      afterSearchVisibilityRead: async () => {
+        await repository.removeChannelMember(owner, conversationId, memberId);
+        await repository.retractMessage(owner, before.message.id);
+        const after = await repository.sendMessage(owner, conversationId, {
+          ...message(randomUUID(), "snapshotrank after revocation"),
+          mentionedUserIds: [],
+        });
+        afterId = after.message.id;
+      },
+    });
+
+    const inFlight = await racingRepository.searchMessages(member, "snapshotrank", undefined, 50);
+    expect(afterId).toBeDefined();
+    expect(inFlight.results.map(({ message: result }) => result.id)).toEqual([before.message.id]);
+    expect(inFlight.results[0]?.message.body).toBe("snapshotrank before revocation");
+    expect(inFlight.nextCursor).toBeNull();
+    expect(
+      (await repository.searchMessages(member, "snapshotrank", undefined, 50)).results,
+    ).toEqual([]);
+    expect(
+      (await repository.searchMessages(owner, "snapshotrank", undefined, 50)).results.map(
+        ({ message: result }) => result.id,
+      ),
+    ).toEqual([afterId]);
+  });
+
   it("grants and revokes member-only channel access across every message boundary", async () => {
     const created = await repository.createChannel(owner, {
       name: "Leadership",
@@ -3881,6 +4055,132 @@ describe("WorkspaceRepository", () => {
     await expect(
       pool.query("SELECT 1 FROM attachments WHERE id = $1", [removable.attachment.id]),
     ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  async function stagePendingUpload(
+    fileName: string,
+    body: string,
+  ): Promise<{
+    bytes: Buffer;
+    contentSha256: string;
+    staged: Awaited<ReturnType<WorkspaceRepository["createFileUpload"]>>;
+  }> {
+    const bytes = Buffer.from(body);
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName,
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    return { bytes, contentSha256, staged };
+  }
+
+  async function storedUploadDeadline(attachmentId: string): Promise<Date> {
+    const result = await pool.query<{ upload_expires_at: Date | string }>(
+      `SELECT upload_expires_at FROM attachments WHERE id = $1`,
+      [attachmentId],
+    );
+    const deadline = result.rows[0]?.upload_expires_at;
+    if (deadline === undefined || deadline === null) {
+      throw new Error("Expected a stored upload deadline");
+    }
+    return deadline instanceof Date ? deadline : new Date(deadline);
+  }
+
+  it("sets pending upload expiry from the database clock", async () => {
+    const { staged } = await stagePendingUpload("clock.txt", "deadline from postgres");
+    const ttl = await pool.query<{ ttl_seconds: string }>(
+      `SELECT extract(epoch from (upload_expires_at - created_at))::text AS ttl_seconds
+         FROM attachments
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const ttlSeconds = Number(ttl.rows[0]?.ttl_seconds);
+    expect(ttlSeconds).toBeGreaterThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 - 1);
+    expect(ttlSeconds).toBeLessThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 + 1);
+    await expect(storedUploadDeadline(staged.attachment.id)).resolves.toEqual(
+      new Date(staged.expiresAt),
+    );
+  });
+
+  it("does not clean up a pending upload that is still valid on the database clock", async () => {
+    const { staged } = await stagePendingUpload("fresh.txt", "just created");
+    await repository.deleteExpiredState();
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 1 });
+  });
+
+  it("keeps an in-progress upload when the host clock is ahead of the database deadline", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-leads.txt",
+      "still valid on postgres",
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() + 60_000);
+    try {
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+      const completed = await repository.completeFileUpload(
+        owner,
+        staged.attachment.id,
+        { sizeBytes: bytes.byteLength, contentSha256 },
+        randomUUID(),
+      );
+      expect(completed.attachment.status).toBe("ready");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("rejects and cleans up an upload expired on the database clock when the host clock lags", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-lags.txt",
+      "already expired on postgres",
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() - 60_000);
+    try {
+      await expect(
+        repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes),
+      ).rejects.toMatchObject({
+        kind: "invalid_input",
+        message: "This upload has expired",
+      } satisfies Partial<DomainError>);
+      await expect(
+        repository.completeFileUpload(
+          owner,
+          staged.attachment.id,
+          { sizeBytes: bytes.byteLength, contentSha256 },
+          randomUUID(),
+        ),
+      ).rejects.toMatchObject({
+        kind: "invalid_input",
+        message: "This upload has expired",
+      } satisfies Partial<DomainError>);
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 0 });
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("authorizes group attachment reads before loading stored bytes", async () => {

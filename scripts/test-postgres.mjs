@@ -16,6 +16,10 @@ import {
 
 export { requireTestDatabaseUrl } from "./test-database-config.mjs";
 
+export function serverSuiteEnvironment(environment = process.env) {
+  return { ...environment, HYPE_COMMS_REQUIRE_TEST_DATABASE: "1" };
+}
+
 function delay(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
@@ -64,7 +68,7 @@ async function runServerSuite(arguments_) {
     ["run", "test:integration", "--workspace", "@hype-comms/server", "--", ...arguments_],
     {
       cwd: new URL("..", import.meta.url),
-      env: process.env,
+      env: serverSuiteEnvironment(process.env),
       stdio: "inherit",
     },
   );

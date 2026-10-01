@@ -20,7 +20,7 @@ describe("scoped workspace networking", () => {
     const session = lifetime();
     const chat = {
       fetch: vi.fn(() => pending.promise),
-      markSignedOut: vi.fn(async () => undefined),
+      markSignedOut: vi.fn(async () => false),
     };
     const scoped = scopedWorkspaceSession(chat, session);
     const response = scoped.fetch("https://chat.example/v2/members");
@@ -49,7 +49,7 @@ describe("scoped workspace networking", () => {
       }),
     );
     const scoped = scopedWorkspaceSession(
-      { fetch: async () => response, markSignedOut: async () => undefined },
+      { fetch: async () => response, markSignedOut: async () => false },
       session,
     );
     session.initialize(() => ({
@@ -73,8 +73,9 @@ describe("scoped workspace networking", () => {
     const scoped = scopedWorkspaceSession(
       {
         fetch,
-        markSignedOut: async (isCurrent) => {
+        markSignedOut: async (_response, isCurrent) => {
           signOutGuard = isCurrent;
+          return false;
         },
       },
       session,
@@ -83,7 +84,7 @@ describe("scoped workspace networking", () => {
     const signal = fetch.mock.calls[0]?.[1].signal;
     caller.abort();
     expect(signal?.aborted).toBe(true);
-    await scoped.markSignedOut();
+    await scoped.markSignedOut(new Response(null, { status: 401 }));
     expect(signOutGuard?.()).toBe(true);
     await session.dispose();
     expect(signOutGuard?.()).toBe(false);

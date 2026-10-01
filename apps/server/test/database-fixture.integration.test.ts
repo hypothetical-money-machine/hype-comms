@@ -22,6 +22,11 @@ describe("isolated database fixture", () => {
       "CREATE TABLE fixture_record (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY)",
     );
     await first.pool.query("INSERT INTO fixture_record DEFAULT VALUES");
+    // This migrated table has no foreign-key path to users; reset must discover it independently.
+    await first.pool.query(
+      `INSERT INTO workos_events (event_id, event_type, workos_session_id, occurred_at)
+       VALUES ('event_reset', 'session.revoked', 'session_reset', now())`,
+    );
     await expect(second.pool.query("SELECT * FROM fixture_record")).rejects.toMatchObject({
       code: "42P01",
     });
@@ -30,6 +35,7 @@ describe("isolated database fixture", () => {
     await first.reset();
 
     expect((await first.pool.query("SELECT * FROM fixture_record")).rows).toEqual([]);
+    expect((await first.pool.query("SELECT * FROM workos_events")).rows).toEqual([]);
     expect(
       (await first.pool.query("SELECT * FROM schema_migrations ORDER BY filename")).rows,
     ).toEqual(migrations.rows);
