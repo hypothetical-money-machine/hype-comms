@@ -3402,7 +3402,7 @@ describe("WorkspaceRepository", () => {
       for (const event of events) {
         expect(event.payload).toMatchObject({ conversation: { access: "humans" } });
       }
-      expect(response.nextCursor).toBe(snapshot.syncCursor);
+      expect(response.nextCursor).toEqual(snapshot.syncCursor);
     }
     expect((await readStored()).rows).toEqual(storedBefore.rows);
   });
