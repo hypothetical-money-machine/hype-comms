@@ -1,3 +1,5 @@
+import { MAX_RETRACT_RESERVATIONS, upsertRetractReservation } from "./workspace-projection";
+
 import { testPosition } from "../../shared/test-support/sync-position";
 import "fake-indexeddb/auto";
 
@@ -22,11 +24,9 @@ import {
 import {
   clearPersistentWorkspaceCaches,
   MAX_RECENT_MESSAGE_MENTIONS,
-  MAX_RETRACT_RESERVATIONS,
   MemoryWorkspaceCache,
   PersistentWorkspaceCache,
   rememberCreatedMessageMentions,
-  upsertRetractReservation,
   type CachedWorkspaceState,
   type WorkspaceCache,
 } from "./workspace-cache";
