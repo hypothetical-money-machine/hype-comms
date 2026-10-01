@@ -13,13 +13,17 @@
     "apps/*",
     "packages/*"
   ],
+  "overrides": {
+    "zod": "4.4.3"
+  },
   "allowScripts": {
     "electron-winstaller@5.4.0": true,
     "esbuild@0.25.12": true,
     "esbuild@0.28.2": true
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build:contracts": "tsc --build packages/contracts",
+    "build": "npm run build:contracts && npm run build --workspaces --if-present",
     "check": "npm run verify:test-database && npm run verify:vite-stack && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit",
     "demo": "node --env-file-if-exists=.env.local scripts/demo.mjs",
@@ -28,22 +32,19 @@
     "test:demo:headless": "node --env-file-if-exists=.env.local scripts/demo-headless-local-smoke.mjs",
     "test:demo:headless:linux": "node scripts/demo-headless-docker-smoke.mjs",
     "demo:reset": "node --env-file-if-exists=.env.local scripts/demo-reset.mjs",
-    "dev": "node --env-file-if-exists=.env.local scripts/dev.mjs",
+    "dev": "npm run build:contracts && node --env-file-if-exists=.env.local scripts/dev.mjs",
     "dev:join": "node --env-file-if-exists=.env.local scripts/dev-join.mjs",
-    "dev:desktop": "node scripts/check-renderer-port.mjs && npm run dev --workspace @hype-comms/desktop",
-    "dev:server": "npm run dev --workspace @hype-comms/server",
+    "dev:desktop": "npm run build:contracts && node scripts/check-renderer-port.mjs && npm run dev --workspace @hype-comms/desktop",
+    "dev:server": "npm run build:contracts && npm run dev --workspace @hype-comms/server",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
     "package:desktop": "npm run package --workspace @hype-comms/desktop",
     "package:desktop:linux": "npm run package:linux --workspace @hype-comms/desktop",
-    "package:desktop:linux:arm64": "npm run package:linux:arm64 --workspace @hype-comms/desktop",
     "package:desktop:appimage": "npm run package:linux:appimage --workspace @hype-comms/desktop",
-    "package:desktop:appimage:arm64": "npm run package:linux:appimage:arm64 --workspace @hype-comms/desktop",
     "package:desktop:mac": "npm run package:mac --workspace @hype-comms/desktop",
     "package:desktop:mac:arm64": "npm run package:mac:arm64 --workspace @hype-comms/desktop",
     "package:desktop:win": "npm run package:win --workspace @hype-comms/desktop",
-    "package:desktop:win:arm64": "npm run package:win:arm64 --workspace @hype-comms/desktop",
     "release": "node scripts/prepare-desktop-release.mjs",
     "seed:demo": "node --env-file-if-exists=.env.local scripts/demo.mjs --seed-only",
     "start:server": "npm run start --workspace @hype-comms/server",
@@ -52,14 +53,14 @@
     "test:hermes-plugin": "node scripts/test-hermes-plugin.mjs",
     "test:db": "scripts/test-database.sh",
     "test:postgres": "node scripts/test-postgres.mjs",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "tsc --build --pretty false && tsc -p packages/cli/tsconfig.test.json --noEmit --pretty false",
     "verify:vite-stack": "node scripts/verify-vite-stack.mjs",
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
     "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
-    "test:unit": "npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts",
     "test:integration": "npm run test:postgres",
-    "verify:test-database": "node scripts/test-postgres.mjs --ready"
+    "verify:test-database": "node scripts/test-postgres.mjs --ready",
+    "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

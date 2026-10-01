@@ -2139,6 +2139,146 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
+  it("clears an unselected conversation's unreads only after its last-message cursor is accepted", async () => {
+    const secondConversationId = "20000000-0000-4000-8000-000000000002";
+    const secondMessageId = "20000000-0000-4000-8000-000000000003";
+    const initialBootstrap = bootstrapAt("10");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: secondMessageId,
+      conversationId: secondConversationId,
+      conversationSequence: "5",
+    };
+    const secondSummary: ConversationSummary = {
+      ...channel(secondConversationId, "second-channel"),
+      lastMessage: secondMessage,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const bootstrapWithTwo: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [...initialBootstrap.conversations, secondSummary],
+    };
+    const api = new FakeDesktopApi(bootstrapWithTwo);
+    const readResult = deferred<AdvanceReadCursorResponse>();
+    vi.spyOn(api, "advanceReadCursor").mockImplementation(async (conversationId, messageId) => {
+      api.readCursorRequests.push({ conversationId, lastReadMessageId: messageId });
+      return await readResult.promise;
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+
+    runtime.markConversationAsRead(secondConversationId);
+
+    const updatedSummary = runtime.state.bootstrap?.conversations.find(
+      (c) => c.conversation.id === secondConversationId,
+    );
+    expect(updatedSummary?.unreadCount).toBe(3);
+    expect(updatedSummary?.mentionCount).toBe(1);
+
+    await settle(
+      () => api.readCursorRequests.length === 1,
+      "read cursor request for second conversation",
+    );
+    expect(api.readCursorRequests[0]).toEqual({
+      conversationId: secondConversationId,
+      lastReadMessageId: secondMessageId,
+    });
+    readResult.resolve({
+      readCursor: {
+        conversationId: secondConversationId,
+        userId: USER_ID,
+        lastReadMessageId: secondMessageId,
+        lastReadConversationSequence: "5",
+        lastReadAt: NOW,
+        updatedAt: NOW,
+      },
+      syncCursor: "11",
+    });
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations.find(
+          (current) => current.conversation.id === secondConversationId,
+        )?.unreadCount === 0,
+      "accepted last-message read cursor",
+    );
+    expect(
+      runtime.state.bootstrap?.conversations.find(
+        (current) => current.conversation.id === secondConversationId,
+      ),
+    ).toMatchObject({ unreadCount: 0, mentionCount: 0 });
+    await runtime.stop();
+  });
+
+  it("keeps unread and mention counts until a retried mark-as-read request is accepted", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const initialBootstrap = bootstrapAt("10");
+    const unreadSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      lastMessage: peerMessage,
+      readCursor: null,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const api = new FakeDesktopApi({
+      ...initialBootstrap,
+      conversations: [unreadSummary],
+    });
+    api.readCursorFailures = 2;
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    try {
+      await runtime.start(session);
+      runtime.markConversationAsRead(CONVERSATION_ID);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.readCursorRequests).toHaveLength(1);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 3,
+        mentionCount: 1,
+        readCursor: null,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(api.readCursorRequests).toHaveLength(2);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 3,
+        mentionCount: 1,
+        readCursor: null,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(api.readCursorRequests).toHaveLength(3);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 0,
+        mentionCount: 0,
+        readCursor: { lastReadMessageId: PEER_MESSAGE_ID },
+      });
+    } finally {
+      await runtime.stop();
+      random.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does nothing when marking a conversation as read that has 0 unreads", async () => {
+    const initialBootstrap = bootstrapAt("10");
+    const zeroUnreadsSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const bootstrap: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [zeroUnreadsSummary],
+    };
+    const api = new FakeDesktopApi(bootstrap);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    runtime.markConversationAsRead(CONVERSATION_ID);
+    expect(api.readCursorRequests).toHaveLength(0);
+  });
+
   it("retries a visible read target after a transient cursor failure", async () => {
     vi.useFakeTimers();
     const random = vi.spyOn(Math, "random").mockReturnValue(0);
