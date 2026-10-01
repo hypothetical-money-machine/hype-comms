@@ -62,6 +62,32 @@ describe("scoped workspace networking", () => {
     await expect(operation).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("aborts pending networking when its lifetime ends while the caller stays active", async () => {
+    const session = lifetime();
+    const caller = new AbortController();
+    const entered = deferred<void>();
+    const scoped = scopedWorkspaceSession(
+      {
+        fetch: async (_url, init = {}) => {
+          const signal = init.signal;
+          if (signal == null) throw new Error("Expected the network cancellation signal");
+          entered.resolve();
+          return new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+        markSignedOut: async () => true,
+      },
+      session,
+    );
+    const operation = scoped.fetch("https://chat.example/v1/members", { signal: caller.signal });
+    const rejected = expect(operation).rejects.toMatchObject({ name: "AbortError" });
+    await entered.promise;
+    await session.dispose();
+    await rejected;
+    expect(caller.signal.aborted).toBe(false);
+  });
+
   it("combines cancellation and defers the active-scope check until sign-out executes", async () => {
     const session = lifetime();
     const caller = new AbortController();
