@@ -491,7 +491,9 @@ describe("PreferencesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Design a theme" }));
     fireEvent.click(screen.getByRole("button", { name: "Rose accent" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Open conversation" }));
+    const openConversation = screen.getByRole("button", { name: "Open conversation" });
+    openConversation.focus();
+    fireEvent.click(openConversation);
     const warning = screen.getByRole("alertdialog", { name: "Discard your changes?" });
     expect(warning).toBeTruthy();
     expect(page.getAttribute("aria-hidden")).toBe("true");

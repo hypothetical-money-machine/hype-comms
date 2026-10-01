@@ -59,7 +59,9 @@ describe("ChannelCreatePopover", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
 
-    open(trigger);
+    const reopened = open(trigger);
+    expect(document.activeElement).toBe(reopened);
+    trigger.focus();
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(trigger));

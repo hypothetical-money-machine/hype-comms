@@ -206,7 +206,7 @@ describe("WorkspaceSearch", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close search" }));
 
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(document.activeElement).toBe(trigger);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it("ignores a late search response after the dialog closes", async () => {
