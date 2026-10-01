@@ -199,7 +199,7 @@ export class WorkspaceTransport {
 
   async #payload(response: Response): Promise<unknown> {
     if (response.ok) return response.json();
-    if (response.status === 401) await this.session.markSignedOut();
+    if (response.status === 401) await this.session.markSignedOut(response);
     let message = `Workspace request failed (${response.status})`;
     try {
       const parsed = apiErrorEnvelopeSchema.safeParse(await response.json());
@@ -587,8 +587,10 @@ export class WorkspaceTransport {
         });
       }
       if (response.status === 401) {
-        await this.session.markSignedOut();
-        return { status: "authentication_required" };
+        const signedOut = await this.session.markSignedOut(response);
+        return signedOut
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null };
       }
       if (response.status === 429) {
         return {
@@ -658,8 +660,10 @@ export class WorkspaceTransport {
       return accepted.data;
     }
     if (response.status === 401) {
-      await this.session.markSignedOut();
-      return { status: "authentication_required" };
+      const signedOut = await this.session.markSignedOut(response);
+      return signedOut
+        ? { status: "authentication_required" }
+        : { status: "retryable", reason: "server", retryAfterMs: null };
     }
     if (response.status === 410) {
       return { status: "reset_required", reason: "cursor_expired" };
