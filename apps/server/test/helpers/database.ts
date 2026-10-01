@@ -1,23 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import { describe } from "vitest";
 import { escapeIdentifier, type Pool } from "pg";
 
 import { runMigrations } from "../../src/db/migrate.js";
 import { createPool } from "../../src/db/pool.js";
 
-/**
- * The Postgres test database URL, when the test host has one configured. Suites that need
- * Postgres should skip via {@link describeWithPostgres} rather than reading this directly.
- */
+/** The configured PostgreSQL parent URL; integration setup validates it before suites run. */
 export const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-
-/**
- * Use in place of `describe` for any suite that needs a live Postgres database. Skips the whole
- * suite when `HYPE_COMMS_TEST_DATABASE_URL` is not set, matching every server test file's
- * previous local `describeWithPostgres` definition.
- */
-export const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 
 /**
  * Rewrites a Postgres connection URL so that new connections default to the given schema (falling
@@ -50,8 +39,7 @@ export interface CreateTestSchemaOptions {
 
 /**
  * Creates an isolated schema in the shared Postgres test database, points a pool at it, and runs
- * migrations against it. Callers must have already confirmed `testDatabaseUrl` is defined (i.e.
- * this is only invoked inside a `describeWithPostgres` block).
+ * migrations against it. Integration setup requires a test database URL before suites run.
  */
 export async function createTestSchema(options: CreateTestSchemaOptions): Promise<TestSchema> {
   if (testDatabaseUrl === undefined) {
@@ -59,22 +47,42 @@ export async function createTestSchema(options: CreateTestSchemaOptions): Promis
   }
   const schemaName = `${options.prefix}_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const adminPool = createPool({ url: testDatabaseUrl, poolSize: options.adminPoolSize ?? 2 });
-  await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-  const pool = createPool({
-    url: schemaScopedUrl(testDatabaseUrl, schemaName),
-    poolSize: options.poolSize ?? 8,
-  });
-  await runMigrations(pool, options.migrationsDirectory);
-  return {
-    adminPool,
-    pool,
-    schemaName,
-    async drop() {
-      await pool.end();
-      await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-      await adminPool.end();
-    },
+  let pool: Pool | undefined;
+  let created = false;
+  let disposal: Promise<void> | undefined;
+  const drop = (): Promise<void> => {
+    disposal ??= (async () => {
+      try {
+        await pool?.end();
+      } finally {
+        try {
+          if (created) await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
+        } finally {
+          await adminPool.end();
+        }
+      }
+    })();
+    return disposal;
   };
+  try {
+    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
+    created = true;
+    pool = createPool({
+      url: schemaScopedUrl(testDatabaseUrl, schemaName),
+      poolSize: options.poolSize ?? 8,
+    });
+    await runMigrations(pool, options.migrationsDirectory);
+    return { adminPool, pool, schemaName, drop };
+  } catch (error) {
+    try {
+      await drop();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Test schema setup and cleanup failed", {
+        cause: cleanupError,
+      });
+    }
+    throw error;
+  }
 }
 
 export interface ResetDatabaseOptions {

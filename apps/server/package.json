@@ -19,14 +19,10 @@
     "migrate": "tsx src/db/migrate.ts",
     "migrate:dist": "node dist/db/migrate.js",
     "start": "node dist/main.js",
-    "pretest": "npm run build --workspace @hype-comms/contracts",
-    "test": "vitest run",
-    "pretypecheck": "npm run build --workspace @hype-comms/contracts",
+    "test": "npm run --prefix ../.. build:contracts && vitest run",
     "typecheck": "tsc --build --pretty false",
-    "pretest:unit": "npm run build --workspace @hype-comms/contracts",
-    "pretest:integration": "npm run build --workspace @hype-comms/contracts",
-    "test:unit": "vitest run --project unit",
-    "test:integration": "vitest run --project integration"
+    "test:unit": "npm run --prefix ../.. build:contracts && vitest run --project unit",
+    "test:integration": "npm run --prefix ../.. build:contracts && vitest run --project integration"
   },
   "engines": {
     "node": ">=24"

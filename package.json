@@ -22,6 +22,7 @@
     "esbuild@0.28.2": true
   },
   "scripts": {
+    "build:contracts": "tsc --build packages/contracts",
     "build": "npm run build:contracts && npm run build --workspaces --if-present",
     "check": "npm run verify:test-database && npm run verify:vite-stack && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit",
@@ -39,6 +40,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings=0",
     "package:desktop": "npm run package --workspace @hype-comms/desktop",
+    "perf:baseline": "node scripts/performance-baseline.mjs",
     "package:desktop:linux": "npm run package:linux --workspace @hype-comms/desktop",
     "package:desktop:appimage": "npm run package:linux:appimage --workspace @hype-comms/desktop",
     "package:desktop:mac": "npm run package:mac --workspace @hype-comms/desktop",
@@ -57,10 +59,9 @@
     "verify:desktop-package": "node scripts/verify-desktop-package.mjs",
     "verify:desktop-package:macos-release": "node scripts/verify-macos-release.mjs",
     "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
-    "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts",
     "test:integration": "npm run test:postgres",
     "verify:test-database": "node scripts/test-postgres.mjs --ready",
-    "build:contracts": "tsc --build packages/contracts"
+    "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

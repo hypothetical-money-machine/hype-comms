@@ -6,28 +6,11 @@ import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
+import type { ConversationRow } from "./records.js";
+
+export type { ConversationRow } from "./records.js";
 
 export type AuthenticatedTaskIdentity = AuthenticatedIdentity | AuthenticatedBotIdentity;
-
-export interface ConversationRow extends QueryResultRow {
-  id: string;
-  workspace_id: string;
-  kind: "channel" | "direct_message" | "group_direct_message";
-  name: string | null;
-  slug: string | null;
-  topic: string | null;
-  channel_access: "workspace" | "members" | null;
-  human_only: boolean;
-  channel_mode: "chat" | "announcement" | null;
-  is_system: boolean;
-  is_archived: boolean;
-  created_by: string | null;
-  dm_user_low_id: string | null;
-  dm_user_high_id: string | null;
-  last_task_number: string;
-  created_at: Date | string;
-  updated_at: Date | string;
-}
 
 interface TicketRow extends QueryResultRow {
   workspace_id: string;
