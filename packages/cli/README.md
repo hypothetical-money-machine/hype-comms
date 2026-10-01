@@ -210,7 +210,7 @@ given, it starts at bootstrap's current cursor rather than replaying history. A 
 `system.resync_required` before exit so callers can bootstrap cleanly.
 
 `messages get MESSAGE_ID --json` fetches exactly one currently authorized message through
-`GET /v1/messages/:id`.
+`GET /v2/messages/:id`.
 
 Exit codes are:
 

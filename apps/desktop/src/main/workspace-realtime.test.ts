@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { WorkspaceProtocolError } from "./workspace-protocol";
 
 import type { ProductRealtimeEvent } from "@hype-comms/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -240,6 +241,37 @@ function createHarness(options?: {
 }
 
 describe("WorkspaceRealtime", () => {
+  it("stops on a ticket protocol mismatch without reconnecting", async () => {
+    const harness = createHarness({
+      ticket: async () => {
+        throw new WorkspaceProtocolError();
+      },
+    });
+    harness.realtime.start("8", SCOPE_A);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(harness.states).toEqual(["connecting", "incompatible"]);
+    expect(harness.ticket).toHaveBeenCalledOnce();
+    expect(harness.sockets).toEqual([]);
+    harness.realtime.stop();
+  });
+
+  it.each([426, 404])("stops on an incompatible HTTP %s websocket upgrade", async (statusCode) => {
+    const harness = createHarness();
+    harness.realtime.start("8", SCOPE_A);
+    await flushMicrotasks();
+    const destroy = vi.fn();
+    const socket = harness.sockets[0]!;
+    socket.emit("unexpected-response", {}, { statusCode, headers: {}, destroy });
+    socket.fail();
+    socket.closed();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(harness.states).toEqual(["connecting", "incompatible"]);
+    expect(harness.ticket).toHaveBeenCalledOnce();
+    harness.realtime.stop();
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0);

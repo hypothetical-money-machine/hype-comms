@@ -290,18 +290,16 @@ export class WorkspaceMessageOperations {
     conversationId: string,
     before: string | undefined,
     limit: number,
-    includeThreadReplies = false,
   ): Promise<MessageHistoryResponse> {
     const client = await this.pool.connect();
     try {
       await requireVisibleConversation(client, identity, conversationId, false);
       const beforeSequence = decodeHistoryCursor(before);
-      const threadScope = includeThreadReplies ? "" : "AND thread_root_id IS NULL";
       const result = await client.query<MessageRow>(
         `SELECT *
            FROM messages
           WHERE conversation_id = $1
-            ${threadScope}
+            AND thread_root_id IS NULL
             AND deleted_at IS NULL
             AND ($2::bigint IS NULL OR conversation_sequence < $2::bigint)
           ORDER BY conversation_sequence DESC, id DESC
@@ -318,13 +316,11 @@ export class WorkspaceMessageOperations {
           client,
           messages.map((message) => message.id),
         ),
-        threadSummaries: includeThreadReplies
-          ? []
-          : await this.#threadSummaries(
-              client,
-              messages.map((message) => message.id),
-            ),
-        threadsSupported: !includeThreadReplies,
+        threadSummaries: await this.#threadSummaries(
+          client,
+          messages.map((message) => message.id),
+        ),
+        threadsSupported: true,
         nextCursor:
           hasMore && oldest !== undefined
             ? encodeHistoryCursor(oldest.conversation_sequence)
@@ -354,7 +350,11 @@ export class WorkspaceMessageOperations {
         const beforeSequence = decodeHistoryCursor(before);
         let throughSequence: string | null = null;
         if (throughMessageId !== undefined) {
-          const through = await client.query<{ conversation_sequence: string } & QueryResultRow>(
+          const through = await client.query<
+            {
+              conversation_sequence: string;
+            } & QueryResultRow
+          >(
             `SELECT conversation_sequence
                FROM messages
               WHERE id = $1
@@ -579,7 +579,11 @@ export class WorkspaceMessageOperations {
     }
     const client = await this.pool.connect();
     try {
-      const visible = await client.query<{ id: string } & QueryResultRow>(
+      const visible = await client.query<
+        {
+          id: string;
+        } & QueryResultRow
+      >(
         `SELECT message.id
            FROM messages AS message
            JOIN conversations AS conversation ON conversation.id = message.conversation_id
@@ -723,8 +727,6 @@ export class WorkspaceMessageOperations {
     query: string,
     after: string | undefined,
     limit: number,
-    includeGroupDirectMessages = true,
-    includeSystemChannels = false,
   ): Promise<MessageSearchResponse> {
     const normalizedQuery = query.trim();
     const queryHash = searchQueryHash(normalizedQuery);
@@ -747,8 +749,6 @@ export class WorkspaceMessageOperations {
              FROM conversations AS conversation
             WHERE conversation.workspace_id = $1
               AND ${conversationVisibilitySql("conversation", "$7")}
-              AND ($8::boolean OR conversation.kind <> 'group_direct_message')
-              AND ($9::boolean OR NOT conversation.is_system)
          ), search_page AS (
            SELECT message.id, message.committed_workspace_sequence,
                   ts_rank_cd(message.search_vector, search_query.value) AS search_rank
@@ -785,8 +785,6 @@ export class WorkspaceMessageOperations {
             cursor?.id ?? null,
             pageLimit + 1,
             identity.currentUser.user.id,
-            includeGroupDirectMessages,
-            includeSystemChannels,
           ],
         );
         const hasMore = result.rows.length > pageLimit;
@@ -806,7 +804,6 @@ export class WorkspaceMessageOperations {
     conversationId: string,
     input: SendConversationMessageRequest,
     correlationId?: string,
-    announcementCapability = false,
   ): Promise<SendMessageResponse> {
     if (input.attachmentIds.length !== new Set(input.attachmentIds).size) {
       throw new DomainError("invalid_input", "Attachment IDs must be unique");
@@ -1007,24 +1004,13 @@ export class WorkspaceMessageOperations {
           });
           throw new DomainError("access_denied", "Only workspace owners can post bulletins");
         }
-        if (!announcementCapability) {
-          auditAnnouncement(this.hooks, {
-            operation: "bulletin.publish",
-            outcome: "rejected",
-            actorUserId: identity.currentUser.user.id,
-            workspaceId: identity.currentUser.workspaceId,
-            conversationId,
-            correlationId,
-            reason: "capability_required",
-          });
-          throw new DomainError(
-            "access_denied",
-            "A compatible client is required to post bulletins",
-          );
-        }
       }
       if (input.threadRootId !== null) {
-        const root = await client.query<{ id: string } & QueryResultRow>(
+        const root = await client.query<
+          {
+            id: string;
+          } & QueryResultRow
+        >(
           `SELECT id
              FROM messages
             WHERE id = $1
@@ -1043,8 +1029,11 @@ export class WorkspaceMessageOperations {
         conversationId,
         input.attachmentIds,
       );
-
-      const conversationSequenceResult = await client.query<{ next: string } & QueryResultRow>(
+      const conversationSequenceResult = await client.query<
+        {
+          next: string;
+        } & QueryResultRow
+      >(
         `UPDATE conversations
             SET last_message_sequence = last_message_sequence + 1,
                 updated_at = clock_timestamp()
@@ -1202,7 +1191,11 @@ export class WorkspaceMessageOperations {
     messageId: string,
   ): Promise<RetractMessageResponse> {
     return runWorkspaceTransaction(this.pool, async (client) => {
-      const located = await client.query<{ conversation_id: string } & QueryResultRow>(
+      const located = await client.query<
+        {
+          conversation_id: string;
+        } & QueryResultRow
+      >(
         `SELECT conversation_id
            FROM messages
           WHERE id = $1
@@ -1220,8 +1213,11 @@ export class WorkspaceMessageOperations {
         true,
       );
       await requireActivePrincipal(client, identity);
-
-      const locked = await client.query<MessageRow & { retract_window_elapsed: boolean }>(
+      const locked = await client.query<
+        MessageRow & {
+          retract_window_elapsed: boolean;
+        }
+      >(
         `SELECT message.*,
                 clock_timestamp() > (message.created_at + interval '5 minutes')
                   AS retract_window_elapsed
@@ -1513,8 +1509,15 @@ export class WorkspaceMessageOperations {
     client: PoolClient,
     identity: AuthenticatedIdentity,
     messageId: string,
-  ): Promise<{ readonly conversation: ConversationRow; readonly message: MessageRow }> {
-    const target = await client.query<{ conversation_id: string } & QueryResultRow>(
+  ): Promise<{
+    readonly conversation: ConversationRow;
+    readonly message: MessageRow;
+  }> {
+    const target = await client.query<
+      {
+        conversation_id: string;
+      } & QueryResultRow
+    >(
       `SELECT conversation_id
          FROM messages
         WHERE id = $1

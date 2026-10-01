@@ -210,7 +210,7 @@ async function requestEnrollment(context: CommandContext, args: readonly string[
     await clientFromContext(context)
   ).request({
     method: "POST",
-    path: "/v1/agent-enrollments",
+    path: "/v2/agent-enrollments",
     body,
     requestSchema: requestAgentEnrollmentSchema,
     responseSchema: agentEnrollmentResponseSchema,
@@ -259,7 +259,7 @@ async function redeem(context: CommandContext, args: readonly string[]): Promise
   });
   const redeemed = await unauthenticated.request({
     method: "POST",
-    path: `/v1/agent-enrollments/${id}/redeem`,
+    path: `/v2/agent-enrollments/${id}/redeem`,
     responseSchema: redeemAgentEnrollmentResponseSchema,
     includeCredential: false,
     headers: { authorization: `${AGENT_ENROLLMENT_AUTHORIZATION_SCHEME} ${token}` },
@@ -276,7 +276,7 @@ async function redeem(context: CommandContext, args: readonly string[]): Promise
     timeoutMs: context.options.timeoutMs,
   });
   const principal = await activeClient.request({
-    path: "/v1/auth/me",
+    path: "/v2/auth/me",
     responseSchema: currentPrincipalSchema,
   });
   if (!("type" in principal) || principal.type !== "agent") {
@@ -333,7 +333,7 @@ export async function agentEnrollmentsCommand(
     const parsed = parseCommandArguments(args, {});
     const [value] = requirePositionals(parsed, 1);
     const response = await client.request({
-      path: `/v1/agent-enrollments/${enrollmentId(value!)}`,
+      path: `/v2/agent-enrollments/${enrollmentId(value!)}`,
       responseSchema: agentEnrollmentResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -344,7 +344,7 @@ export async function agentEnrollmentsCommand(
     const [value] = requirePositionals(parsed, 1);
     const response = await client.request({
       method: "POST",
-      path: `/v1/agent-enrollments/${enrollmentId(value!)}/cancel`,
+      path: `/v2/agent-enrollments/${enrollmentId(value!)}/cancel`,
       responseSchema: agentEnrollmentResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -353,7 +353,7 @@ export async function agentEnrollmentsCommand(
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
     const response = await client.request({
-      path: "/v1/agent-enrollments",
+      path: "/v2/agent-enrollments",
       responseSchema: listAgentEnrollmentsResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -365,7 +365,7 @@ export async function agentEnrollmentsCommand(
     const body = { decision: subcommand } as const;
     const response = await client.request({
       method: "POST",
-      path: `/v1/agent-enrollments/${enrollmentId(value!)}/review`,
+      path: `/v2/agent-enrollments/${enrollmentId(value!)}/review`,
       body,
       requestSchema: reviewAgentEnrollmentRequestSchema,
       responseSchema: agentEnrollmentResponseSchema,
@@ -387,7 +387,7 @@ export async function agentEnrollmentPolicyCommand(
   if (subcommand === "show") {
     requirePositionals(parseCommandArguments(args, {}), 0);
     const response = await client.request({
-      path: "/v1/agent-enrollment-policy",
+      path: "/v2/agent-enrollment-policy",
       responseSchema: agentEnrollmentPolicyResponseSchema,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -403,7 +403,7 @@ export async function agentEnrollmentPolicyCommand(
     const body = { mode: mode.data };
     const response = await client.request({
       method: "PATCH",
-      path: "/v1/agent-enrollment-policy",
+      path: "/v2/agent-enrollment-policy",
       body,
       requestSchema: updateAgentEnrollmentPolicyRequestSchema,
       responseSchema: agentEnrollmentPolicyResponseSchema,

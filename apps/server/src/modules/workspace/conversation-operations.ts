@@ -48,7 +48,6 @@ import {
 import {
   iso,
   mapConversation,
-  mapStoredConversation,
   nullableIso,
   participants,
   type ConversationRow,
@@ -301,21 +300,12 @@ export class WorkspaceConversationOperations {
     identity: AuthenticatedIdentity,
     after: string | undefined,
     limit: number,
-    includeGroupDirectMessages = true,
-    includeSystemChannels = false,
   ): Promise<ListConversationsResponse> {
     const anchorId = decodeConversationCursor(after);
     return runWorkspaceTransaction(
       this.pool,
       async (client) => {
-        const page = await readConversationPage(
-          client,
-          identity,
-          anchorId,
-          limit,
-          includeGroupDirectMessages,
-          includeSystemChannels,
-        );
+        const page = await readConversationPage(client, identity, anchorId, limit);
         return listConversationsResponseSchema.parse({
           conversations: page.conversations,
           nextCursor: page.nextCursor,
@@ -462,7 +452,6 @@ export class WorkspaceConversationOperations {
     identity: AuthenticatedIdentity,
     input: CreateChannelRequest,
     idempotencyKey?: string,
-    announcementCapability = false,
     correlationId?: string,
     defaultAgentAgencyEnabled = true,
   ): Promise<ConversationMutationResponse> {
@@ -489,7 +478,6 @@ export class WorkspaceConversationOperations {
           );
           const allowed =
             announcementChannelsAvailable &&
-            announcementCapability &&
             principal.kind === "human" &&
             principal.role === "owner";
           if (!allowed) {
@@ -552,7 +540,7 @@ export class WorkspaceConversationOperations {
           type: "channel.created",
           conversation: row,
           payload: {
-            conversation: mapStoredConversation(row),
+            conversation: mapConversation(row),
             participantIds: audienceUserIds,
           },
           audienceUserIds,
@@ -812,7 +800,7 @@ export class WorkspaceConversationOperations {
         type: "channel.archived",
         conversation: row,
         payload: {
-          conversation: mapStoredConversation(row),
+          conversation: mapConversation(row),
           participantIds: audienceUserIds,
         },
         audienceUserIds,
@@ -859,7 +847,7 @@ export class WorkspaceConversationOperations {
           type: "direct_conversation.created",
           conversation: row,
           payload: {
-            conversation: mapStoredConversation(row),
+            conversation: mapConversation(row),
             participantIds,
           },
           audienceUserIds: participantIds,
@@ -937,7 +925,7 @@ export class WorkspaceConversationOperations {
           const event = await this.events.insert(client, identity, {
             type: "direct_conversation.created",
             conversation,
-            payload: { conversation: mapStoredConversation(conversation), participantIds },
+            payload: { conversation: mapConversation(conversation), participantIds },
             audienceUserIds: participantIds,
           });
           return conversationMutationResponseSchema.parse({
@@ -1164,7 +1152,11 @@ export class WorkspaceConversationOperations {
         [workspaceId],
       );
     }
-    const result = await client.query<{ humans_only_channels_available: boolean } & QueryResultRow>(
+    const result = await client.query<
+      {
+        humans_only_channels_available: boolean;
+      } & QueryResultRow
+    >(
       `SELECT humans_only_channels_available
          FROM workspaces
         WHERE id = $1

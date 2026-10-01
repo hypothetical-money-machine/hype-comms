@@ -5,7 +5,6 @@ import {
   workspaceBootstrapResponseSchema,
   workspaceEventSchema,
   workspaceSchema,
-  type Conversation,
   type SyncResponse,
   type WorkspaceBootstrapResponse,
   type WorkspaceEvent,
@@ -27,9 +26,7 @@ import { runWorkspaceTransaction } from "./transaction.js";
 import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import { readWorkspaceMembers } from "./workspace-member-reader.js";
 import { readWorkspaceSequence } from "./workspace-sequence.js";
-
-const REALTIME_TICKET_TTL_MS = 30_000;
-
+const REALTIME_TICKET_TTL_MS = 30000;
 interface WorkspaceRow extends QueryResultRow {
   id: string;
   name: string;
@@ -62,20 +59,7 @@ export type { ConsumedRealtimeTicket } from "./authorization.js";
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
   readonly userId: string;
-  readonly reactionEvents?: boolean;
-  readonly readStateEvents?: boolean;
-  readonly taskEvents?: boolean;
-  readonly announcementChannels?: boolean;
-  readonly participatedThreadNotifications?: boolean;
-  readonly messageRetractEvents?: boolean;
-  readonly memberProfiles?: boolean;
-  readonly ephemeralActivity?: boolean;
-  readonly groupDirectMessages?: boolean;
-  readonly humansOnlyChannels?: boolean;
-  readonly systemChannels?: boolean;
 }
-
-export type WorkspaceClientCapabilities = Omit<WorkspacePrincipal, "workspaceId" | "userId">;
 
 // Preserve id::text equality: PostgreSQL prints UUIDs in canonical lowercase form. Guard the
 // payload cast so malformed or noncanonical stored references stay invisible instead of failing
@@ -114,11 +98,7 @@ export class WorkspaceSyncOperations {
   get humansOnlyChannelsEnabled(): boolean {
     return this.hooks.humansOnlyChannelsEnabled ?? false;
   }
-  async bootstrap(
-    identity: AuthenticatedIdentity,
-    includeGroupDirectMessages = true,
-    includeSystemChannels = false,
-  ): Promise<WorkspaceBootstrapResponse> {
+  async bootstrap(identity: AuthenticatedIdentity): Promise<WorkspaceBootstrapResponse> {
     if (this.announcementChannelsEnabled) {
       await this.pool.query(
         `UPDATE workspaces
@@ -153,14 +133,12 @@ export class WorkspaceSyncOperations {
         await this.hooks.afterBootstrapCursorRead?.();
         const members = await readWorkspaceMembers(client, workspace.id);
         // Bootstrap only ever carries the first page; the client pages the rest through
-        // GET /v1/conversations, so a workspace can grow past the response cap without bricking.
+        // GET /v2/conversations, so a workspace can grow past the response cap without bricking.
         const page = await readConversationPage(
           client,
           identity,
           null,
           CONVERSATION_PAGE_DEFAULT_LIMIT,
-          includeGroupDirectMessages,
-          includeSystemChannels,
         );
         return workspaceBootstrapResponseSchema.parse({
           currentUser: identity.currentUser,
@@ -182,16 +160,9 @@ export class WorkspaceSyncOperations {
       { isolationLevel: "repeatable_read", readOnly: true },
     );
   }
-
-  async sync(
-    identity: AuthenticatedIdentity,
-    after: string,
-    limit: number,
-    capabilities: WorkspaceClientCapabilities = {},
-  ): Promise<SyncResponse> {
+  async sync(identity: AuthenticatedIdentity, after: string, limit: number): Promise<SyncResponse> {
     return this.syncPrincipal(
       {
-        ...capabilities,
         workspaceId: identity.currentUser.workspaceId,
         userId: identity.currentUser.user.id,
       },
@@ -213,7 +184,11 @@ export class WorkspaceSyncOperations {
       if (afterSequence > highWaterSequence) {
         throw new DomainError("sync_position_expired", "The sync cursor is no longer valid");
       }
-      const earliest = await client.query<{ sequence: string | null } & QueryResultRow>(
+      const earliest = await client.query<
+        {
+          sequence: string | null;
+        } & QueryResultRow
+      >(
         `SELECT min(workspace_sequence)::text AS sequence
            FROM sync_events
           WHERE workspace_id = $1`,
@@ -232,12 +207,12 @@ export class WorkspaceSyncOperations {
                     SELECT conversation.human_only
                       FROM conversations AS conversation
                      WHERE conversation.id = event.conversation_id
+                       AND conversation.workspace_id = event.workspace_id
                   ),
                   false
                 ) AS conversation_human_only,
                 (
-                  $7::boolean
-                  AND EXISTS (
+                  EXISTS (
                     SELECT 1
                       FROM sync_event_notification_reasons AS notification_reason
                      WHERE notification_reason.event_id = event.id
@@ -273,18 +248,9 @@ export class WorkspaceSyncOperations {
                       )
                     )
                   )
-                  AND (
-                    $5::boolean
-                    OR event.event_type NOT IN ('reaction.added', 'reaction.removed')
-                  )
-                  AND (
-                    $6::boolean
-                    OR event.event_type NOT IN ('task.created', 'task.updated')
-                  )
-                  AND (
-                    $8::boolean
-                    OR event.event_type <> 'message.retracted'
-                  )
+
+
+
                   AND (
                     event.event_type <> 'message.created'
                     OR EXISTS (
@@ -305,126 +271,49 @@ export class WorkspaceSyncOperations {
                          AND reaction_message.deleted_at IS NULL
                     )
                   )
-                  AND (
-                    $9::boolean
-                    OR event.conversation_id IS NULL
-                    OR NOT EXISTS (
-                      SELECT 1
-                        FROM conversations AS group_conversation
-                       WHERE group_conversation.id = event.conversation_id
-                          AND group_conversation.workspace_id = event.workspace_id
-                          AND group_conversation.kind = 'group_direct_message'
-                    )
-                  )
-                  AND (
-                    $10::boolean
-                    OR event.conversation_id IS NULL
-                    OR NOT EXISTS (
-                      SELECT 1
-                        FROM conversations AS system_conversation
-                       WHERE system_conversation.id = event.conversation_id
-                          AND system_conversation.workspace_id = event.workspace_id
-                          AND system_conversation.is_system
-                    )
-                  )
+
+
                 ) AS visible
            FROM sync_events AS event
           WHERE event.workspace_id = $1
             AND event.workspace_sequence > $3::bigint
           ORDER BY event.workspace_sequence
           LIMIT $4`,
-        [
-          principal.workspaceId,
-          principal.userId,
-          after,
-          limit + 1,
-          principal.reactionEvents ?? false,
-          principal.taskEvents ?? false,
-          principal.participatedThreadNotifications ?? false,
-          principal.messageRetractEvents ?? false,
-          principal.groupDirectMessages ?? false,
-          principal.systemChannels ?? false,
-        ],
+        [principal.workspaceId, principal.userId, after, limit + 1],
       );
       const scanned = rows.rows.slice(0, limit);
       const nextCursor = scanned.at(-1)?.workspace_sequence ?? after;
       const response = syncResponseSchema.parse({
-        events: scanned
-          .filter((row) => row.visible)
-          .map((row) =>
-            this.#mapEvent(
-              row,
-              principal.readStateEvents ?? false,
-              principal.participatedThreadNotifications ?? false,
-              principal.memberProfiles ?? false,
-              principal.humansOnlyChannels ?? false,
-            ),
-          ),
+        events: scanned.filter((row) => row.visible).map((row) => this.#mapEvent(row)),
         nextCursor,
         highWaterCursor,
         hasMore: rows.rows.length > limit,
       });
-      let events = response.events;
-      if (!(principal.announcementChannels ?? false)) {
-        events = events.map((event) => this.#legacyAnnouncementEvent(event));
-      }
-      return events === response.events ? response : ({ ...response, events } as SyncResponse);
+      return response;
     } finally {
       client.release();
     }
   }
-
-  async issueRealtimeTicket(
-    identity: AuthenticatedIdentity,
-    capabilities: WorkspaceClientCapabilities = {},
-  ) {
-    const {
-      reactionEvents = false,
-      readStateEvents = false,
-      taskEvents = false,
-      announcementChannels = false,
-      participatedThreadNotifications = false,
-      messageRetractEvents = false,
-      memberProfiles = false,
-      ephemeralActivity = false,
-      groupDirectMessages = false,
-      humansOnlyChannels = false,
-      systemChannels = false,
-    } = capabilities;
+  async issueRealtimeTicket(identity: AuthenticatedIdentity) {
     const deviceSessionId = identity.sessionId ?? null;
     const agentTokenId = identity.agentTokenId ?? null;
     if ((deviceSessionId === null) === (agentTokenId === null)) {
       throw new Error("Realtime tickets require exactly one authenticated credential");
     }
     const token = randomBytes(32).toString("base64url");
-    const hash = hashToken(token);
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
-         (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at,
-          reaction_events, read_state_events, task_events, announcement_channels,
-          participated_thread_notifications, message_retract_events, member_profiles,
-          ephemeral_activity, group_direct_messages, humans_only_channels, system_channels)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+         (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [
         randomUUID(),
         identity.currentUser.workspaceId,
         identity.currentUser.user.id,
         deviceSessionId,
         agentTokenId,
-        hash,
+        hashToken(token),
         expiresAt,
-        reactionEvents,
-        readStateEvents,
-        taskEvents,
-        announcementChannels,
-        participatedThreadNotifications,
-        messageRetractEvents,
-        memberProfiles,
-        ephemeralActivity,
-        groupDirectMessages,
-        humansOnlyChannels,
-        systemChannels,
       ],
     );
     return realtimeTicketResponseSchema.parse({
@@ -443,14 +332,7 @@ export class WorkspaceSyncOperations {
   ): Promise<RealtimePrincipalRevalidation> {
     return this.authz.revalidateRealtimePrincipal(principal);
   }
-
-  #mapEvent(
-    row: EventRow,
-    readStateEvents: boolean,
-    participatedThreadNotifications: boolean,
-    memberProfiles: boolean,
-    humansOnlyChannels: boolean,
-  ): WorkspaceEvent {
+  #mapEvent(row: EventRow): WorkspaceEvent {
     let event = workspaceEventSchema.parse({
       version: 1,
       id: row.id,
@@ -464,84 +346,31 @@ export class WorkspaceSyncOperations {
       delivery: "at_least_once",
       payload: row.payload,
     });
-    if (humansOnlyChannels && row.conversation_human_only) {
-      event = this.#humansOnlyChannelEvent(event);
-    } else if (!humansOnlyChannels) {
-      // HTTP already converts access: "humans" → "members" for clients that did not negotiate
-      // humans-only-channels-v1. Realtime and HTTP sync share this mapper; leave the stored
-      // payload canonical while projecting the legacy enum so 0.1.35 clients do not drop the event.
-      event = this.#legacyHumansOnlyChannelEvent(event);
-    }
-    if (event.type === "message.created") {
-      // Never trust shared event JSON to carry a recipient-specific reason. Rebuild the payload
-      // from canonical message fields and add the reason only from the scoped relation selected
-      // for this principal and an explicitly negotiated capability.
-      return workspaceEventSchema.parse({
+    // Pre-upgrade events stored the members enum for humans-only channels. Keep retained JSON
+    // unchanged while delivering the same access mode as the authoritative conversation snapshot.
+    if (
+      row.conversation_human_only &&
+      (event.type === "channel.created" || event.type === "channel.archived")
+    ) {
+      event = workspaceEventSchema.parse({
         ...event,
         payload: {
-          message: event.payload.message,
-          mentionedUserIds: event.payload.mentionedUserIds,
-          ...(participatedThreadNotifications && row.participated_thread_notification
-            ? { recipientNotificationReason: "participated_thread_reply" }
-            : {}),
+          ...event.payload,
+          conversation: { ...event.payload.conversation, access: "humans" },
         },
       });
     }
-    if (event.type === "member.updated" && !memberProfiles) {
-      return this.#legacyMemberProfileEvent(event);
-    }
-    if (event.type !== "read_cursor.updated" || readStateEvents) return event;
-    // Older clients validate v1 event payloads strictly. Keep the stored event canonical while
-    // projecting its legacy shape for devices that did not negotiate read-state events.
-    return {
-      ...event,
-      payload: { readCursor: event.payload.readCursor },
-    };
-  }
-
-  #legacyAnnouncementEvent(event: WorkspaceEvent): WorkspaceEvent {
-    if (
-      event.type !== "channel.created" &&
-      event.type !== "channel.archived" &&
-      event.type !== "direct_conversation.created"
-    ) {
-      return event;
-    }
-    const conversation: Partial<Conversation> = { ...event.payload.conversation };
-    delete conversation.channelMode;
-    return {
-      ...event,
-      payload: { ...event.payload, conversation },
-    } as unknown as WorkspaceEvent;
-  }
-
-  #humansOnlyChannelEvent(event: WorkspaceEvent): WorkspaceEvent {
-    if (event.type !== "channel.created" && event.type !== "channel.archived") return event;
+    if (event.type !== "message.created") return event;
+    // Recipient-specific reasons come only from this principal's scoped relation, never shared JSON.
     return workspaceEventSchema.parse({
       ...event,
       payload: {
-        ...event.payload,
-        conversation: { ...event.payload.conversation, access: "humans" },
+        message: event.payload.message,
+        mentionedUserIds: event.payload.mentionedUserIds,
+        ...(row.participated_thread_notification
+          ? { recipientNotificationReason: "participated_thread_reply" }
+          : {}),
       },
     });
-  }
-
-  #legacyHumansOnlyChannelEvent(event: WorkspaceEvent): WorkspaceEvent {
-    if (event.type !== "channel.created" && event.type !== "channel.archived") return event;
-    if (event.payload.conversation.access !== "humans") return event;
-    return workspaceEventSchema.parse({
-      ...event,
-      payload: {
-        ...event.payload,
-        conversation: { ...event.payload.conversation, access: "members" },
-      },
-    });
-  }
-
-  #legacyMemberProfileEvent(event: WorkspaceEvent): WorkspaceEvent {
-    if (event.type !== "member.updated") return event;
-    const member: Partial<typeof event.payload.member> = { ...event.payload.member };
-    delete member.title;
-    return { ...event, payload: { member } } as unknown as WorkspaceEvent;
   }
 }

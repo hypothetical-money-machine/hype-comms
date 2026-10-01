@@ -1,12 +1,4 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import type { BigIntStats } from "node:fs";
-import { lstat } from "node:fs/promises";
-import { basename, dirname, join, parse, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import {
-  ATTACHMENTS_CAPABILITY,
   ATTACHMENT_MAX_BYTES,
   conversationFilesResponseSchema,
   entityIdSchema,
@@ -14,11 +6,20 @@ import {
   listMessageAttachmentsResponseSchema,
   paginationCursorSchema,
 } from "@hype-comms/contracts";
-
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import type { BigIntStats } from "node:fs";
+import { lstat } from "node:fs/promises";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { integerOption, parseCommandArguments, requirePositionals, stringOption } from "../argv.js";
 import { clientFromContext } from "../context.js";
 import { UsageError } from "../errors.js";
 import { writeResult } from "../output.js";
+import type {
+  PrivateDownloadContinuationMessage,
+  PrivateDownloadResultMessage,
+} from "../private-download-protocol.js";
 import {
   PRIVATE_DOWNLOAD_INVALID_OUTPUT_PATH_MESSAGE,
   PRIVATE_DOWNLOAD_MAX_CONFIG_BYTES,
@@ -27,16 +28,9 @@ import {
   privateDownloadContinuationMessageSchema,
   privateDownloadWorkerMessageSchema,
 } from "../private-download-protocol.js";
-import type {
-  PrivateDownloadContinuationMessage,
-  PrivateDownloadResultMessage,
-} from "../private-download-protocol.js";
 import { resolveConversationSelector } from "../selectors.js";
 import type { CommandContext } from "../types.js";
-
-const ATTACHMENTS_HEADER = { "x-hype-comms-capabilities": ATTACHMENTS_CAPABILITY } as const;
-const MAX_WORKER_OUTPUT_BYTES = 16 * 1_024;
-
+const MAX_WORKER_OUTPUT_BYTES = 16 * 1024;
 interface FileIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
@@ -345,13 +339,12 @@ export async function filesCommand(
     }
     const conversationId = await resolveConversationSelector(client, selector!);
     const response = await client.request({
-      path: `/v1/conversations/${conversationId}/files`,
+      path: `/v2/conversations/${conversationId}/files`,
       query: {
         before: before?.data,
         limit: integerOption(parsed, "limit", 50, 100),
       },
       responseSchema: conversationFilesResponseSchema,
-      headers: ATTACHMENTS_HEADER,
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -364,11 +357,10 @@ export async function filesCommand(
     const body = { messageIds: [messageId] };
     const response = await client.request({
       method: "POST",
-      path: "/v1/attachments/query",
+      path: "/v2/attachments/query",
       body,
       requestSchema: listMessageAttachmentsRequestSchema,
       responseSchema: listMessageAttachmentsResponseSchema,
-      headers: ATTACHMENTS_HEADER,
     });
     writeResult(context.runtime.io, { messageId, ...response }, context.options.json);
     return;
@@ -381,9 +373,8 @@ export async function filesCommand(
     const output = stringOption(parsed, "output");
     if (output === undefined) throw new UsageError("files get requires --output");
     const download = await client.download({
-      path: `/v1/files/${attachmentId}/content`,
+      path: `/v2/files/${attachmentId}/content`,
       maxBytes: ATTACHMENT_MAX_BYTES,
-      headers: ATTACHMENTS_HEADER,
     });
     const path = await savePrivateDownload(context.runtime.cwd, output, download.bytes);
     writeResult(

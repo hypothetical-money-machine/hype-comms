@@ -1,5 +1,4 @@
 import type { Pool } from "pg";
-import type { AuthenticatedIdentity } from "../identity/service.js";
 import { WorkspaceAttachmentOperations } from "./attachment-operations.js";
 import { WorkspaceAuthorization } from "./authorization.js";
 import { ConversationEventWriter } from "./conversation-events.js";
@@ -12,7 +11,7 @@ import { type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 import { enableDefaultAgentAgency } from "./workspace-initialization.js";
 import { WorkspaceRetention } from "./workspace-retention.js";
 export type { ConsumedRealtimeTicket } from "./authorization.js";
-export type { WorkspaceClientCapabilities, WorkspacePrincipal } from "./sync-operations.js";
+export type { WorkspacePrincipal } from "./sync-operations.js";
 export type { AnnouncementAuditRecord, WorkspaceRepositoryHooks } from "./workspace-hooks.js";
 export type { AttachmentCleanupFailure } from "./workspace-retention.js";
 
@@ -70,65 +69,11 @@ export class WorkspaceRepository {
     return this.conversations.listMembers(...args);
   }
 
-  async requireGroupDirectMessagesForConversations(
-    identity: AuthenticatedIdentity,
-    conversationIds: readonly string[],
-    supported: boolean,
-  ): Promise<void> {
-    return this.authz.requireGroupDirectMessagesForConversations(
-      identity,
-      conversationIds,
-      supported,
-    );
-  }
-
-  async requireGroupDirectMessagesForMessages(
-    identity: AuthenticatedIdentity,
-    messageIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "active" | "retractable" = "any",
-  ): Promise<void> {
-    return this.authz.requireGroupDirectMessagesForMessages(
-      identity,
-      messageIds,
-      supported,
-      eligibility,
-    );
-  }
-
-  async requireGroupDirectMessagesForAttachments(
-    identity: AuthenticatedIdentity,
-    attachmentIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "content-write" | "complete" = "any",
-  ): Promise<void> {
-    return this.authz.requireGroupDirectMessagesForAttachments(
-      identity,
-      attachmentIds,
-      supported,
-      eligibility,
-    );
-  }
-
-  /**
-   * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
-   * workspace-membership join makes each best-effort authorization reflect revocation immediately
-   * instead of waiting for the socket heartbeat to close the connection. The capability argument
-   * is bound into the realtime ticket, so an older device cannot discover a group conversation
-   * through typing frames merely because another device for the same user supports groups.
-   */
-  async canViewConversation(
-    workspaceId: string,
-    userId: string,
-    conversationId: string,
-    includeGroupDirectMessages: boolean,
-  ): Promise<boolean> {
-    return this.authz.canViewConversation(
-      workspaceId,
-      userId,
-      conversationId,
-      includeGroupDirectMessages,
-    );
+  /** Uses current workspace membership and canonical visibility for ephemeral delivery. */
+  canViewConversation(
+    ...args: Parameters<WorkspaceAuthorization["canViewConversation"]>
+  ): ReturnType<WorkspaceAuthorization["canViewConversation"]> {
+    return this.authz.canViewConversation(...args);
   }
 
   /**

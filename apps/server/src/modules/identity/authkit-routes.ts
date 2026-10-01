@@ -3,18 +3,17 @@ import {
   authKitCallbackQuerySchema,
   createDesktopAuthorizationRequestSchema,
   createDesktopAuthorizationResponseSchema,
-  desktopAuthVariantSchema,
   desktopAuthCallbackParametersSchema,
+  desktopAuthVariantSchema,
   exchangeAuthHandoffRequestSchema,
   type DesktopAuthVariant,
 } from "@hype-comms/contracts";
-import { routeModule, validateRequest } from "../../http/route-registrar.js";
-import { publicPolicy } from "../../http/authentication-policies.js";
-
 import { ApiError } from "../../errors.js";
+import { publicPolicy } from "../../http/authentication-policies.js";
+import { routeModule, validateRequest } from "../../http/route-registrar.js";
 import { FixedWindowAttemptThrottle } from "../../throttle.js";
-import { desktopCurrentUserResponse, setSessionCookie, supportsMemberProfiles } from "./routes.js";
 import type { AuthKitService } from "./authkit-service.js";
+import { desktopCurrentUserResponse, setSessionCookie } from "./routes.js";
 import type { IdentityService } from "./service.js";
 
 const DESKTOP_CALLBACK_SCHEMES = {
@@ -29,14 +28,17 @@ interface AuthKitRoutesOptions {
   readonly cookieSecure: boolean;
   readonly magicLinkAvailable: boolean;
 }
-
-function validationDetails(issues: readonly { path: PropertyKey[]; message: string }[]) {
+function validationDetails(
+  issues: readonly {
+    path: PropertyKey[];
+    message: string;
+  }[],
+) {
   return issues.map((issue) => ({ field: issue.path.join("."), issue: issue.message }));
 }
 
 const AUTHORIZATION_START_LIMIT = 10;
-const AUTHORIZATION_START_WINDOW_MS = 15 * 60 * 1_000;
-
+const AUTHORIZATION_START_WINDOW_MS = 15 * 60 * 1000;
 export const authKitRoutes = routeModule<AuthKitRoutesOptions>(
   (
     routes,
@@ -73,7 +75,7 @@ export const authKitRoutes = routeModule<AuthKitRoutesOptions>(
         void reply.header("cache-control", "no-store");
         const retryAfterMs = authorizationStartThrottle.recordAttempt(request.ip);
         if (retryAfterMs > 0) {
-          void reply.header("retry-after", Math.ceil(retryAfterMs / 1_000).toString());
+          void reply.header("retry-after", Math.ceil(retryAfterMs / 1000).toString());
           throw new ApiError(429, "RATE_LIMITED", "Too many requests");
         }
       },
@@ -98,69 +100,6 @@ export const authKitRoutes = routeModule<AuthKitRoutesOptions>(
           }),
         );
         return reply.code(201).send(response);
-      },
-    });
-
-    routes.registerCredential({
-      method: "GET",
-      url: "/auth/workos/callback",
-      scopes: [],
-      beforeAuthentication: ({ reply }) => {
-        void reply.header("cache-control", "no-store").header("referrer-policy", "no-referrer");
-      },
-      request: {
-        query: validateRequest(authKitCallbackQuerySchema, "Invalid authentication callback"),
-      },
-      policy: {
-        name: "workos-callback-state",
-        authenticate: async ({ query }, request) => {
-          const completion = await authKitService.completeCallback(
-            "code" in query
-              ? {
-                  kind: "success",
-                  code: query.code,
-                  providerState: query.state,
-                  ipAddress: request.ip,
-                  ...(request.headers["user-agent"] === undefined
-                    ? {}
-                    : { userAgent: request.headers["user-agent"] }),
-                }
-              : {
-                  kind: "error",
-                  providerState: query.state,
-                },
-          );
-          return completion;
-        },
-      },
-      handler: async ({ identity: completion, request, reply }) => {
-        if (completion.kind === "error" && completion.failureCategory !== undefined) {
-          request.log.warn(
-            { authKitFailureCategory: completion.failureCategory },
-            "AuthKit callback failed",
-          );
-        }
-        if (completion.kind === "error" && !("desktopState" in completion)) {
-          const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
-          callbackUrl.searchParams.set("error", "authentication_failed");
-          return reply.redirect(callbackUrl.href);
-        }
-        const parameters = desktopAuthCallbackParametersSchema.parse(
-          completion.kind === "success"
-            ? { code: completion.handoffCode, state: completion.desktopState }
-            : { error: "authentication_failed", state: completion.desktopState },
-        );
-        const callbackVariant = desktopAuthVariantSchema.parse(completion.desktopAuthVariant);
-        const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES[callbackVariant]}://auth/callback`);
-        if ("code" in parameters) {
-          callbackUrl.searchParams.set("code", parameters.code);
-        } else {
-          callbackUrl.searchParams.set("error", parameters.error);
-        }
-        if (parameters.state !== undefined) {
-          callbackUrl.searchParams.set("state", parameters.state);
-        }
-        return reply.redirect(callbackUrl.href);
       },
     });
 
@@ -194,17 +133,78 @@ export const authKitRoutes = routeModule<AuthKitRoutesOptions>(
           return { session, currentUser };
         },
       },
-      handler: async ({ identity: { session, currentUser }, request, reply }) => {
+      handler: async ({ identity: { session, currentUser }, reply }) => {
         setSessionCookie(reply, session, cookieSecure);
-        return reply
-          .code(200)
-          .send(
-            desktopCurrentUserResponse(
-              currentUser,
-              supportsMemberProfiles(request.headers["x-hype-comms-capabilities"]),
-            ),
-          );
+        return reply.code(200).send(desktopCurrentUserResponse(currentUser));
       },
     });
   },
 );
+/** Provider-configured callback address stays stable across workspace protocol upgrades. */
+export const authKitCallbackRoutes = routeModule<
+  Pick<AuthKitRoutesOptions, "authKitService" | "authKitAdmissionEnabled">
+>((routes, { authKitService, authKitAdmissionEnabled }) => {
+  if (!authKitAdmissionEnabled || authKitService === undefined) return;
+  routes.registerCredential({
+    method: "GET",
+    url: "/auth/workos/callback",
+    scopes: [],
+    beforeAuthentication: ({ reply }) => {
+      void reply.header("cache-control", "no-store").header("referrer-policy", "no-referrer");
+    },
+    request: {
+      query: validateRequest(authKitCallbackQuerySchema, "Invalid authentication callback"),
+    },
+    policy: {
+      name: "workos-callback-state",
+      authenticate: async ({ query }, request) => {
+        const completion = await authKitService.completeCallback(
+          "code" in query
+            ? {
+                kind: "success",
+                code: query.code,
+                providerState: query.state,
+                ipAddress: request.ip,
+                ...(request.headers["user-agent"] === undefined
+                  ? {}
+                  : { userAgent: request.headers["user-agent"] }),
+              }
+            : {
+                kind: "error",
+                providerState: query.state,
+              },
+        );
+        return completion;
+      },
+    },
+    handler: async ({ identity: completion, request, reply }) => {
+      if (completion.kind === "error" && completion.failureCategory !== undefined) {
+        request.log.warn(
+          { authKitFailureCategory: completion.failureCategory },
+          "AuthKit callback failed",
+        );
+      }
+      if (completion.kind === "error" && !("desktopState" in completion)) {
+        const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES.production}://auth/callback`);
+        callbackUrl.searchParams.set("error", "authentication_failed");
+        return reply.redirect(callbackUrl.href);
+      }
+      const parameters = desktopAuthCallbackParametersSchema.parse(
+        completion.kind === "success"
+          ? { code: completion.handoffCode, state: completion.desktopState }
+          : { error: "authentication_failed", state: completion.desktopState },
+      );
+      const callbackVariant = desktopAuthVariantSchema.parse(completion.desktopAuthVariant);
+      const callbackUrl = new URL(`${DESKTOP_CALLBACK_SCHEMES[callbackVariant]}://auth/callback`);
+      if ("code" in parameters) {
+        callbackUrl.searchParams.set("code", parameters.code);
+      } else {
+        callbackUrl.searchParams.set("error", parameters.error);
+      }
+      if (parameters.state !== undefined) {
+        callbackUrl.searchParams.set("state", parameters.state);
+      }
+      return reply.redirect(callbackUrl.href);
+    },
+  });
+});

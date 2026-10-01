@@ -76,7 +76,7 @@ export type NotificationPolicyEvent =
       readonly authorKind: UserKind;
       readonly threadRootId: string | null;
       readonly mentionedUserIds: readonly string[];
-      /** Null when an older server omits the capability-gated recipient projection. */
+      /** Null when the server records no participated-thread reason for this recipient. */
       readonly recipientNotificationReason: "participated_thread_reply" | null;
     }
   | {

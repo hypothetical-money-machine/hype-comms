@@ -5,7 +5,6 @@ import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
 import { hashToken } from "../identity/tokens.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
-import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import type { ConversationRow } from "./records.js";
 
 export type { ConversationRow } from "./records.js";
@@ -17,17 +16,6 @@ interface TicketRow extends QueryResultRow {
   user_id: string;
   device_session_id: string | null;
   agent_token_id: string | null;
-  reaction_events: boolean;
-  read_state_events: boolean;
-  task_events: boolean;
-  announcement_channels: boolean;
-  participated_thread_notifications: boolean;
-  message_retract_events: boolean;
-  member_profiles: boolean;
-  ephemeral_activity: boolean;
-  group_direct_messages: boolean;
-  humans_only_channels: boolean;
-  system_channels: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -196,115 +184,10 @@ export async function requireActivePrincipal(
 export class WorkspaceAuthorization {
   constructor(private readonly pool: Pool) {}
 
-  async requireGroupDirectMessagesForConversations(
-    identity: AuthenticatedIdentity,
-    conversationIds: readonly string[],
-    supported: boolean,
-  ): Promise<void> {
-    if (supported || conversationIds.length === 0) return;
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT EXISTS (
-         SELECT 1
-           FROM conversations AS conversation
-          WHERE conversation.workspace_id = $1
-            AND conversation.id = ANY($3::uuid[])
-            AND conversation.kind = 'group_direct_message'
-            AND ${conversationVisibilitySql("conversation", "$2")}
-       ) AS blocked`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, conversationIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
-  async requireGroupDirectMessagesForMessages(
-    identity: AuthenticatedIdentity,
-    messageIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "active" | "retractable" = "any",
-  ): Promise<void> {
-    if (supported || messageIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "active"
-        ? "AND message.deleted_at IS NULL"
-        : eligibility === "retractable"
-          ? `AND message.author_id = $2
-             AND (
-               message.deleted_at IS NOT NULL
-               OR (
-                 message.edited_at IS NULL
-                 AND clock_timestamp() <= message.created_at + interval '5 minutes'
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM messages AS message
-           JOIN conversations AS conversation
-             ON conversation.id = message.conversation_id
-            AND conversation.workspace_id = message.workspace_id
-          WHERE message.workspace_id = $1
-            AND message.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, messageIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
-  async requireGroupDirectMessagesForAttachments(
-    identity: AuthenticatedIdentity,
-    attachmentIds: readonly string[],
-    supported: boolean,
-    eligibility: "any" | "content-write" | "complete" = "any",
-  ): Promise<void> {
-    if (supported || attachmentIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "content-write"
-        ? `AND attachment.uploaded_by = $2
-           AND attachment.status = 'pending'
-           AND (
-             attachment.upload_expires_at IS NULL
-             OR attachment.upload_expires_at > clock_timestamp()
-           )`
-        : eligibility === "complete"
-          ? `AND attachment.uploaded_by = $2
-             AND (
-               attachment.status = 'ready'
-               OR (
-                 attachment.status = 'pending'
-                 AND (
-                   attachment.upload_expires_at IS NULL
-                   OR attachment.upload_expires_at > clock_timestamp()
-                 )
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM attachments AS attachment
-           JOIN conversations AS conversation
-             ON conversation.id = attachment.conversation_id
-            AND conversation.workspace_id = attachment.workspace_id
-          WHERE attachment.workspace_id = $1
-            AND attachment.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, attachmentIds],
-    );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
-  }
-
   async canViewConversation(
     workspaceId: string,
     userId: string,
     conversationId: string,
-    includeGroupDirectMessages: boolean,
   ): Promise<boolean> {
     const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
       `SELECT EXISTS (
@@ -317,9 +200,8 @@ export class WorkspaceAuthorization {
           WHERE conversation.id = $3
             AND conversation.workspace_id = $1
             AND ${conversationVisibilitySql("conversation", "$2")}
-            AND ($4::boolean OR conversation.kind <> 'group_direct_message')
        ) AS visible`,
-      [workspaceId, userId, conversationId, includeGroupDirectMessages],
+      [workspaceId, userId, conversationId],
     );
     return result.rows[0]?.visible ?? false;
   }
@@ -336,34 +218,12 @@ export class WorkspaceAuthorization {
          RETURNING ticket.workspace_id,
                    ticket.user_id,
                    ticket.device_session_id,
-                   ticket.agent_token_id,
-                   ticket.reaction_events,
-                   ticket.read_state_events,
-                   ticket.task_events,
-                   ticket.announcement_channels,
-                   ticket.participated_thread_notifications,
-                   ticket.message_retract_events,
-                   ticket.member_profiles,
-                   ticket.ephemeral_activity,
-                   ticket.group_direct_messages,
-                   ticket.humans_only_channels,
-                   ticket.system_channels
+                   ticket.agent_token_id
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
               ticket.device_session_id,
-              ticket.agent_token_id,
-              ticket.reaction_events,
-              ticket.read_state_events,
-              ticket.task_events,
-              ticket.announcement_channels,
-              ticket.participated_thread_notifications,
-              ticket.message_retract_events,
-              ticket.member_profiles,
-              ticket.ephemeral_activity,
-              ticket.group_direct_messages,
-              ticket.humans_only_channels,
-              ticket.system_channels
+              ticket.agent_token_id
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -410,17 +270,6 @@ export class WorkspaceAuthorization {
         userId: row.user_id,
         deviceSessionId: row.device_session_id,
         agentTokenId: null,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -429,17 +278,6 @@ export class WorkspaceAuthorization {
         userId: row.user_id,
         deviceSessionId: null,
         agentTokenId: row.agent_token_id,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");

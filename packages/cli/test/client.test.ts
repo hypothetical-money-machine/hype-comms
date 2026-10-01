@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { constants, createGzip, gzipSync } from "node:zlib";
+import { serverResponse } from "./helpers.js";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -71,7 +72,7 @@ function streamedResponse(
     },
   });
   return {
-    response: new Response(stream, { headers: { "content-type": "application/json" } }),
+    response: serverResponse(stream, { headers: { "content-type": "application/json" } }),
     wasCancelled: () => cancelled,
   };
 }
@@ -87,7 +88,7 @@ function attachmentResponse(
   if (!responseHeaders.has("x-content-sha256")) {
     responseHeaders.set("x-content-sha256", createHash("sha256").update(bytes).digest("hex"));
   }
-  return new Response(bytes, { headers: responseHeaders });
+  return serverResponse(bytes, { headers: responseHeaders });
 }
 
 async function listen(server: Server): Promise<string> {
@@ -99,6 +100,31 @@ async function listen(server: Server): Promise<string> {
 }
 
 describe("ApiClient", () => {
+  it.each([426, 404])(
+    "reports HTTP %s as a nonretryable upgrade across request pipelines",
+    async (status) => {
+      for (const operation of ["json", "empty", "download"]) {
+        const response = new Response("old server", { status });
+        const cancel = vi.spyOn(response.body!, "cancel");
+        const fetch = vi.fn<typeof globalThis.fetch>(async () => response);
+        const api = client(fetch);
+        const attempt =
+          operation === "json"
+            ? api.request({ method: "GET", path: "/v2/bootstrap", responseSchema: z.object({}) })
+            : operation === "empty"
+              ? api.requestEmpty({ method: "DELETE", path: "/v2/file" })
+              : api.download({ path: "/v2/files/file/content", maxBytes: 1024 });
+        await expect(attempt).rejects.toMatchObject({
+          code: "UPGRADE_REQUIRED",
+          retryable: false,
+          httpStatus: status,
+        });
+        expect(fetch).toHaveBeenCalledOnce();
+        expect(cancel).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
   it("sends bearer auth and preserves an idempotency key", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
       const headers = new Headers(init?.headers);
@@ -109,7 +135,7 @@ describe("ApiClient", () => {
     });
     const response = await client(fetch).request({
       method: "POST",
-      path: "/v1/example",
+      path: "/v2/example",
       body: { value: "hello" },
       requestSchema: z.object({ value: z.string() }).strict(),
       responseSchema: z.object({ ok: z.literal(true) }).strict(),
@@ -121,7 +147,7 @@ describe("ApiClient", () => {
   it("downloads authenticated raw bytes and verifies server length and digest metadata", async () => {
     const bytes = new TextEncoder().encode("attachment bytes");
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe("https://chat.example.test/v1/files/file-id/content");
+      expect(String(url)).toBe("https://chat.example.test/v2/files/file-id/content");
       const headers = new Headers(init?.headers);
       expect(headers.get("authorization")).toBe(`Bearer hype_comms_agent_${"a".repeat(43)}`);
       expect(headers.get("accept")).toBe("application/octet-stream");
@@ -131,7 +157,7 @@ describe("ApiClient", () => {
     });
 
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).resolves.toMatchObject({
       bytes,
       sizeBytes: bytes.byteLength,
@@ -144,7 +170,7 @@ describe("ApiClient", () => {
       Response.redirect("https://elsewhere.example.test/file", 307),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "REDIRECT_REJECTED" });
   });
 
@@ -156,7 +182,7 @@ describe("ApiClient", () => {
       ),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({ exitCode: EXIT_API, code: "NOT_FOUND", retryable: false });
   });
 
@@ -167,7 +193,7 @@ describe("ApiClient", () => {
         cancelled = true;
       },
     });
-    const response = new Response(body, {
+    const response = serverResponse(body, {
       headers: {
         "content-length": "1025",
         "x-content-sha256": "a".repeat(64),
@@ -176,7 +202,7 @@ describe("ApiClient", () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () => response);
 
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({
       exitCode: EXIT_CONTRACT,
       code: "INVALID_SERVER_CONTRACT",
@@ -196,11 +222,11 @@ describe("ApiClient", () => {
     { label: "missing digest", headers: { "content-length": "1" } },
     { label: "invalid digest", headers: { "content-length": "1", "x-content-sha256": "nope" } },
   ])("rejects raw download metadata with $label", async ({ headers }) => {
-    const fetch = vi.fn<typeof globalThis.fetch>(
-      async () => new Response(new Uint8Array([120]), { headers }),
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      serverResponse(new Uint8Array([120]), { headers }),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({
       exitCode: EXIT_CONTRACT,
       code: "INVALID_SERVER_CONTRACT",
@@ -213,7 +239,7 @@ describe("ApiClient", () => {
       attachmentResponse(bytes, { "content-length": "3" }),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
   });
 
@@ -222,7 +248,7 @@ describe("ApiClient", () => {
       attachmentResponse(new Uint8Array([1, 2, 3]), { "content-encoding": "gzip" }),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
   });
 
@@ -231,7 +257,7 @@ describe("ApiClient", () => {
       attachmentResponse(new Uint8Array([1, 2, 3]), { "x-content-sha256": "a".repeat(64) }),
     );
     await expect(
-      client(fetch).download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      client(fetch).download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT, code: "INVALID_SERVER_CONTRACT" });
   });
 
@@ -251,19 +277,19 @@ describe("ApiClient", () => {
     });
 
     await expect(
-      value.request({ path: "/v1/auth/me", responseSchema: z.unknown() }),
+      value.request({ path: "/v2/auth/me", responseSchema: z.unknown() }),
     ).rejects.toMatchObject({
       exitCode: 2,
       code: "CREDENTIAL_ORIGIN_MISMATCH",
     });
     await expect(
-      value.requestEmpty({ method: "DELETE", path: "/v1/auth/session" }),
+      value.requestEmpty({ method: "DELETE", path: "/v2/auth/session" }),
     ).rejects.toMatchObject({
       exitCode: 2,
       code: "CREDENTIAL_ORIGIN_MISMATCH",
     });
     await expect(
-      value.download({ path: "/v1/files/file-id/content", maxBytes: 1_024 }),
+      value.download({ path: "/v2/files/file-id/content", maxBytes: 1_024 }),
     ).rejects.toMatchObject({
       exitCode: 2,
       code: "CREDENTIAL_ORIGIN_MISMATCH",
@@ -301,12 +327,11 @@ describe("ApiClient", () => {
   });
 
   it("rejects redirects without following them", async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(
-      async () =>
-        new Response(null, { status: 302, headers: { location: "https://other.example.test" } }),
+    const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+      serverResponse(null, { status: 302, headers: { location: "https://other.example.test" } }),
     );
     await expect(
-      client(fetch).request({ path: "/v1/example", responseSchema: z.unknown() }),
+      client(fetch).request({ path: "/v2/example", responseSchema: z.unknown() }),
     ).rejects.toMatchObject({
       exitCode: EXIT_CONTRACT,
       code: "REDIRECT_REJECTED",
@@ -350,17 +375,16 @@ describe("ApiClient", () => {
     // An intermediary can answer with HTML. The retry loops key off `retryable`, so a 502 has to
     // stay transient rather than being downgraded because the body was not our error envelope.
     const value = client(
-      vi.fn<typeof globalThis.fetch>(
-        async () =>
-          new Response("<html><body>502 Bad Gateway</body></html>", {
-            status: 502,
-            headers: { "content-type": "text/html" },
-          }),
+      vi.fn<typeof globalThis.fetch>(async () =>
+        serverResponse("<html><body>502 Bad Gateway</body></html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        }),
       ),
     );
 
     await expect(
-      value.request({ path: "/v1/example", responseSchema: z.unknown() }),
+      value.request({ path: "/v2/example", responseSchema: z.unknown() }),
     ).rejects.toMatchObject({
       exitCode: EXIT_TRANSIENT,
       code: "UNEXPECTED_SERVER_RESPONSE",
@@ -373,13 +397,13 @@ describe("ApiClient", () => {
     const value = client(vi.fn<typeof globalThis.fetch>(async () => jsonResponse({ ok: false })));
     await expect(
       value.request({
-        path: "/v1/example",
+        path: "/v2/example",
         responseSchema: z.object({ ok: z.literal(true) }).strict(),
       }),
     ).rejects.toBeInstanceOf(CliError);
     await expect(
       value.request({
-        path: "/v1/example",
+        path: "/v2/example",
         responseSchema: z.object({ ok: z.literal(true) }).strict(),
       }),
     ).rejects.toMatchObject({ exitCode: EXIT_CONTRACT });
@@ -394,7 +418,7 @@ describe("ApiClient", () => {
 
     await expect(
       value.request({
-        path: "/v1/example",
+        path: "/v2/example",
         responseSchema: z.object({ payload: z.string() }).strict(),
       }),
     ).resolves.toMatchObject({ payload: expect.any(String) });
@@ -408,7 +432,7 @@ describe("ApiClient", () => {
     const value = client(vi.fn<typeof globalThis.fetch>(async () => oversized.response));
 
     await expect(
-      value.request({ path: "/v1/example", responseSchema: z.object({ payload: z.string() }) }),
+      value.request({ path: "/v2/example", responseSchema: z.object({ payload: z.string() }) }),
     ).rejects.toMatchObject({
       exitCode: EXIT_CONTRACT,
       code: "INVALID_SERVER_CONTRACT",
@@ -427,6 +451,7 @@ describe("ApiClient", () => {
     });
     const server = createServer((_request, response) => {
       response.writeHead(200, {
+        "x-hype-comms-protocol": "2",
         "content-encoding": "gzip",
         "content-type": "application/json",
       });

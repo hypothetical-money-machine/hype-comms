@@ -9,7 +9,7 @@ import {
   type Email,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import type { EmailSender, SendMagicLinkInput } from "../src/modules/identity/email.js";
@@ -210,9 +210,7 @@ describe("IdentityService and identity routes", () => {
     const member = await repository.findUserByEmail(email);
     if (member === null) throw new Error("Invited member was not created");
 
-    const sync = await workspaceRepository.sync(ownerIdentity, bootstrap.syncCursor, 100, {
-      humansOnlyChannels: true,
-    });
+    const sync = await workspaceRepository.sync(ownerIdentity, bootstrap.syncCursor, 100);
     const memberUpdates = sync.events.filter((event) => event.type === "member.updated");
     const membershipChanges = sync.events.filter(
       (event) => event.type === "channel.membership_changed",
@@ -257,9 +255,7 @@ describe("IdentityService and identity routes", () => {
     await service.createInvitation(owner.id, email, "member");
     await signIn(email, "127.0.0.2");
     await expect(
-      workspaceRepository.sync(ownerIdentity, sync.nextCursor, 100, {
-        humansOnlyChannels: true,
-      }),
+      workspaceRepository.sync(ownerIdentity, sync.nextCursor, 100),
     ).resolves.toMatchObject({ events: [], highWaterCursor: sync.highWaterCursor });
   });
 
@@ -560,21 +556,21 @@ describe("IdentityService and identity routes", () => {
 
     const invitationResponse = await app.inject({
       method: "POST",
-      url: "/v1/auth/invitations",
+      url: "/v2/auth/invitations",
       headers: { cookie: `hype_comms_session=${ownerSession.token}` },
       payload: { email: "invitee@example.com", role: "member" },
     });
     await service.requestMagicLink(emailSchema.parse("invitee@example.com"), "127.0.0.2");
     const redemption = await app.inject({
       method: "POST",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       headers: { "user-agent": "Vitest browser" },
       payload: { token: sender.latestTokenFor(emailSchema.parse("invitee@example.com")) },
     });
     const cookie = redemption.cookies.find(({ name }) => name === "hype_comms_session");
     const me = await app.inject({
       method: "GET",
-      url: "/v1/auth/me",
+      url: "/v2/auth/me",
       headers: { cookie: `hype_comms_session=${cookie?.value ?? ""}` },
     });
     await app.close();
@@ -586,14 +582,14 @@ describe("IdentityService and identity routes", () => {
       status: "pending",
     });
     expect(redemption.statusCode).toBe(200);
-    expect(redemption.json().user).not.toHaveProperty("kind");
+    expect(redemption.json().user).toHaveProperty("kind", "human");
     expect(cookie).toMatchObject({
       httpOnly: true,
       sameSite: "Strict",
       path: "/",
     });
     expect(cookie?.secure).toBeUndefined();
-    expect(me.json().user).not.toHaveProperty("kind");
+    expect(me.json().user).toHaveProperty("kind", "human");
     expect(currentUserSchema.parse(me.json())).toMatchObject({
       email: "invitee@example.com",
       role: "member",
@@ -612,7 +608,7 @@ describe("IdentityService and identity routes", () => {
     });
     const redemption = await app.inject({
       method: "POST",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       payload: { token },
     });
     await app.close();
@@ -636,12 +632,12 @@ describe("IdentityService and identity routes", () => {
 
     const selected = await app.inject({
       method: "POST",
-      url: "/v1/auth/magic-link",
+      url: "/v2/auth/magic-link",
       payload: { email: "owner@example.com", variant: "development" },
     });
     const requested = await app.inject({
       method: "POST",
-      url: "/v1/auth/magic-link",
+      url: "/v2/auth/magic-link",
       payload: { email: "owner@example.com" },
     });
     const emailUrl = new URL(sender.sent.at(-1)?.url ?? "");
@@ -900,7 +896,7 @@ describe("IdentityService and identity routes", () => {
 
     const response = await app.inject({
       method: "POST",
-      url: "/v1/auth/session/refresh",
+      url: "/v2/auth/session/refresh",
       headers: { cookie: `hype_comms_session=${session.token}` },
     });
     await app.close();
@@ -964,30 +960,30 @@ describe("IdentityService and identity routes", () => {
 
     const listed = await app.inject({
       method: "GET",
-      url: "/v1/auth/devices",
+      url: "/v2/auth/devices",
       headers: { cookie: `hype_comms_session=${first.token}` },
     });
     const refreshed = await app.inject({
       method: "POST",
-      url: "/v1/auth/session/refresh",
+      url: "/v2/auth/session/refresh",
       headers: { cookie: `hype_comms_session=${first.token}` },
     });
     const refreshedCookie = refreshed.cookies.find(({ name }) => name === "hype_comms_session");
     const oldToken = await app.inject({
       method: "GET",
-      url: "/v1/auth/me",
+      url: "/v2/auth/me",
       headers: { cookie: `hype_comms_session=${first.token}` },
     });
     const secondRecord = await repository.findDeviceSessionByTokenHash(hashToken(second.token));
     if (secondRecord === null) throw new Error("Second session was not created");
     const revoked = await app.inject({
       method: "DELETE",
-      url: `/v1/auth/devices/${secondRecord.id}`,
+      url: `/v2/auth/devices/${secondRecord.id}`,
       headers: { cookie: `hype_comms_session=${refreshedCookie?.value ?? ""}` },
     });
     const signedOut = await app.inject({
       method: "DELETE",
-      url: "/v1/auth/session",
+      url: "/v2/auth/session",
       headers: { cookie: `hype_comms_session=${refreshedCookie?.value ?? ""}` },
     });
     await app.close();
@@ -1025,31 +1021,31 @@ describe("IdentityService and identity routes", () => {
 
     const updated = await app.inject({
       method: "PATCH",
-      url: "/v1/profile",
+      url: "/v2/profile",
       headers,
       payload: { title: "  Chief Mischief Officer  " },
     });
     const legacy = await app.inject({
       method: "PATCH",
-      url: "/v1/profile",
+      url: "/v2/profile",
       headers: { cookie: `hype_comms_session=${session.token}` },
       payload: { title: "Director of Shenanigans" },
     });
     const rejectedControlCharacter = await app.inject({
       method: "PATCH",
-      url: "/v1/profile",
+      url: "/v2/profile",
       headers,
       payload: { title: "No\u0000pe" },
     });
     const rejectedOtherUser = await app.inject({
       method: "PATCH",
-      url: "/v1/profile",
+      url: "/v2/profile",
       headers,
       payload: { userId: member.id, title: "Nope" },
     });
     const cleared = await app.inject({
       method: "PATCH",
-      url: "/v1/profile",
+      url: "/v2/profile",
       headers,
       payload: { title: null },
     });
@@ -1060,7 +1056,7 @@ describe("IdentityService and identity routes", () => {
       user: { id: owner.id, title: "Chief Mischief Officer" },
     });
     expect(legacy.statusCode).toBe(200);
-    expect(legacy.json().user).not.toHaveProperty("title");
+    expect(legacy.json().user).toHaveProperty("title", "Director of Shenanigans");
     expect(rejectedControlCharacter.statusCode).toBe(400);
     expect(rejectedOtherUser.statusCode).toBe(400);
     expect(cleared.json()).toMatchObject({ user: { id: owner.id, title: null } });
@@ -1089,7 +1085,7 @@ describe("IdentityService and identity routes", () => {
       responses.push(
         await app.inject({
           method: "PATCH",
-          url: "/v1/profile",
+          url: "/v2/profile",
           headers,
           payload: { title: null },
         }),
@@ -1140,7 +1136,7 @@ describe("IdentityService and identity routes", () => {
     const app = await buildApp({ identity: { service } });
     const response = await app.inject({
       method: "POST",
-      url: "/v1/auth/invitations",
+      url: "/v2/auth/invitations",
       headers: { cookie: `hype_comms_session=${memberSession.token}` },
       payload: { email: "other@example.com", role: "member" },
     });
@@ -1202,7 +1198,7 @@ describe("IdentityService and identity routes", () => {
     const app = await buildApp({ identity: { service } });
     const invitedResponse = await app.inject({
       method: "POST",
-      url: "/v1/auth/magic-link",
+      url: "/v2/auth/magic-link",
       remoteAddress: "127.0.0.1",
       payload: { email: "invited-a@example.com" },
     });

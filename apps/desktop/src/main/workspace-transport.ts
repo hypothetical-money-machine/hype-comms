@@ -1,89 +1,72 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-
 import {
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
   addReactionResponseSchema,
-  agentEnrollmentResponseSchema,
-  updateProfileResponseSchema,
   advanceReadCursorResponseSchema,
-  attachmentSchema,
-  completeFileUploadResponseSchema,
-  conversationFilesQuerySchema,
-  conversationFilesResponseSchema,
-  createFileUploadResponseSchema,
-  listMessageAttachmentsResponseSchema,
+  agentEnrollmentResponseSchema,
   apiErrorEnvelopeSchema,
+  attachmentSchema,
   channelMembershipMutationResponseSchema,
   channelMembersResponseSchema,
   communicationPathsResponseSchema,
-  conversationMutationResponseSchema,
+  completeFileUploadResponseSchema,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
-  listConversationsResponseSchema,
+  conversationFilesQuerySchema,
+  conversationFilesResponseSchema,
+  conversationMutationResponseSchema,
+  createFileUploadResponseSchema,
+  humanWorkspaceBootstrapResponseSchema,
   listAgentEnrollmentsResponseSchema,
-  listMessageReactionsResponseSchema,
+  listConversationsResponseSchema,
   listMembersResponseSchema,
-  messageHistoryResponseSchema,
+  listMessageAttachmentsResponseSchema,
+  listMessageReactionsResponseSchema,
   messageByIdResponseSchema,
-  retractMessageResponseSchema,
+  messageHistoryResponseSchema,
+  messageSearchResponseSchema,
   messageThreadRequestSchema,
   messageThreadResponseSchema,
-  messageSearchResponseSchema,
   realtimeTicketResponseSchema,
   removeReactionResponseSchema,
+  retractMessageResponseSchema,
   sendAttemptResultSchema,
   sendMessageResponseSchema,
   syncAttemptResultSchema,
-  humanWorkspaceBootstrapResponseSchema,
   taskListQuerySchema,
   taskListResponseSchema,
   taskMutationResponseSchema,
-  type AdvanceReadCursorResponse,
+  updateProfileResponseSchema,
   type AddReactionResponse,
+  type AdvanceReadCursorResponse,
   type AgentEnrollmentResponse,
-  type Attachment,
-  type ConversationFilesQuery,
-  type ConversationFilesResponse,
-  type ListMessageAttachmentsResponse,
   type ArchiveChannelRequest,
+  type Attachment,
   type ChannelMembershipMutationResponse,
   type ChannelMembersResponse,
   type CommunicationPathsResponse,
+  type ConversationFilesQuery,
+  type ConversationFilesResponse,
   type ConversationMutationResponse,
-  type CreateTaskOperation,
   type CreateChannelOperation,
+  type CreateTaskOperation,
   type DirectConversationRequest,
+  type HumanWorkspaceBootstrapResponse,
+  type ListAgentEnrollmentsResponse,
   type ListConversationsQuery,
   type ListConversationsResponse,
-  type ListAgentEnrollmentsResponse,
   type ListMembersResponse,
+  type ListMessageAttachmentsResponse,
   type ListMessageReactionsResponse,
-  type MessageHistoryResponse,
   type MessageByIdResponse,
-  type RetractMessageResponse,
-  type MessageThreadRequest,
-  type MessageThreadResponse,
+  type MessageHistoryResponse,
   type MessageSearchQuery,
   type MessageSearchResponse,
+  type MessageThreadRequest,
+  type MessageThreadResponse,
   type MoveTaskOperation,
-  type RealtimeTicketResponse,
   type ReactionEmoji,
-  type ReviewAgentEnrollmentRequest,
+  type RealtimeTicketResponse,
   type RemoveReactionResponse,
+  type RetractMessageResponse,
+  type ReviewAgentEnrollmentRequest,
   type SendAttemptResult,
   type SendMessageOperation,
   type SyncAttemptResult,
@@ -92,36 +75,18 @@ import {
   type TaskMutationResponse,
   type UpdateTaskOperation,
   type UpsertChannelMemberRequest,
-  type HumanWorkspaceBootstrapResponse,
   type User,
 } from "@hype-comms/contracts";
-
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { ChatSession } from "./chat-session";
-
-const CLIENT_CAPABILITIES = [
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
-  ANNOUNCEMENT_CHANNELS_CAPABILITY,
-  ATTACHMENTS_CAPABILITY,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
-  EPHEMERAL_ACTIVITY_CAPABILITY,
-  GROUP_DIRECT_MESSAGES_CAPABILITY,
-  HUMANS_ONLY_CHANNELS_CAPABILITY,
-  SYSTEM_CHANNELS_CAPABILITY,
-  AGENT_EFFECTIVE_SCOPES_CAPABILITY,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
-  MEMBER_PROFILES_CAPABILITY,
-].join(",");
-
+import { requireWorkspaceProtocol, WorkspaceProtocolError } from "./workspace-protocol";
 function retryAfter(response: Response): number | null {
   const value = response.headers.get("retry-after");
   if (value === null) return null;
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds >= 0
-    ? Math.min(Math.round(seconds * 1_000), 86_400_000)
+    ? Math.min(Math.round(seconds * 1000), 86400000)
     : null;
 }
 
@@ -147,29 +112,18 @@ function isNetworkFailure(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
-
-/**
- * The deployed API can be briefly older than the desktop client during a rolling upgrade. Before
- * conversation pagination existed, bootstrap returned the complete conversation list without
- * page metadata. Preserve that response's meaning while still validating every other field
- * strictly; current servers always send the two metadata fields themselves.
- */
-function withLegacyBootstrapPagination(payload: unknown): unknown {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
-
-  const candidate = payload as Record<string, unknown>;
-  return {
-    ...candidate,
-    conversationsNextCursor:
-      candidate.conversationsNextCursor === undefined ? null : candidate.conversationsNextCursor,
-    conversationsHasMore:
-      candidate.conversationsHasMore === undefined ? false : candidate.conversationsHasMore,
-  };
-}
-
-type SendPermanentReason = Extract<SendAttemptResult, { status: "permanent" }>["reason"];
-type SyncPermanentReason = Extract<SyncAttemptResult, { status: "permanent" }>["reason"];
-
+type SendPermanentReason = Extract<
+  SendAttemptResult,
+  {
+    status: "permanent";
+  }
+>["reason"];
+type SyncPermanentReason = Extract<
+  SyncAttemptResult,
+  {
+    status: "permanent";
+  }
+>["reason"];
 /** Statuses whose meaning is fixed: retrying the identical request cannot change the outcome. */
 const SEND_PERMANENT_REASONS = new Map<number, SendPermanentReason>([
   [400, "validation"],
@@ -196,7 +150,9 @@ export class WorkspaceTransport {
     private readonly apiOrigin: string,
     private readonly session: Pick<ChatSession, "fetch" | "markSignedOut">,
   ) {}
-
+  async #fetch(url: string, init: RequestInit): Promise<Response> {
+    return requireWorkspaceProtocol(await this.session.fetch(url, init));
+  }
   async #payload(response: Response): Promise<unknown> {
     if (response.ok) return response.json();
     if (response.status === 401) {
@@ -233,7 +189,7 @@ export class WorkspaceTransport {
     assertCurrentScope: RequestScopeGuard,
   ): Promise<Response> {
     assertCurrentScope();
-    const response = await this.session.fetch(url, init);
+    const response = await this.#fetch(url, init);
     try {
       assertCurrentScope();
     } catch (error) {
@@ -262,29 +218,24 @@ export class WorkspaceTransport {
   }
 
   async bootstrap(): Promise<HumanWorkspaceBootstrapResponse> {
-    const response = await this.session.fetch(this.#url("/v1/bootstrap").href, {
+    const response = await this.#fetch(this.#url("/v2/bootstrap").href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
-    return humanWorkspaceBootstrapResponseSchema.parse(
-      withLegacyBootstrapPagination(await this.#payload(response)),
-    );
+    return humanWorkspaceBootstrapResponseSchema.parse(await this.#payload(response));
   }
 
   async members(): Promise<ListMembersResponse> {
-    const response = await this.session.fetch(this.#url("/v1/members").href, {
+    const response = await this.#fetch(this.#url("/v2/members").href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return listMembersResponseSchema.parse(await this.#payload(response));
   }
 
   async updateProfile(title: string | null): Promise<User> {
-    const response = await this.session.fetch(this.#url("/v1/profile").href, {
+    const response = await this.#fetch(this.#url("/v2/profile").href, {
       method: "PATCH",
       headers: {
         "content-type": "application/json",
-        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify({ title }),
     });
@@ -292,17 +243,15 @@ export class WorkspaceTransport {
   }
 
   async communicationPaths(): Promise<CommunicationPathsResponse> {
-    const response = await this.session.fetch(this.#url("/v1/admin/communication-paths").href, {
+    const response = await this.#fetch(this.#url("/v2/admin/communication-paths").href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return communicationPathsResponseSchema.parse(await this.#payload(response));
   }
 
   async listAgentEnrollments(): Promise<ListAgentEnrollmentsResponse> {
-    const response = await this.session.fetch(this.#url("/v1/agent-enrollments").href, {
+    const response = await this.#fetch(this.#url("/v2/agent-enrollments").href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return listAgentEnrollmentsResponseSchema.parse(await this.#payload(response));
   }
@@ -312,7 +261,7 @@ export class WorkspaceTransport {
     decision: ReviewAgentEnrollmentRequest["decision"],
   ): Promise<AgentEnrollmentResponse> {
     const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v1/agent-enrollments/${encodeURIComponent(enrollmentId)}/review`).href,
+      this.#url(`/v2/agent-enrollments/${encodeURIComponent(enrollmentId)}/review`).href,
       {
         method: "POST",
         headers: {
@@ -327,7 +276,7 @@ export class WorkspaceTransport {
 
   async cancelAgentEnrollment(enrollmentId: string): Promise<AgentEnrollmentResponse> {
     const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v1/agent-enrollments/${encodeURIComponent(enrollmentId)}/cancel`).href,
+      this.#url(`/v2/agent-enrollments/${encodeURIComponent(enrollmentId)}/cancel`).href,
       {
         method: "POST",
         headers: { "idempotency-key": crypto.randomUUID() },
@@ -339,12 +288,11 @@ export class WorkspaceTransport {
   async conversations(
     input: Partial<ListConversationsQuery> = {},
   ): Promise<ListConversationsResponse> {
-    const url = this.#url("/v1/conversations");
+    const url = this.#url("/v2/conversations");
     if (input.after !== undefined) url.searchParams.set("after", input.after);
     url.searchParams.set("limit", String(input.limit ?? CONVERSATION_PAGE_DEFAULT_LIMIT));
-    const response = await this.session.fetch(url.href, {
+    const response = await this.#fetch(url.href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return listConversationsResponseSchema.parse(await this.#payload(response));
   }
@@ -353,12 +301,11 @@ export class WorkspaceTransport {
     const { idempotencyKey, ...request } = input;
     const { channelMode, ...legacyRequest } = request;
     const body = channelMode === "announcement" ? request : legacyRequest;
-    const response = await this.#fetchIdempotentMutation(this.#url("/v1/channels").href, {
+    const response = await this.#fetchIdempotentMutation(this.#url("/v2/channels").href, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "idempotency-key": idempotencyKey,
-        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify(body),
     });
@@ -369,13 +316,12 @@ export class WorkspaceTransport {
     conversationId: string,
     input: ArchiveChannelRequest,
   ): Promise<ConversationMutationResponse> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/channels/${encodeURIComponent(conversationId)}`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/channels/${encodeURIComponent(conversationId)}`).href,
       {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
-          "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
         },
         body: JSON.stringify(input),
       },
@@ -384,11 +330,10 @@ export class WorkspaceTransport {
   }
 
   async channelMembers(conversationId: string): Promise<ChannelMembersResponse> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/channels/${encodeURIComponent(conversationId)}/members`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/channels/${encodeURIComponent(conversationId)}/members`).href,
       {
         method: "GET",
-        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
       },
     );
     return channelMembersResponseSchema.parse(await this.#payload(response));
@@ -399,9 +344,9 @@ export class WorkspaceTransport {
     userId: string,
     input: UpsertChannelMemberRequest,
   ): Promise<ChannelMembershipMutationResponse> {
-    const response = await this.session.fetch(
+    const response = await this.#fetch(
       this.#url(
-        `/v1/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
+        `/v2/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
       ).href,
       {
         method: "PUT",
@@ -416,9 +361,9 @@ export class WorkspaceTransport {
     conversationId: string,
     userId: string,
   ): Promise<ChannelMembershipMutationResponse> {
-    const response = await this.session.fetch(
+    const response = await this.#fetch(
       this.#url(
-        `/v1/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
+        `/v2/channels/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(userId)}`,
       ).href,
       { method: "DELETE" },
     );
@@ -428,11 +373,10 @@ export class WorkspaceTransport {
   async createDirectConversation(
     input: DirectConversationRequest,
   ): Promise<ConversationMutationResponse> {
-    const response = await this.session.fetch(this.#url("/v1/direct-conversations").href, {
+    const response = await this.#fetch(this.#url("/v2/direct-conversations").href, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify(input),
     });
@@ -444,43 +388,42 @@ export class WorkspaceTransport {
     readonly before?: string;
     readonly limit?: number;
   }): Promise<MessageHistoryResponse> {
-    const url = this.#url(`/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`);
+    const url = this.#url(`/v2/conversations/${encodeURIComponent(input.conversationId)}/messages`);
     if (input.before !== undefined) url.searchParams.set("before", input.before);
     url.searchParams.set("limit", String(input.limit ?? 50));
-    const response = await this.session.fetch(url.href, {
+    const response = await this.#fetch(url.href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return messageHistoryResponseSchema.parse(await this.#payload(response));
   }
 
   async thread(input: MessageThreadRequest): Promise<MessageThreadResponse> {
     const request = messageThreadRequestSchema.parse(input);
-    const url = this.#url(`/v1/messages/${encodeURIComponent(request.messageId)}/thread`);
+    const url = this.#url(`/v2/messages/${encodeURIComponent(request.messageId)}/thread`);
     if (request.before !== undefined) url.searchParams.set("before", request.before);
     url.searchParams.set("limit", String(request.limit));
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.#fetch(url.href, { method: "GET" });
     return messageThreadResponseSchema.parse(await this.#payload(response));
   }
 
   async messageById(messageId: string): Promise<MessageByIdResponse> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/messages/${encodeURIComponent(messageId)}`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/messages/${encodeURIComponent(messageId)}`).href,
       { method: "GET" },
     );
     return messageByIdResponseSchema.parse(await this.#payload(response));
   }
 
   async retractMessage(messageId: string): Promise<RetractMessageResponse> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/messages/${encodeURIComponent(messageId)}`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/messages/${encodeURIComponent(messageId)}`).href,
       { method: "DELETE" },
     );
     return retractMessageResponseSchema.parse(await this.#payload(response));
   }
 
   async reactions(messageIds: readonly string[]): Promise<ListMessageReactionsResponse> {
-    const response = await this.session.fetch(this.#url("/v1/reactions/query").href, {
+    const response = await this.#fetch(this.#url("/v2/reactions/query").href, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ messageIds }),
@@ -494,9 +437,9 @@ export class WorkspaceTransport {
   }
 
   async addReaction(messageId: string, emoji: ReactionEmoji): Promise<AddReactionResponse> {
-    const response = await this.session.fetch(
+    const response = await this.#fetch(
       this.#url(
-        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+        `/v2/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
       ).href,
       { method: "PUT" },
     );
@@ -504,9 +447,9 @@ export class WorkspaceTransport {
   }
 
   async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<RemoveReactionResponse> {
-    const response = await this.session.fetch(
+    const response = await this.#fetch(
       this.#url(
-        `/v1/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+        `/v2/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
       ).href,
       { method: "DELETE" },
     );
@@ -514,11 +457,11 @@ export class WorkspaceTransport {
   }
 
   async searchMessages(input: MessageSearchQuery): Promise<MessageSearchResponse> {
-    const url = this.#url("/v1/search");
+    const url = this.#url("/v2/search");
     url.searchParams.set("query", input.query);
     if (input.after !== undefined) url.searchParams.set("after", input.after);
     url.searchParams.set("limit", String(input.limit));
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.#fetch(url.href, { method: "GET" });
     return messageSearchResponseSchema.parse(await this.#payload(response));
   }
 
@@ -526,23 +469,23 @@ export class WorkspaceTransport {
     conversationId: string,
     input: Partial<TaskListQuery> = {},
   ): Promise<TaskListResponse> {
-    const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/tasks`);
+    const url = this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/tasks`);
     appendTaskListQuery(url, input);
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.#fetch(url.href, { method: "GET" });
     return taskListResponseSchema.parse(await this.#payload(response));
   }
 
   async myTasks(input: Partial<TaskListQuery> = {}): Promise<TaskListResponse> {
-    const url = this.#url("/v1/tasks/mine");
+    const url = this.#url("/v2/tasks/mine");
     appendTaskListQuery(url, input);
-    const response = await this.session.fetch(url.href, { method: "GET" });
+    const response = await this.#fetch(url.href, { method: "GET" });
     return taskListResponseSchema.parse(await this.#payload(response));
   }
 
   async createTask(input: CreateTaskOperation): Promise<TaskMutationResponse> {
     const { conversationId, idempotencyKey, ...request } = input;
     const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/tasks`).href,
+      this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/tasks`).href,
       {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
@@ -555,7 +498,7 @@ export class WorkspaceTransport {
   async updateTask(input: UpdateTaskOperation): Promise<TaskMutationResponse> {
     const { taskId, idempotencyKey, ...request } = input;
     const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v1/tasks/${encodeURIComponent(taskId)}`).href,
+      this.#url(`/v2/tasks/${encodeURIComponent(taskId)}`).href,
       {
         method: "PATCH",
         headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
@@ -568,7 +511,7 @@ export class WorkspaceTransport {
   async moveTask(input: MoveTaskOperation): Promise<TaskMutationResponse> {
     const { taskId, idempotencyKey, ...request } = input;
     const response = await this.#fetchIdempotentMutation(
-      this.#url(`/v1/tasks/${encodeURIComponent(taskId)}/move`).href,
+      this.#url(`/v2/tasks/${encodeURIComponent(taskId)}/move`).href,
       {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
@@ -580,14 +523,13 @@ export class WorkspaceTransport {
 
   async send(input: SendMessageOperation): Promise<SendAttemptResult> {
     try {
-      const response = await this.session.fetch(
-        this.#url(`/v1/conversations/${encodeURIComponent(input.conversationId)}/messages`).href,
+      const response = await this.#fetch(
+        this.#url(`/v2/conversations/${encodeURIComponent(input.conversationId)}/messages`).href,
         {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "idempotency-key": input.idempotencyKey,
-            "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
           },
           body: JSON.stringify(input.message),
         },
@@ -619,6 +561,7 @@ export class WorkspaceTransport {
         reason: SEND_PERMANENT_REASONS.get(response.status) ?? "validation",
       };
     } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
       if (isNetworkFailure(error)) {
         return { status: "retryable", reason: "network", retryAfterMs: null };
       }
@@ -630,8 +573,8 @@ export class WorkspaceTransport {
     conversationId: string,
     lastReadMessageId: string,
   ): Promise<AdvanceReadCursorResponse> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/read-cursor`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/read-cursor`).href,
       {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -642,17 +585,17 @@ export class WorkspaceTransport {
   }
 
   async sync(after: string, limit = 100): Promise<SyncAttemptResult> {
-    const url = this.#url("/v1/sync");
+    const url = this.#url("/v2/sync");
     url.searchParams.set("after", after);
     url.searchParams.set("limit", String(limit));
 
     let response: Response;
     try {
-      response = await this.session.fetch(url.href, {
+      response = await this.#fetch(url.href, {
         method: "GET",
-        headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
       });
     } catch (error) {
+      if (error instanceof WorkspaceProtocolError) return { status: "upgrade_required" };
       // Only a transport failure is worth retrying; anything else would retry forever.
       return isNetworkFailure(error)
         ? { status: "retryable", reason: "network", retryAfterMs: null }
@@ -698,22 +641,20 @@ export class WorkspaceTransport {
     input: Partial<ConversationFilesQuery> = {},
   ): Promise<ConversationFilesResponse> {
     const query = conversationFilesQuerySchema.parse(input);
-    const url = this.#url(`/v1/conversations/${encodeURIComponent(conversationId)}/files`);
+    const url = this.#url(`/v2/conversations/${encodeURIComponent(conversationId)}/files`);
     if (query.before !== undefined) url.searchParams.set("before", query.before);
     url.searchParams.set("limit", String(query.limit));
-    const response = await this.session.fetch(url.href, {
+    const response = await this.#fetch(url.href, {
       method: "GET",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return conversationFilesResponseSchema.parse(await this.#payload(response));
   }
 
   async attachments(messageIds: readonly string[]): Promise<ListMessageAttachmentsResponse> {
-    const response = await this.session.fetch(this.#url("/v1/attachments/query").href, {
+    const response = await this.#fetch(this.#url("/v2/attachments/query").href, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-hype-comms-capabilities": CLIENT_CAPABILITIES,
       },
       body: JSON.stringify({ messageIds }),
     });
@@ -734,7 +675,7 @@ export class WorkspaceTransport {
     const created = createFileUploadResponseSchema.parse(
       await this.#payload(
         await this.#fetchIdempotentMutation(
-          this.#url("/v1/files/uploads").href,
+          this.#url("/v2/files/uploads").href,
           {
             method: "POST",
             headers: {
@@ -754,7 +695,7 @@ export class WorkspaceTransport {
       ),
     );
     const uploaded = await this.#fetchInScope(
-      this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/content`).href,
+      this.#url(`/v2/files/${encodeURIComponent(created.attachment.id)}/content`).href,
       {
         method: "PUT",
         headers: { "content-type": contentType },
@@ -772,7 +713,7 @@ export class WorkspaceTransport {
     const completed = completeFileUploadResponseSchema.parse(
       await this.#payload(
         await this.#fetchIdempotentMutation(
-          this.#url(`/v1/files/${encodeURIComponent(created.attachment.id)}/complete`).href,
+          this.#url(`/v2/files/${encodeURIComponent(created.attachment.id)}/complete`).href,
           {
             method: "POST",
             headers: {
@@ -797,8 +738,8 @@ export class WorkspaceTransport {
     readonly contentType: string;
     readonly bytes: Buffer;
   }> {
-    const response = await this.session.fetch(
-      this.#url(`/v1/files/${encodeURIComponent(attachmentId)}/content`).href,
+    const response = await this.#fetch(
+      this.#url(`/v2/files/${encodeURIComponent(attachmentId)}/content`).href,
       { method: "GET" },
     );
     if (!response.ok) {
@@ -818,9 +759,8 @@ export class WorkspaceTransport {
   }
 
   async ticket(): Promise<RealtimeTicketResponse> {
-    const response = await this.session.fetch(this.#url("/v1/realtime/tickets").href, {
+    const response = await this.#fetch(this.#url("/v2/realtime/tickets").href, {
       method: "POST",
-      headers: { "x-hype-comms-capabilities": CLIENT_CAPABILITIES },
     });
     return realtimeTicketResponseSchema.parse(await this.#payload(response));
   }

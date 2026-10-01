@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { describe, afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import type { Pool } from "pg";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { type CurrentUser, type WorkspaceEvent } from "@hype-comms/contracts";
 
@@ -11,8 +11,8 @@ import {
   type BuiltInChannelDefinition,
 } from "../src/modules/system-channels/registry.js";
 import {
-  type AnnouncementAuditRecord,
   WorkspaceRepository,
+  type AnnouncementAuditRecord,
 } from "../src/modules/workspace/repository.js";
 import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
@@ -317,16 +317,16 @@ describe("seedSystemChannels", () => {
     },
   );
 
-  it("hides built-in channels from clients that cannot parse the reserved namespace", async () => {
+  it("includes built-in channels in canonical bootstrap and pagination", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);
 
-    const legacy = await repository.bootstrap(owner, true, false);
-    expect(legacy.conversations.map((summary) => summary.conversation.slug)).not.toContain(
+    const legacy = await repository.bootstrap(owner);
+    expect(legacy.conversations.map((summary) => summary.conversation.slug)).toContain(
       RELEASE_NOTES_SLUG,
     );
 
-    const capable = await repository.bootstrap(owner, true, true);
+    const capable = await repository.bootstrap(owner);
     const builtIn = capable.conversations.find(
       (summary) => summary.conversation.slug === RELEASE_NOTES_SLUG,
     );
@@ -337,13 +337,13 @@ describe("seedSystemChannels", () => {
     });
 
     // Paging must agree with the page the cursor came from.
-    const legacyList = await repository.listConversations(owner, undefined, 50, true, false);
-    expect(legacyList.conversations.map((summary) => summary.conversation.slug)).not.toContain(
+    const legacyList = await repository.listConversations(owner, undefined, 50);
+    expect(legacyList.conversations.map((summary) => summary.conversation.slug)).toContain(
       RELEASE_NOTES_SLUG,
     );
   });
 
-  it("filters built-in channels before ranking search pages for legacy clients", async () => {
+  it("includes built-in channels in ranked and paginated search", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);
     const systemChannel = await channelRow();
@@ -366,24 +366,11 @@ describe("seedSystemChannels", () => {
       },
     );
 
-    for (const includeSystemChannels of [undefined, false]) {
-      const legacy = await repository.searchMessages(
-        member,
-        "release",
-        undefined,
-        1,
-        true,
-        includeSystemChannels,
-      );
-      expect(legacy.results.map(({ message }) => message.id)).toEqual([ordinary.message.id]);
-      expect(legacy.nextCursor).toBeNull();
-    }
-
     const stored = await pool.query<{ id: string }>(
       `SELECT id FROM messages WHERE conversation_id = $1`,
       [systemChannel?.id],
     );
-    const capable = await repository.searchMessages(member, "release", undefined, 50, true, true);
+    const capable = await repository.searchMessages(member, "release", undefined, 50);
     expect(new Set(capable.results.map(({ message }) => message.id))).toEqual(
       new Set([ordinary.message.id, ...stored.rows.map(({ id }) => id)]),
     );
@@ -391,7 +378,7 @@ describe("seedSystemChannels", () => {
     const pagedIds: string[] = [];
     let cursor: string | undefined;
     do {
-      const page = await repository.searchMessages(member, "release", cursor, 1, true, true);
+      const page = await repository.searchMessages(member, "release", cursor, 1);
       expect(page.results).toHaveLength(1);
       pagedIds.push(page.results[0]!.message.id);
       cursor = page.nextCursor ?? undefined;
@@ -399,20 +386,17 @@ describe("seedSystemChannels", () => {
     expect(pagedIds).toEqual(capable.results.map(({ message }) => message.id));
   });
 
-  it("withholds built-in channel events from sync until the client advertises support", async () => {
+  it("includes built-in channel events in canonical sync", async () => {
     const repository = repositoryFor(true);
     await repository.seedSystemChannels([definition]);
 
     const conversationIdOf = (event: WorkspaceEvent): string | null => event.conversationId;
     const channel = await channelRow();
 
-    const legacy = await repository.sync(member, "0", 100, {});
-    expect(legacy.events.map(conversationIdOf)).not.toContain(channel?.id);
+    const legacy = await repository.sync(member, "0", 100);
+    expect(legacy.events.map(conversationIdOf)).toContain(channel?.id);
 
-    const capable = await repository.sync(member, "0", 100, {
-      systemChannels: true,
-      announcementChannels: true,
-    });
+    const capable = await repository.sync(member, "0", 100);
     const delivered = capable.events.filter((event) => conversationIdOf(event) === channel?.id);
     expect(delivered.map((event) => event.type)).toEqual([
       "channel.created",

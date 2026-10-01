@@ -1191,7 +1191,7 @@ describe("runMigrations", () => {
               revokedAt: null,
             }),
           ]);
-          await expect(repository.listAgentTokens(workspaceId, agentId, true)).resolves.toEqual([
+          await expect(repository.listAgentTokens(workspaceId, agentId)).resolves.toEqual([
             expect.objectContaining({
               id: tokenId,
               scopes: [...legacyScopes],
@@ -1290,7 +1290,7 @@ describe("runMigrations", () => {
               tokens: rollbackTokenList,
             }),
           ).not.toThrow();
-          await expect(service.listAgentTokens(ownerId, agentId, true)).resolves.toEqual([
+          await expect(service.listAgentTokens(ownerId, agentId)).resolves.toEqual([
             expect.objectContaining({
               id: tokenId,
               scopes: [...legacyScopes],

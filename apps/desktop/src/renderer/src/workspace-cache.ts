@@ -19,12 +19,12 @@ import {
   type CacheEncryptBatchResponse,
   type CacheScope,
   type ConversationSummary,
+  type HumanWorkspaceBootstrapResponse,
   type Message,
   type Reaction,
   type SendMessageOperation,
   type Task,
   type User,
-  type HumanWorkspaceBootstrapResponse,
   type WorkspaceEvent,
   type WorkspaceSnapshot,
 } from "@hype-comms/contracts";
@@ -135,7 +135,7 @@ export interface WorkspaceCache {
     retractSourceMessageIds?: readonly string[],
   ): Promise<boolean>;
   /**
-   * Replaces the whole member directory with the server's answer to `GET /v1/members`.
+   * Replaces the whole member directory with the server's answer to `GET /v2/members`.
    *
    * Along with snapshot/metadata replacement, this owns the cached member list. `member.updated`
    * deliberately does not write here: its payload is a bare `User` with no status field, so it
@@ -2717,9 +2717,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       tasks: [...this.#tasks.values()]
         .filter((task) => options?.includeAllTasks === true || inScope(task.conversationId))
         .sort(compareTasks),
-      outbox: [...this.#outbox.values()].sort((left, right) =>
-        left.createdAt.localeCompare(right.createdAt),
-      ),
+      outbox: [...this.#outbox.values()]
+        .map((item): OutboxItem => ({
+          ...item,
+          status: item.status === "sending" ? "pending" : item.status,
+        }))
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
       syncCursor: this.#syncCursor,
       lastSyncedAt: this.#lastSyncedAt,
       repairMarker: this.#repairMarker,

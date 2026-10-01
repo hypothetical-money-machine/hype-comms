@@ -40,8 +40,7 @@ use the existing term “workspace” rather than introducing a second server ab
   guarantees.
 - Keep the first release small enough to avoid a workspace-wide administrator/role-management
   redesign.
-- Make capability-based rollout and intentionally degraded legacy behavior explicit, so a client
-  capability never becomes an authorization grant.
+- Keep protocol compatibility separate from feature availability and publication authority.
 
 ## Non-goals
 
@@ -286,56 +285,18 @@ rejects an announcement conversation. Public routes still return the specified `
 leaking a database error. No task row can be created for a new announcement channel, so it
 contributes no task events or cache state.
 
-## Compatibility, sync, and rollout
+## Protocol, sync, and rollout
 
-Conversation and event schemas are strict. Sending an unknown `channelMode` property to an older
-desktop can break bootstrap, conversation pagination, cached snapshots, or conversation events.
-This is a compatibility feature, not a server-only migration. A client capability controls wire
-shape and UI availability; it never grants publishing authority.
+Workspace protocol 2 includes `channelMode` in every canonical conversation response and newly
+stored event. `featureFlags.announcementChannels` reports durable availability. Once announcement
+data can exist, disabling a process flag cannot make other nodes report it as ordinary chat.
+Creation and bulletin publication still require the existing feature and active-human-owner
+checks. Client headers never grant publication authority.
 
-1. Add an `announcement-channels-v1` capability. A desktop advertises it only when it also
-   supports the existing thread-reply capability.
-2. Add `featureFlags.announcementChannels` to the capable bootstrap contract. A capable desktop
-   treats an absent flag as `false` and offers announcement creation only when it is `true`. The
-   server sends this flag only to a client that advertises `announcement-channels-v1`. It is a
-   one-way availability contract in v1: after it becomes true, it remains true whenever
-   announcement-channel data can exist. An emergency creation freeze uses a separate server gate;
-   it must not make persisted announcement channels render as ordinary chat.
-3. A capable desktop advertises the capability on every request that can create or return a
-   conversation: bootstrap, listings/pagination, channel creation, direct-conversation creation,
-   archive or other mutation routes returning a conversation, history, sync, and realtime-ticket
-   requests.
-4. The server includes `channelMode` only in capable projections, and strips only that property
-   from legacy projections. This covers every conversation-bearing response and event, including
-   channel/direct creation and archive responses plus `channel.created`, `channel.archived`, and
-   `direct_conversation.created`. Canonical durable events remain complete after cutover; delivery
-   projection is selected from the recipient capability.
-5. Realtime tickets persist an `announcementChannels` capability flag. Ticket issuance, ticket
-   consumption, the realtime principal, and `syncPrincipal` all carry it, because a WebSocket
-   replay has no request header from which to reconstruct the projection choice.
-6. When a desktop first gains `announcement-channels-v1` for a cached workspace, it stops its old
-   realtime session, obtains a new capable ticket, invalidates its prior conversation
-   snapshot/cursor, and replaces it from a complete capable bootstrap before applying incremental
-   sync. A legacy-projected event may already have advanced the durable cursor without the immutable
-   mode field, so cursor replay alone is insufficient.
-7. The server accepts `channelMode: "announcement"` only when the feature flag is enabled, the
-   request advertises `announcement-channels-v1`, and the requester passes the active-human-owner
-   authorization check. An incapable client cannot create an announcement channel.
-8. Incapable legacy clients are deliberately degraded rather than silently considered feature
-   complete. They receive the legacy-shaped projection and may render ordinary channel or task
-   chrome; root sends and task calls remain authoritatively rejected as specified above. The first
-   capable-client experience provides the promised thread reply and taskless UI. A universal
-   desktop upgrade is not required in v1.
-9. Roll out in this order: run the safe schema migration; deploy the compatible server and
-   realtime workers with `featureFlags.announcementChannels` disabled; drain and verify every
-   pre-feature server/realtime worker; release the capable desktop; then enable the feature flag.
-   No announcement channel may be created, and no durable conversation event may carry
-   `channelMode`, until every serving worker can parse and project the canonical event. An old node
-   would otherwise be able to bypass root/task enforcement or fail on a new strict event. Enabling
-   the process flag atomically persists a one-way workspace cutover. Every compatible node reads
-   that database state before publishing a conversation event, so a node still carrying the old
-   local setting cannot strip `channelMode` after announcement data can exist. Disabling creation
-   in an emergency requires a separate future gate and never reverses this durable cutover.
+The protocol upgrade uses a coordinated maintenance window. Old workspace clients receive an
+upgrade-required response; they do not receive downgraded announcements. The replay epoch and
+floor establish which events protocol-2 clients may consume after bootstrapping. Historical events
+are retained without rewriting them. See [the cutover runbook](workspace-protocol.md).
 
 Mode immutability avoids a `channel.updated` event, task-cache purge, and historical-task policy in
 the first release. A later mode toggle must introduce all three deliberately.
@@ -344,8 +305,8 @@ the first release. A later mode toggle must introduce all three deliberately.
 
 ### Contracts and database
 
-- A capable client normalizes an omitted legacy mode to `chat` for a channel and `null` for a
-  non-channel; direct conversations cannot carry a non-null channel mode.
+- Direct conversations cannot carry a non-null channel mode. Retained local records may use
+  schema defaults; new server responses contain the canonical mode.
 - Invalid/unknown modes and invalid kind/mode combinations are rejected.
 - The migration backfills every existing channel to `chat` without modifying prior migration files,
   accepts old-server-shaped channel and direct inserts, and enforces the NULL-safe kind/mode
@@ -379,23 +340,13 @@ the first release. A later mode toggle must introduce all three deliberately.
   records with actor, workspace, operation, and correlation identifiers, plus a target conversation
   identifier when one exists, but no message body.
 
-### Compatibility, sync, and rollout
+### Protocol, sync, and rollout
 
-- A capable bootstrap receives both the capability-gated feature flag and `channelMode`; literal
-  legacy response/event JSON omits the property on every conversation-bearing surface.
-- Realtime ticket persistence, realtime-principal authorization, direct sync, and WebSocket replay
-  all preserve the announcement capability used for event projection.
-- A newly capable cached desktop replaces its workspace snapshot before cursor sync, preventing a
-  legacy cursor from permanently classifying an announcement channel as `chat`; it stops the old
-  socket and obtains a new capable ticket first.
-- Concurrent capable and legacy sessions for the same user receive their respective projections by
-  request/ticket, rather than by user identity or the stored durable event alone.
-- An announcement-creation request without the capability or with the feature flag disabled is not
-  accepted as announcement mode.
-- Feature enablement occurs only after every serving server and realtime worker supports the new
-  canonical event and authorization rules; a deployment test proves no old node remains.
-- Capability negotiation never expands authorization: an incapable client, agent, bot, or service
-  credential cannot gain bulletin publication by omitting or claiming a capability.
+- Bootstrap and new events contain the canonical mode and availability fields without negotiation.
+- HTTP sync and realtime enforce the same current audience and resource authorization.
+- Unsupported workspace protocol majors return upgrade-required before mutations.
+- Feature enablement occurs only when every serving worker supports the canonical rules.
+- An agent, bot, or unauthorized human cannot publish bulletins through any header value.
 
 ### Desktop and evidence
 

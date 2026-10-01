@@ -3,73 +3,63 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 
 import {
-  AGENT_CONTEXT_PACK_CAPABILITY,
   AGENT_CONTEXT_PACK_DEFAULT_LIMIT,
   AGENT_CONTEXT_PACK_MAX_BYTES,
   AGENT_CONTEXT_PACK_MAX_LIMIT,
-  AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY,
   CONVERSATION_PAGE_DEFAULT_LIMIT,
   CONVERSATION_PAGE_MAX_LIMIT,
-  ATTACHMENTS_CAPABILITY,
-  DEFAULT_AGENT_AGENCY_PROFILE,
   DEFAULT_AGENCY_AGENT_SCOPES,
-  MESSAGE_RETRACT_EVENTS_CAPABILITY,
+  DEFAULT_AGENT_AGENCY_PROFILE,
   MESSAGE_RETRACT_WINDOW_MS,
-  PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-  REACTION_EVENTS_CAPABILITY,
-  READ_STATE_EVENTS_CAPABILITY,
-  TASK_EVENTS_CAPABILITY,
-  THREADS_CAPABILITY,
-  apiErrorEnvelopeSchema,
   agentContextHistoryQuerySchema,
   agentContextHistoryResponseSchema,
-  agentTokenMetadataSchema,
-  agentTokenSecretSchema,
   agentEnrollmentCredentialVerifierSchema,
   agentEnrollmentSchema,
+  agentTokenMetadataSchema,
+  agentTokenSecretSchema,
   agentUserSchema,
+  apiErrorEnvelopeSchema,
   botAccessTokenSchema,
   botScopesSchema,
-  incomingWebhookIdempotencyKeySchema,
-  incomingWebhookMessageRequestSchema,
   channelSlugFromName,
   channelSlugSchema,
-  isSystemChannelSlug,
-  systemChannelSlugSchema,
-  clientCapabilitiesHeaderSchema,
-  conversationSummarySchema,
+  chatSessionStateSchema,
   conversationSchema,
+  conversationSummarySchema,
   createAgentTokenRequestSchema,
-  requestAgentEnrollmentSchema,
-  currentAgentPrincipalSchema,
-  currentPrincipalSchema,
   createChannelOperationSchema,
   createFileUploadRequestSchema,
   createTaskOperationSchema,
+  currentAgentPrincipalSchema,
+  currentPrincipalSchema,
   currentUserSchema,
   displayNameSchema,
   entityVersionSchema,
-  chatSessionStateSchema,
+  incomingWebhookIdempotencyKeySchema,
+  incomingWebhookMessageRequestSchema,
   injectionSafeCompactJsonByteLength,
+  isSystemChannelSlug,
   listConversationsQuerySchema,
   listConversationsResponseSchema,
   listMessageReactionsRequestSchema,
   memberUpdatedEventSchema,
-  messageReactionTargetSchema,
-  messageHistoryResponseSchema,
-  messageSchema,
   messageHistoryQuerySchema,
-  messageThreadResponseSchema,
-  messageThreadRequestSchema,
+  messageHistoryResponseSchema,
+  messageReactionTargetSchema,
+  messageSchema,
   messageSearchQuerySchema,
+  messageThreadRequestSchema,
+  messageThreadResponseSchema,
   moveTaskOperationSchema,
   reactionEmojiSchema,
   reactionSchema,
+  requestAgentEnrollmentSchema,
   retractMessageResponseSchema,
   sendMessageOperationSchema,
   sendMessageRequestSchema,
   syncAttemptResultSchema,
   syncQuerySchema,
+  systemChannelSlugSchema,
   systemConnectedEventSchema,
   taskListQuerySchema,
   taskNumberSchema,
@@ -83,8 +73,8 @@ import {
   updateTaskOperationSchema,
   updateVersionSchema,
   userSchema,
-  workspaceEventSchema,
   workspaceBootstrapResponseSchema,
+  workspaceEventSchema,
   workspaceSnapshotSchema,
 } from "../src/index.js";
 
@@ -612,7 +602,6 @@ describe("agent contracts", () => {
       "agents:invite",
     ]);
     expect(DEFAULT_AGENT_AGENCY_PROFILE).toBe("default-agency-v1");
-    expect(AGENT_ENROLLMENT_REVIEW_CHANNELS_CAPABILITY).toBe("agent-enrollment-review-channels-v1");
     expect(() => requestAgentEnrollmentSchema.parse({ ...request, unexpected: true })).toThrow();
     expect(() =>
       requestAgentEnrollmentSchema.parse({
@@ -1839,26 +1828,6 @@ describe("transport contracts", () => {
     expect(() => workspaceEventSchema.parse({ ...event, workspaceId: MESSAGE_ID })).toThrow();
     expect(() => workspaceEventSchema.parse({ ...event, conversationId: MESSAGE_ID })).toThrow();
     expect(() => workspaceEventSchema.parse({ ...event, entityVersion: 2 })).toThrow();
-  });
-
-  it("validates bounded client capability headers", () => {
-    expect(
-      clientCapabilitiesHeaderSchema.parse(
-        `${REACTION_EVENTS_CAPABILITY}, ${READ_STATE_EVENTS_CAPABILITY}, ${TASK_EVENTS_CAPABILITY}, ${THREADS_CAPABILITY}, ${PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY}, ${ATTACHMENTS_CAPABILITY}, ${MESSAGE_RETRACT_EVENTS_CAPABILITY}, ${AGENT_CONTEXT_PACK_CAPABILITY}`,
-      ),
-    ).toEqual([
-      REACTION_EVENTS_CAPABILITY,
-      READ_STATE_EVENTS_CAPABILITY,
-      TASK_EVENTS_CAPABILITY,
-      THREADS_CAPABILITY,
-      PARTICIPATED_THREAD_NOTIFICATIONS_CAPABILITY,
-      ATTACHMENTS_CAPABILITY,
-      MESSAGE_RETRACT_EVENTS_CAPABILITY,
-      AGENT_CONTEXT_PACK_CAPABILITY,
-    ]);
-    for (const value of ["", "reaction events", "Reaction-Events", "a".repeat(513)]) {
-      expect(() => clientCapabilitiesHeaderSchema.parse(value)).toThrow();
-    }
   });
 
   it("rejects unsafe sequence and blank message values", () => {

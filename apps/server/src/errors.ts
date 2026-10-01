@@ -75,13 +75,6 @@ const DOMAIN_ERRORS: Readonly<Record<DomainErrorKind, DomainErrorResponse>> = {
   authentication_required: { statusCode: 401, code: "UNAUTHORIZED" },
   sync_position_expired: { statusCode: 410, code: "CURSOR_EXPIRED" },
   integrity_failure: { statusCode: 500, code: "INTERNAL_ERROR" },
-  group_direct_client_upgrade_required: {
-    statusCode: 409,
-    code: "CONFLICT",
-    details: [
-      { field: "X-Hype-Comms-Capabilities", issue: "group-direct-messages-v1 is required" },
-    ],
-  },
 };
 
 export function registerErrorHandling(app: FastifyInstance): void {

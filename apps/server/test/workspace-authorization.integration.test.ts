@@ -17,7 +17,6 @@ import {
   type ConversationRow,
   WorkspaceAuthorization,
 } from "../src/modules/workspace/authorization.js";
-import { GroupDirectClientUpgradeRequiredError } from "../src/modules/workspace/group-direct-capability.js";
 
 const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
 const now = "2026-07-24T12:00:00.000Z";
@@ -323,66 +322,6 @@ describe("WorkspaceAuthorization", () => {
     }
   }
 
-  async function insertMessage(
-    conversationId: string,
-    authorId: string,
-    options: {
-      readonly deleted?: boolean;
-      readonly createdAt?: string;
-      readonly sequence?: number;
-    } = {},
-  ): Promise<string> {
-    const id = randomUUID();
-    await pool.query(
-      `INSERT INTO messages (
-         id, workspace_id, conversation_id, conversation_sequence,
-         committed_workspace_sequence, client_message_id, request_fingerprint,
-         author_id, body, body_format, deleted_at, created_at
-       ) VALUES (
-         $1, $2, $3, $4, $4, $5, $6, $7, 'hello', 'hype_comms_markdown_v1',
-         ${options.deleted === true ? "clock_timestamp()" : "NULL"},
-         ${options.createdAt === undefined ? "clock_timestamp()" : "$8"}
-       )`,
-      [
-        id,
-        workspaceId,
-        conversationId,
-        options.sequence ?? 1,
-        randomUUID(),
-        Buffer.alloc(32, 3),
-        authorId,
-        ...(options.createdAt === undefined ? [] : [options.createdAt]),
-      ],
-    );
-    return id;
-  }
-
-  async function insertAttachment(
-    conversationId: string,
-    uploadedBy: string,
-    status: "pending" | "ready" | "failed",
-    options: { readonly expired?: boolean } = {},
-  ): Promise<string> {
-    const id = randomUUID();
-    const expiresSql =
-      status === "pending"
-        ? options.expired === true
-          ? "clock_timestamp() - interval '1 minute'"
-          : "clock_timestamp() + interval '1 hour'"
-        : "NULL";
-    const receivedSql = status === "ready" ? "clock_timestamp()" : "NULL";
-    await pool.query(
-      `INSERT INTO attachments (
-         id, workspace_id, conversation_id, uploaded_by, file_name, content_type,
-         size_bytes, content_sha256, status, upload_expires_at, content_received_at
-       ) VALUES (
-         $1, $2, $3, $4, 'file.txt', 'text/plain', 12, $5, $6, ${expiresSql}, ${receivedSql}
-       )`,
-      [id, workspaceId, conversationId, uploadedBy, Buffer.alloc(32, 4), status],
-    );
-    return id;
-  }
-
   async function insertRealtimeTicket(
     options: {
       readonly userId?: string;
@@ -456,17 +395,17 @@ describe("WorkspaceAuthorization", () => {
   describe("canViewConversation", () => {
     it("allows humans to view a public workspace channel without a seat", async () => {
       await expect(
-        authorization.canViewConversation(workspaceId, ownerId, generalId, false),
+        authorization.canViewConversation(workspaceId, ownerId, generalId),
       ).resolves.toBe(true);
       await expect(
-        authorization.canViewConversation(workspaceId, memberId, generalId, true),
+        authorization.canViewConversation(workspaceId, memberId, generalId),
       ).resolves.toBe(true);
     });
 
     it("hides a public workspace channel from an agent without a seat", async () => {
       await insertAgent();
       await expect(
-        authorization.canViewConversation(workspaceId, agentId, generalId, false),
+        authorization.canViewConversation(workspaceId, agentId, generalId),
       ).resolves.toBe(false);
       await pool.query(
         `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
@@ -474,7 +413,7 @@ describe("WorkspaceAuthorization", () => {
         [generalId, workspaceId, agentId],
       );
       await expect(
-        authorization.canViewConversation(workspaceId, agentId, generalId, false),
+        authorization.canViewConversation(workspaceId, agentId, generalId),
       ).resolves.toBe(true);
     });
 
@@ -482,10 +421,10 @@ describe("WorkspaceAuthorization", () => {
       const privateId = randomUUID();
       await insertMembersChannel(privateId, "private");
       await expect(
-        authorization.canViewConversation(workspaceId, ownerId, privateId, false),
+        authorization.canViewConversation(workspaceId, ownerId, privateId),
       ).resolves.toBe(true);
       await expect(
-        authorization.canViewConversation(workspaceId, memberId, privateId, false),
+        authorization.canViewConversation(workspaceId, memberId, privateId),
       ).resolves.toBe(false);
       await pool.query(
         `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
@@ -493,7 +432,7 @@ describe("WorkspaceAuthorization", () => {
         [privateId, workspaceId, memberId],
       );
       await expect(
-        authorization.canViewConversation(workspaceId, memberId, privateId, false),
+        authorization.canViewConversation(workspaceId, memberId, privateId),
       ).resolves.toBe(true);
     });
 
@@ -501,80 +440,40 @@ describe("WorkspaceAuthorization", () => {
       const humansId = randomUUID();
       await insertAgent();
       await insertMembersChannel(humansId, "humans", { humanOnly: true });
+      await expect(authorization.canViewConversation(workspaceId, ownerId, humansId)).resolves.toBe(
+        true,
+      );
       await expect(
-        authorization.canViewConversation(workspaceId, ownerId, humansId, false),
+        authorization.canViewConversation(workspaceId, memberId, humansId),
       ).resolves.toBe(true);
-      await expect(
-        authorization.canViewConversation(workspaceId, memberId, humansId, false),
-      ).resolves.toBe(true);
-      await expect(
-        authorization.canViewConversation(workspaceId, agentId, humansId, false),
-      ).resolves.toBe(false);
+      await expect(authorization.canViewConversation(workspaceId, agentId, humansId)).resolves.toBe(
+        false,
+      );
     });
 
     it("lets both 1:1 participants view a direct message", async () => {
       const dmId = randomUUID();
       await insertDirectMessage(dmId, ownerId, memberId);
-      await expect(
-        authorization.canViewConversation(workspaceId, ownerId, dmId, false),
-      ).resolves.toBe(true);
-      await expect(
-        authorization.canViewConversation(workspaceId, memberId, dmId, false),
-      ).resolves.toBe(true);
-      await expect(
-        authorization.canViewConversation(workspaceId, observerId, dmId, false),
-      ).resolves.toBe(false);
+      await expect(authorization.canViewConversation(workspaceId, ownerId, dmId)).resolves.toBe(
+        true,
+      );
+      await expect(authorization.canViewConversation(workspaceId, memberId, dmId)).resolves.toBe(
+        true,
+      );
+      await expect(authorization.canViewConversation(workspaceId, observerId, dmId)).resolves.toBe(
+        false,
+      );
     });
 
-    it("hides group direct messages unless the ticket advertises them", async () => {
+    it("shows group direct messages to participants and hides them from other active members", async () => {
       const groupId = randomUUID();
       await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      await expect(
-        authorization.canViewConversation(workspaceId, ownerId, groupId, false),
-      ).resolves.toBe(false);
-      await expect(
-        authorization.canViewConversation(workspaceId, ownerId, groupId, true),
-      ).resolves.toBe(true);
-      await expect(
-        authorization.canViewConversation(workspaceId, memberId, groupId, true),
-      ).resolves.toBe(true);
-    });
-
-    it("returns false when the caller has no active workspace membership", async () => {
-      await insertOutsider();
-      await expect(
-        authorization.canViewConversation(workspaceId, outsiderId, generalId, false),
-      ).resolves.toBe(false);
-    });
-  });
-
-  describe("requireGroupDirectMessagesForConversations", () => {
-    it("is a no-op when the client supports groups or the id list is empty", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      await expect(
-        authorization.requireGroupDirectMessagesForConversations(owner, [groupId], true),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForConversations(owner, [], false),
-      ).resolves.toBeUndefined();
-    });
-
-    it("blocks when any visible group conversation is in the list", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      await expect(
-        authorization.requireGroupDirectMessagesForConversations(
-          owner,
-          [generalId, groupId],
-          false,
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-    });
-
-    it("does not block a group the caller cannot see", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
+      await expect(authorization.canViewConversation(workspaceId, ownerId, groupId)).resolves.toBe(
+        true,
+      );
+      await expect(authorization.canViewConversation(workspaceId, memberId, groupId)).resolves.toBe(
+        true,
+      );
       await insertOutsider();
       await pool.query(
         `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
@@ -582,213 +481,26 @@ describe("WorkspaceAuthorization", () => {
         [workspaceId, outsiderId],
       );
       await expect(
-        authorization.requireGroupDirectMessagesForConversations(outsider, [groupId], false),
-      ).resolves.toBeUndefined();
-    });
-  });
-
-  describe("requireGroupDirectMessagesForMessages", () => {
-    it("is a no-op when supported or when no ids are supplied", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const messageId = await insertMessage(groupId, ownerId);
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [messageId], true),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [], false),
-      ).resolves.toBeUndefined();
+        authorization.canViewConversation(workspaceId, outsiderId, groupId),
+      ).resolves.toBe(false);
     });
 
-    it("blocks only when every requested message is visible and one is a group DM", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const groupMessageId = await insertMessage(groupId, ownerId);
-      const channelMessageId = await insertMessage(generalId, ownerId);
+    it("returns false when the caller has no active workspace membership", async () => {
+      await insertOutsider();
       await expect(
-        authorization.requireGroupDirectMessagesForMessages(
-          owner,
-          [groupMessageId, channelMessageId],
-          false,
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(
-          owner,
-          [groupMessageId, randomUUID()],
-          false,
-        ),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [channelMessageId], false),
-      ).resolves.toBeUndefined();
-    });
-
-    it("applies active and retractable eligibility predicates", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const liveId = await insertMessage(groupId, ownerId, { sequence: 1 });
-      const deletedId = await insertMessage(groupId, ownerId, { deleted: true, sequence: 2 });
-      const staleId = await insertMessage(groupId, ownerId, {
-        sequence: 3,
-        createdAt: "2020-01-01T00:00:00.000Z",
-      });
-      const otherAuthorId = await insertMessage(groupId, memberId, { sequence: 4 });
-
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [liveId], false, "active"),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [deletedId], false, "active"),
-      ).resolves.toBeUndefined();
-
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [liveId], false, "retractable"),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(
-          owner,
-          [deletedId],
-          false,
-          "retractable",
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [staleId], false, "retractable"),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(
-          owner,
-          [otherAuthorId],
-          false,
-          "retractable",
-        ),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForMessages(owner, [deletedId], false, "any"),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-    });
-  });
-
-  describe("requireGroupDirectMessagesForAttachments", () => {
-    it("is a no-op when supported or when no ids are supplied", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const attachmentId = await insertAttachment(groupId, ownerId, "pending");
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(owner, [attachmentId], true),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(owner, [], false),
-      ).resolves.toBeUndefined();
-    });
-
-    it("blocks complete visible group attachments and ignores incomplete batches", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const groupAttachmentId = await insertAttachment(groupId, ownerId, "ready");
-      const channelAttachmentId = await insertAttachment(generalId, ownerId, "ready");
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [groupAttachmentId, channelAttachmentId],
-          false,
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [groupAttachmentId, randomUUID()],
-          false,
-        ),
-      ).resolves.toBeUndefined();
-    });
-
-    it("applies content-write and complete eligibility predicates", async () => {
-      const groupId = randomUUID();
-      await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
-      const pendingId = await insertAttachment(groupId, ownerId, "pending");
-      const expiredId = await insertAttachment(groupId, ownerId, "pending", { expired: true });
-      const readyId = await insertAttachment(groupId, ownerId, "ready");
-      const otherUploaderId = await insertAttachment(groupId, memberId, "pending");
-
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [pendingId],
-          false,
-          "content-write",
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [expiredId],
-          false,
-          "content-write",
-        ),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [readyId],
-          false,
-          "content-write",
-        ),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [otherUploaderId],
-          false,
-          "content-write",
-        ),
-      ).resolves.toBeUndefined();
-
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(owner, [readyId], false, "complete"),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [pendingId],
-          false,
-          "complete",
-        ),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(
-          owner,
-          [expiredId],
-          false,
-          "complete",
-        ),
-      ).resolves.toBeUndefined();
-      await expect(
-        authorization.requireGroupDirectMessagesForAttachments(owner, [readyId], false, "any"),
-      ).rejects.toBeInstanceOf(GroupDirectClientUpgradeRequiredError);
+        authorization.canViewConversation(workspaceId, outsiderId, generalId),
+      ).resolves.toBe(false);
     });
   });
 
   describe("consumeRealtimeTicket", () => {
-    it("consumes a human device ticket exactly once and copies capability flags", async () => {
+    it("consumes tickets once and omits retained protocol-1 capability flags", async () => {
       const issued = await insertRealtimeTicket();
       await expect(authorization.consumeRealtimeTicket(issued)).resolves.toEqual({
         workspaceId,
         userId: ownerId,
         deviceSessionId: ownerSessionId,
         agentTokenId: null,
-        reactionEvents: false,
-        readStateEvents: false,
-        taskEvents: false,
-        announcementChannels: false,
-        participatedThreadNotifications: false,
-        messageRetractEvents: false,
-        memberProfiles: false,
-        ephemeralActivity: false,
-        groupDirectMessages: false,
-        humansOnlyChannels: false,
-        systemChannels: false,
       });
       await expect(authorization.consumeRealtimeTicket(issued)).resolves.toBeNull();
 
@@ -812,17 +524,6 @@ describe("WorkspaceAuthorization", () => {
         userId: ownerId,
         deviceSessionId: ownerSessionId,
         agentTokenId: null,
-        reactionEvents: true,
-        readStateEvents: true,
-        taskEvents: true,
-        announcementChannels: true,
-        participatedThreadNotifications: true,
-        messageRetractEvents: true,
-        memberProfiles: true,
-        ephemeralActivity: true,
-        groupDirectMessages: true,
-        humansOnlyChannels: true,
-        systemChannels: true,
       });
     });
 
@@ -882,7 +583,6 @@ describe("WorkspaceAuthorization", () => {
         userId: agentId,
         deviceSessionId: null,
         agentTokenId,
-        systemChannels: true,
       });
 
       const revoked = await insertRealtimeTicket({

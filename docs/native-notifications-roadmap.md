@@ -56,7 +56,7 @@ The default-off notification implementation now includes:
   renderer-initiated ready/drain handshake plus exact post-navigation acknowledgement;
 - an unpackaged headless capture presenter that records only an opaque capture ID and eligibility
   reason, then exercises the normal click path through a headless-only activation bridge;
-- a capability-gated, recipient-specific participated-thread reason frozen by the server and
+- a recipient-specific participated-thread reason frozen by the server and
   consumed after verified-mention and direct-message precedence;
 - macOS windowless notification observation separated from renderer delivery, followed by
   replica-first HTTP catch-up and a fresh realtime epoch when a window is recreated; and
@@ -256,7 +256,7 @@ The boundary has these responsibilities:
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| Server/contracts | Message authorization, verified mention IDs, durable audience, capability-gated recipient thread reason | Device focus or OS notification state |
+| Server/contracts | Message authorization, verified mention IDs, durable audience, recipient thread reason | Device focus or OS notification state |
 | Main realtime session | Strict frame validation, current user/workspace/generation, freshness boundary | Renderer read state or claiming notification handling is UI commit |
 | Main notification | Pure policy, labels, ephemeral watermark, settings, focus/headless guard, presenter, queue | Parsing body text for mentions or exposing generic title/body IPC |
 | Preload | Strict action/activity schemas, bounded ready/drain/ack bridge | Native presentation or persistent notification state |
@@ -270,7 +270,7 @@ recoverable disconnects and invalid-frame reconnects. Clear the whole scope only
 sign-out, user/workspace replacement, and shutdown. A conversation-membership removal immediately
 closes and purges that conversation's notifications and actions, blocks new ones, and stays blocked
 until an authoritative catalog refresh confirms access. Thread participation does not belong in
-this local cache; the server freezes and sends the capability-gated recipient-specific reason.
+this local cache; the server freezes and sends the recipient-specific reason.
 
 Notification evaluation and native presentation are outside the renderer sync acknowledgement
 critical path. Failure, denial, or delay in the notification controller must never reject event
@@ -425,15 +425,14 @@ Deliverables:
 - have the server freeze the eligible root author and prior repliers when the reply commits, exclude
   the reply author, intersect with the authorized event audience, and expose a recipient-specific
   reason rather than deriving it from only the locally hydrated thread;
-- capability-gate the new event reason so old servers omit it and old desktops are never sent a
-  strict payload they cannot parse;
-- preserve strict old/new server and desktop compatibility through the capability and
-  rolling-release gate;
+- include the recipient reason in the canonical protocol-2 event;
+- reject unsupported workspace protocol majors before streaming data. The coordinated protocol
+  cutover supersedes the earlier rolling capability rollout;
 - deduplicate a reply that also qualifies as a DM or mention; and
 - route clicks to the thread and exact reply.
 
 Completed deterministic evidence: cold-cache and recipient-audience tests agree on participation,
-removed members receive nothing, previous/current clients remain compatible, and replay remains
+removed members receive nothing, unsupported protocol majors receive an upgrade response, and replay remains
 quiet.
 
 Evidence: the [strict wire-contract tests](../packages/contracts/test/contracts.test.ts),

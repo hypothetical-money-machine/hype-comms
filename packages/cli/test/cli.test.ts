@@ -1,12 +1,13 @@
 import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serverResponse } from "./helpers.js";
 
 import { describe, expect, it, vi } from "vitest";
 
 import { executeCli } from "../src/cli.js";
 import { loadProfileStore, saveProfile } from "../src/config.js";
-import { EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
+import { EXIT_CONTRACT, EXIT_SUCCESS, EXIT_USAGE } from "../src/errors.js";
 import {
   agentPrincipal,
   CLIENT_MESSAGE_ID,
@@ -53,6 +54,27 @@ describe("CLI output and exit contracts", () => {
     expect(runtime.stderrText()).toBe("");
   });
 
+  it("refuses an old server whose healthy /livez carries no protocol header", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const runtime = testRuntime({
+      homeDirectory: await home(),
+      env: { HYPE_COMMS_API_ORIGIN: "https://chat.example.test" },
+      fetch,
+    });
+
+    expect(await executeCli(["health", "--json"], runtime)).toBe(EXIT_CONTRACT);
+    expect(runtime.stdoutText()).toBe("");
+    expect(JSON.parse(runtime.stderrText())).toMatchObject({
+      error: { code: "UPGRADE_REQUIRED", retryable: false },
+    });
+  });
+
   it("serializes rotated profile refreshes across concurrent CLI processes", async () => {
     const homeDirectory = await home();
     const configDirectory = join(homeDirectory, "config");
@@ -70,7 +92,7 @@ describe("CLI output and exit contracts", () => {
       observed.push(token ?? "");
       const next = observed.length === 1 ? "b".repeat(43) : "c".repeat(43);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      return new Response(null, {
+      return serverResponse(null, {
         status: 204,
         headers: { "set-cookie": `hype_comms_session=${next}; Path=/; HttpOnly` },
       });
@@ -129,7 +151,7 @@ describe("CLI output and exit contracts", () => {
 
   it("fetches exactly one authorized message", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe(`https://chat.example.test/v1/messages/${MESSAGE_ID}`);
+      expect(String(url)).toBe(`https://chat.example.test/v2/messages/${MESSAGE_ID}`);
       expect(init?.method).toBe("GET");
       return jsonResponse({
         message: {
@@ -351,7 +373,7 @@ describe("CLI output and exit contracts", () => {
       },
     );
     const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
-      expect(String(url)).toBe("https://override.example.test/v1/auth/me");
+      expect(String(url)).toBe("https://override.example.test/v2/auth/me");
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
       expect(new Headers(init?.headers).has("cookie")).toBe(false);
       return jsonResponse(agentPrincipal());

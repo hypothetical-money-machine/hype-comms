@@ -8,7 +8,7 @@ import {
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
 import type { Pool } from "pg";
-import { describe, afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { BotService } from "../src/modules/bots/service.js";
@@ -145,7 +145,7 @@ describe("per-channel incoming webhooks", () => {
   async function enable(app: Awaited<ReturnType<typeof buildApp>>, token = creatorSessionToken) {
     const response = await app.inject({
       method: "POST",
-      url: `/v1/channels/${channelId}/webhook`,
+      url: `/v2/channels/${channelId}/webhook`,
       headers: sessionCookie(token),
       payload: {},
     });
@@ -207,7 +207,7 @@ describe("per-channel incoming webhooks", () => {
 
     const status = await app.inject({
       method: "GET",
-      url: `/v1/channels/${channelId}/webhook`,
+      url: `/v2/channels/${channelId}/webhook`,
       headers: sessionCookie(creatorSessionToken),
     });
     expect(status.statusCode).toBe(200);
@@ -217,7 +217,7 @@ describe("per-channel incoming webhooks", () => {
 
     const members = await app.inject({
       method: "GET",
-      url: "/v1/members",
+      url: "/v2/members",
       headers: sessionCookie(creatorSessionToken),
     });
     expect(listMembersResponseSchema.parse(members.json()).members).toContainEqual(
@@ -267,7 +267,7 @@ describe("per-channel incoming webhooks", () => {
     const first = (await enable(app)).issued;
     const disabled = await app.inject({
       method: "DELETE",
-      url: `/v1/channels/${channelId}/webhook`,
+      url: `/v2/channels/${channelId}/webhook`,
       headers: sessionCookie(ownerSessionToken),
     });
     expect(disabled.statusCode).toBe(200);
@@ -289,7 +289,7 @@ describe("per-channel incoming webhooks", () => {
 
     const rotatedResponse = await app.inject({
       method: "POST",
-      url: `/v1/channels/${channelId}/webhook/rotate`,
+      url: `/v2/channels/${channelId}/webhook/rotate`,
       headers: sessionCookie(creatorSessionToken),
       payload: {},
     });
@@ -317,7 +317,7 @@ describe("per-channel incoming webhooks", () => {
     const app = await appWithWebhookThrottle();
     const deniedEnable = await app.inject({
       method: "POST",
-      url: `/v1/channels/${channelId}/webhook`,
+      url: `/v2/channels/${channelId}/webhook`,
       headers: sessionCookie(outsiderSessionToken),
       payload: {},
     });
@@ -331,7 +331,7 @@ describe("per-channel incoming webhooks", () => {
     ] as const) {
       const denied = await app.inject({
         method,
-        url: `/v1/channels/${channelId}/webhook${suffix}`,
+        url: `/v2/channels/${channelId}/webhook${suffix}`,
         headers: sessionCookie(outsiderSessionToken),
         ...(payload === undefined ? {} : { payload }),
       });
@@ -355,7 +355,7 @@ describe("per-channel incoming webhooks", () => {
     const app = await appWithWebhookThrottle();
     const response = await app.inject({
       method: "POST",
-      url: `/v1/channels/${humansOnlyChannelId}/webhook`,
+      url: `/v2/channels/${humansOnlyChannelId}/webhook`,
       headers: sessionCookie(creatorSessionToken),
       payload: {},
     });

@@ -200,13 +200,13 @@ describe("API origin validation", () => {
       "https://chat-api.example.invalid/livez",
     );
     expect(createIdentitySessionUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://chat-api.example.invalid/v1/auth/session",
+      "https://chat-api.example.invalid/v2/auth/session",
     );
     expect(createCurrentUserUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://chat-api.example.invalid/v1/auth/me",
+      "https://chat-api.example.invalid/v2/auth/me",
     );
     expect(createMagicLinkUrl(DEFAULT_PRODUCTION_API_ORIGIN)).toBe(
-      "https://chat-api.example.invalid/v1/auth/magic-link",
+      "https://chat-api.example.invalid/v2/auth/magic-link",
     );
   });
 

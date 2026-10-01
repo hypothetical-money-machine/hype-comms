@@ -1,11 +1,11 @@
 import type { EphemeralActivityFrame } from "@hype-comms/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
   EphemeralActivityHub,
   TYPING_ACTIVITY_TTL_MS,
 } from "../src/modules/realtime/activity-hub.js";
+import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
 const conversationId = "10000000-0000-4000-8000-000000000002";
@@ -13,19 +13,12 @@ const groupConversationId = "10000000-0000-4000-8000-000000000005";
 const alexId = "10000000-0000-4000-8000-000000000003";
 const danId = "10000000-0000-4000-8000-000000000004";
 
-function human(
-  userId: string,
-  deviceSessionId: string,
-  capable = true,
-  groupDirectMessages = true,
-): RealtimePrincipal {
+function human(userId: string, deviceSessionId: string): RealtimePrincipal {
   return {
     workspaceId,
     userId,
     deviceSessionId,
     agentTokenId: null,
-    ephemeralActivity: capable,
-    groupDirectMessages,
   };
 }
 
@@ -35,7 +28,6 @@ function agent(userId: string): RealtimePrincipal {
     userId,
     deviceSessionId: null,
     agentTokenId: "10000000-0000-4000-8000-000000000009",
-    ephemeralActivity: true,
   };
 }
 
@@ -133,57 +125,18 @@ describe("EphemeralActivityHub", () => {
     hub.close();
   });
 
-  it("does not register or send unknown frames to a client without the capability", async () => {
+  it("delivers canonical activity to every authorized protocol-2 connection", async () => {
     const hub = new EphemeralActivityHub(async () => true);
-    const legacy = connection("legacy", human(danId, "legacy", false));
-    const capable = connection("capable", human(alexId, "capable"));
-    hub.register(legacy.value);
-    hub.register(capable.value);
-    await hub.setTyping("capable", conversationId, true);
-    expect(legacy.frames).toEqual([]);
-    hub.close();
-  });
-
-  it("keeps group typing off legacy tickets in both directions without blocking ordinary DMs", async () => {
-    const hub = new EphemeralActivityHub(
-      async (_workspace, _user, requestedConversationId, includeGroupDirectMessages) =>
-        requestedConversationId !== groupConversationId || includeGroupDirectMessages,
-    );
-    const alexLegacy = connection("alex-legacy", human(alexId, "alex-legacy", true, false));
-    const alexCurrent = connection("alex-current", human(alexId, "alex-current"));
-    const danCurrent = connection("dan-current", human(danId, "dan-current"));
-    hub.register(alexLegacy.value);
-    hub.register(alexCurrent.value);
-    hub.register(danCurrent.value);
-
-    await hub.setTyping("alex-legacy", groupConversationId, true);
-    expect(typing(danCurrent.frames, alexId)).toEqual([]);
-
-    await hub.setTyping("alex-current", groupConversationId, true);
-    expect(typing(danCurrent.frames, alexId).at(-1)).toMatchObject({
-      conversationId: groupConversationId,
-      userId: alexId,
-      typing: true,
-    });
-    expect(
-      typing(alexLegacy.frames, alexId).filter(
-        (frame) => frame.conversationId === groupConversationId,
-      ),
-    ).toEqual([]);
-
-    await hub.setTyping("alex-legacy", conversationId, true);
-    expect(typing(danCurrent.frames, alexId).at(-1)).toMatchObject({
-      conversationId,
-      userId: alexId,
-      typing: true,
-    });
-
-    await hub.setTyping("dan-current", conversationId, true);
-    expect(typing(alexLegacy.frames, danId).at(-1)).toMatchObject({
-      conversationId,
-      userId: danId,
-      typing: true,
-    });
+    const alex = connection("alex", human(alexId, "alex"));
+    const dan = connection("dan", human(danId, "dan"));
+    hub.register(alex.value);
+    hub.register(dan.value);
+    for (const id of [conversationId, groupConversationId]) {
+      await hub.setTyping("alex", id, true);
+      expect(typing(dan.frames, alexId).at(-1)).toMatchObject({ conversationId: id, typing: true });
+      await hub.setTyping("alex", id, false);
+    }
+    expect(presence(dan.frames, alexId).at(-1)).toMatchObject({ state: "online" });
     hub.close();
   });
 });
