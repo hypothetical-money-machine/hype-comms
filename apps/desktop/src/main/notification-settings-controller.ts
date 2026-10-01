@@ -1,4 +1,3 @@
-import { reportMainProcessError } from "./main-process-log";
 import { notifyStateListeners } from "./state-listeners";
 import {
   notificationPreferenceSchema,
@@ -8,6 +7,8 @@ import {
   type NotificationPreference,
   type NotificationState,
 } from "@hype-comms/contracts";
+
+import { reportMainProcessError } from "./main-process-log";
 
 export interface NotificationPreferencePersistence {
   load(): Promise<NotificationPreference>;

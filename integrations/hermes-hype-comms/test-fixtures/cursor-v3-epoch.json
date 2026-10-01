@@ -1,0 +1,13 @@
+{
+  "version": 3,
+  "cursor": {
+    "epoch": "eeeeeeee-0000-4000-8000-000000000001",
+    "sequence": "77"
+  },
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  }
+}

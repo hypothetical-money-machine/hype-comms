@@ -1,6 +1,7 @@
 import type { WorkspaceClient } from "./workspace-client";
 import {
   compareSyncPositions,
+  sameSyncPosition,
   sendMessageOperationSchema,
   WORKSPACE_PROTOCOL_UPGRADE_MESSAGE,
   type Attachment,
@@ -108,8 +109,12 @@ export interface WorkspaceRuntimeState {
   readonly outbox: readonly OutboxItem[];
   readonly selectedConversationId: string | null;
   readonly focusedMessageId: string | null;
+  /** Changes for an explicit main-timeline jump, including a repeated jump to the same message. */
+  readonly focusedMessageRequest: number;
   readonly selectedThreadRootId: string | null;
   readonly focusedThreadMessageId: string | null;
+  readonly historyLoading: readonly string[];
+  readonly historyErrors: Readonly<Record<string, string>>;
   readonly threadLoading: boolean;
   readonly threadError: string | null;
   readonly connection: RealtimeConnectionState;
@@ -151,6 +156,9 @@ interface OutboxUpdate {
  * download that fails while a resync runs is transient, and is retried with backoff instead.
  */
 const MAX_CONSECUTIVE_RESYNCS = 3;
+// Bound one user action even if a server returns empty/overlapping pages indefinitely.
+const MAX_OVERLAPPING_HISTORY_PAGES = 20;
+const MAX_METADATA_REFRESH_RETRIES = 3;
 
 /**
  * How long the resync in place has to hold up before the next demand starts a chain of its own
@@ -201,8 +209,11 @@ const INITIAL_STATE: WorkspaceRuntimeState = {
   outbox: [],
   selectedConversationId: null,
   focusedMessageId: null,
+  focusedMessageRequest: 0,
   selectedThreadRootId: null,
   focusedThreadMessageId: null,
+  historyLoading: [],
+  historyErrors: {},
   threadLoading: false,
   threadError: null,
   connection: "offline",
@@ -400,6 +411,8 @@ export class WorkspaceRuntime {
   readonly #recovery = new WorkspaceRecovery(() => this.#setState({}));
   #cache: WorkspaceCache | null = null;
   #generation = 0;
+  // Do not reuse a jump request if this runtime stops and starts another session.
+  #focusedMessageRequest = 0;
   #offlineOnly = false;
   get #protocolBlocked(): boolean {
     return this.#recovery.has("protocol");
@@ -497,6 +510,8 @@ export class WorkspaceRuntime {
   readonly #collectionLoads = new Map<string, Promise<void>>();
   readonly #threadSummaryPositions = new Map<string, SyncPosition>();
   readonly #historyCursors = new Map<string, string | null>();
+  /** Histories restored from IndexedDB in this generation, independently of network paging. */
+  readonly #cachedConversationIds = new Set<string>();
   /** In-flight first-page hydrations so opening the same conversation does not stack fetches. */
   readonly #historyHydrations = new Map<string, Promise<void>>();
   readonly #readTargets = new Map<string, ReadTarget>();
@@ -531,7 +546,7 @@ export class WorkspaceRuntime {
 
   subscribe(listener: (state: WorkspaceRuntimeState) => void): () => void {
     this.#listeners.add(listener);
-    listener(this.#state);
+    this.#notifyStateSubscriber(listener);
     return () => this.#listeners.delete(listener);
   }
 
@@ -542,7 +557,17 @@ export class WorkspaceRuntime {
       recovery: this.#recovery.snapshot,
       stale: state.bootstrap === null || workspaceNeedsRecovery(this.#recovery.snapshot),
     };
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
+  }
+
+  #notifyStateSubscriber(listener: (state: WorkspaceRuntimeState) => void): void {
+    try {
+      listener(this.#state);
+    } catch {
+      // Subscribers observe committed state; they cannot interrupt cache repair or each other.
+      // Their error messages may contain private renderer data, so report only a fixed diagnostic.
+      console.error("Workspace state subscriber failed");
+    }
   }
 
   #pruneCreatedMessageMentions(
@@ -611,6 +636,7 @@ export class WorkspaceRuntime {
     this.#cacheProjectionQueue = Promise.resolve();
     this.#historyHydrations.clear();
     this.#collectionLoads.clear();
+    this.#cachedConversationIds.clear();
     this.#offlineOnly = options.offline === true;
     this.#recovery.reset();
     const startupRecovery = this.#recovery.begin("startup");
@@ -746,7 +772,7 @@ export class WorkspaceRuntime {
           ? this.#cache
           : this.#createCache(cryptoStatus);
       this.#cache = cache;
-      let cached = await cache.load();
+      let cached = await cache.load({ conversationId: null });
       if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache) return;
       if (
         cached.bootstrap !== null &&
@@ -756,9 +782,35 @@ export class WorkspaceRuntime {
         // A correctly scoped encrypted database cannot contain another identity. Treat any such
         // projection as corrupt, remove it before first paint, and rebuild only while online.
         await cache.clearAll();
-        cached = await cache.load();
+        cached = await cache.load({ conversationId: null });
         if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
           return;
+      }
+      const preferredConversationId = this.#state.selectedConversationId;
+      const openingConversationId =
+        cached.bootstrap === null
+          ? null
+          : cached.bootstrap.conversations.some(
+                (summary) => summary.conversation.id === preferredConversationId,
+              )
+            ? preferredConversationId
+            : firstConversation(cached.bootstrap);
+      if (openingConversationId !== null) {
+        cached = await cache.load({
+          conversationId: openingConversationId,
+          includeAllTasks: true,
+        });
+        if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
+          return;
+        if (
+          cached.bootstrap !== null &&
+          (cached.bootstrap.currentUser.user.id !== scope.userId ||
+            cached.bootstrap.workspace.id !== scope.workspaceId)
+        ) {
+          await cache.clearAll();
+          throw new Error("The restored conversation did not match the signed-in session");
+        }
+        this.#cachedConversationIds.add(openingConversationId);
       }
       this.#hydrateRetractReservations(cached.retractReservations, cached.messages);
       if (cached.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0)
@@ -776,9 +828,7 @@ export class WorkspaceRuntime {
         reactions: cached.reactions,
         tasks: cached.tasks,
         outbox: cached.outbox,
-        selectedConversationId:
-          this.#state.selectedConversationId ??
-          (cached.bootstrap === null ? null : firstConversation(cached.bootstrap)),
+        selectedConversationId: openingConversationId,
         cacheMode: cryptoStatus.mode,
         cacheFallbackReason: cryptoStatus.mode === "memory_only" ? cryptoStatus.reason : null,
         ...(this.#offlineOnly
@@ -883,7 +933,7 @@ export class WorkspaceRuntime {
     this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
   }
 
   #isActiveRealtimeScope(candidate: RealtimeSessionScope, generation: number): boolean {
@@ -1000,22 +1050,30 @@ export class WorkspaceRuntime {
     this.#setState({
       selectedConversationId: task.conversationId,
       focusedMessageId: task.sourceMessageId,
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: null,
       focusedThreadMessageId: null,
       threadLoading: false,
       threadError: null,
     });
+    this.#ensureConversationHistory(task.conversationId);
   }
 
   markConversationReadThrough(conversationId: string, messageId: string): void {
     if (this.#offlineOnly) return;
-    const message = this.#state.messages.find(
-      (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
-    );
     const summary = this.#state.bootstrap?.conversations.find(
       (candidate) => candidate.conversation.id === conversationId,
     );
-    if (message === undefined || summary === undefined) return;
+    if (summary === undefined) return;
+    const message =
+      this.#state.messages.find(
+        (candidate) => candidate.id === messageId && candidate.conversationId === conversationId,
+      ) ??
+      (summary.lastMessage?.id === messageId &&
+      summary.lastMessage.conversationId === conversationId
+        ? summary.lastMessage
+        : undefined);
+    if (message === undefined) return;
     const targetSequence = message.conversationSequence;
     const currentSequence = summary.readCursor?.lastReadConversationSequence;
     const tracked = this.#readTargets.get(conversationId);
@@ -1047,6 +1105,19 @@ export class WorkspaceRuntime {
     this.#sendReadTarget(conversationId, target, this.#generation);
   }
 
+  markConversationAsRead(conversationId: string): void {
+    if (this.#offlineOnly || this.#state.bootstrap === null) return;
+    const summary = this.#state.bootstrap.conversations.find(
+      (candidate) => candidate.conversation.id === conversationId,
+    );
+    if (summary === undefined) return;
+    if (summary.unreadCount === 0 && summary.mentionCount === 0) return;
+    const targetMessage = summary.lastMessage;
+    if (targetMessage === null) return;
+
+    this.markConversationReadThrough(conversationId, targetMessage.id);
+  }
+
   #sendReadTarget(conversationId: string, target: ReadTarget, generation: number): void {
     if (
       this.#protocolBlocked ||
@@ -1072,7 +1143,14 @@ export class WorkspaceRuntime {
             ) {
               return current;
             }
-            return { ...current, readCursor: result.readCursor };
+            const clearsUnreads =
+              current.lastMessage === null ||
+              BigInt(projectedSequence) >= BigInt(current.lastMessage.conversationSequence);
+            return {
+              ...current,
+              readCursor: result.readCursor,
+              ...(clearsUnreads ? { unreadCount: 0, mentionCount: 0 } : {}),
+            };
           }),
         });
         if (this.#readTargets.get(conversationId) === target) {
@@ -1413,11 +1491,24 @@ export class WorkspaceRuntime {
     this.#cancelCollectionLoads("The workspace projection was replaced");
     this.#projectionAbortController.abort();
     this.#projectionAbortController = new AbortController();
+    // The replacement epoch must not wait for a retired cache operation to release its barrier.
+    this.#cacheProjectionQueue = Promise.resolve();
+    this.#historyHydrations.clear();
+    this.#cachedConversationIds.clear();
+    this.#setState({ historyLoading: [], historyErrors: {} });
   }
 
   async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
-    this.#cancelCollectionLoads("A task mutation superseded the collection read");
     if (!this.#isProjectionCurrent(projection)) return;
+    for (const journal of this.#collectionJournals) {
+      const identity = journal.identity;
+      if (
+        identity.kind === "my_tasks" ||
+        (identity.kind === "tasks" &&
+          tasks.some((task) => task.conversationId === identity.conversationId))
+      )
+        journal.cancel("A task mutation superseded the collection read");
+    }
     const accepted = await projection.cache.upsertTasks(tasks, projection.signal);
     if (!this.#isProjectionCurrent(projection)) return;
     const authorized = accepted.filter((task) =>
@@ -1449,6 +1540,9 @@ export class WorkspaceRuntime {
       });
       applied = true;
     });
+    if (applied && this.#isCurrentNotificationAction(action, currentContext, generation)) {
+      this.#ensureConversationHistory(action.conversationId);
+    }
     return applied;
   }
 
@@ -1482,7 +1576,7 @@ export class WorkspaceRuntime {
           await this.#serialize(() =>
             this.#commitCacheProjection(async () => {
               if (!this.#isProjectionCurrent(projection, conversationId)) return;
-              const records = replayCollectionPage(
+              let records = replayCollectionPage(
                 page.records,
                 journal.newerThan(page.snapshotPosition),
               );
@@ -1508,7 +1602,13 @@ export class WorkspaceRuntime {
                   return;
                 }
               } else if (identity.kind === "tasks" || identity.kind === "my_tasks") {
-                await cache.upsertTasks(records.tasks, signal, commit);
+                const accepted = await cache.upsertTasks(records.tasks, signal, commit);
+                records = {
+                  ...records,
+                  tasks: accepted.filter((task) =>
+                    this.#isConversationAuthorized(task.conversationId),
+                  ),
+                };
               } else {
                 await cache.commitCollectionMetadata(commit, signal);
               }
@@ -1593,6 +1693,7 @@ export class WorkspaceRuntime {
             };
           },
           (records) => {
+            if (this.#state.selectedConversationId !== conversationId) return;
             const retractedIds = retractedMessageIds(
               this.#state.messages,
               retractReservationMap(this.#retractReservations),
@@ -1610,6 +1711,7 @@ export class WorkspaceRuntime {
           },
         );
         if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        if (this.#state.selectedConversationId !== conversationId) return;
         const next = this.collectionState(identity).nextCursor;
         if (next === null) return;
         if (seen.has(next) || next === cursor)
@@ -1619,14 +1721,20 @@ export class WorkspaceRuntime {
       }
       throw new Error("The collection exceeded local capacity");
     } catch (error) {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({
           conversationFilesError: errorMessage(error, "Could not load shared files"),
         });
       }
       throw error;
     } finally {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({ conversationFilesBusy: false });
       }
     }
@@ -1647,6 +1755,7 @@ export class WorkspaceRuntime {
       selectedConversationId: message?.conversationId ?? this.#state.selectedConversationId,
       focusedMessageId:
         message === undefined || message.threadRootId === null ? attachment.messageId : null,
+      focusedMessageRequest: ++this.#focusedMessageRequest,
       selectedThreadRootId: message?.threadRootId ?? null,
       focusedThreadMessageId:
         message !== undefined && message.threadRootId !== null ? attachment.messageId : null,
@@ -1666,6 +1775,7 @@ export class WorkspaceRuntime {
       let cursor: string | null = null;
       const seen = new Set<string>();
       const seenTasks = new Set<string>();
+      let fetchedPageIds: ReadonlySet<string> = new Set();
       for (let pages = 0; pages < 400; pages += 1) {
         await this.#loadCollection(
           identity,
@@ -1696,6 +1806,7 @@ export class WorkspaceRuntime {
               (page.nextCursor === cursor || seen.has(page.nextCursor))
             )
               throw new Error("The workspace task catalog did not advance its cursor");
+            fetchedPageIds = pageIds;
             return {
               ...page,
               records: {
@@ -1708,7 +1819,9 @@ export class WorkspaceRuntime {
             };
           },
           (records) => {
-            for (const task of records.tasks) seenTasks.add(task.id);
+            // Page limits and duplicate checks count fetched rows, even when the cache keeps a
+            // newer version and excludes an older row from publication.
+            for (const id of fetchedPageIds) seenTasks.add(id);
             this.#setState({ tasks: mergeTasks(this.#state.tasks, records.tasks) });
           },
         );
@@ -1752,6 +1865,10 @@ export class WorkspaceRuntime {
               ...(cursor === null ? {} : { after: cursor }),
               limit: 200,
             });
+            for (const task of page.tasks) {
+              if (task.workspaceId !== this.#scope?.workspaceId)
+                throw new Error("The My Tasks catalog crossed workspace scope");
+            }
             if (page.hasMore !== (page.nextCursor !== null))
               throw new Error("The collection has inconsistent pagination");
             return {
@@ -1953,6 +2070,7 @@ export class WorkspaceRuntime {
             }),
         selectedConversationId: conversationId,
         focusedMessageId: threadRootId === null ? result.message.id : null,
+        focusedMessageRequest: ++this.#focusedMessageRequest,
         selectedThreadRootId: threadRootId,
         focusedThreadMessageId: threadRootId === null ? null : result.message.id,
         threadLoading: threadRootId !== null,
@@ -1963,6 +2081,7 @@ export class WorkspaceRuntime {
     // The serialized projection can retire quietly when a session replacement wins during an
     // awaited reaction read. Do not let its continuation open an old thread in the new scope.
     if (!projected || !this.#isProjectionCurrent(projection, conversationId)) return;
+    this.#ensureConversationHistory(conversationId);
     if (threadRootId !== null) await this.openThread(threadRootId, result.message.id);
   }
 
@@ -2135,7 +2254,10 @@ export class WorkspaceRuntime {
         threadLoading: false,
         threadError: null,
         ...(this.#state.selectedConversationId === root.conversationId
-          ? { focusedMessageId: selectedThreadRootId ?? threadRootId }
+          ? {
+              focusedMessageId: selectedThreadRootId ?? threadRootId,
+              focusedMessageRequest: ++this.#focusedMessageRequest,
+            }
           : {}),
       });
     });
@@ -2231,12 +2353,17 @@ export class WorkspaceRuntime {
   }
 
   async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
-    const generation = this.#generation;
     const cache = this.#cache;
     const currentUserId = this.#state.bootstrap?.currentUser.user.id;
     if (cache === null || currentUserId === undefined) {
       throw new Error("Workspace is still loading");
     }
+    const conversationId =
+      this.#state.messages.find((message) => message.id === messageId)?.conversationId ??
+      this.#state.selectedConversationId;
+    if (conversationId === null) throw new Error("Message is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     const existing = this.#state.reactions.find(
       (reaction) =>
         reaction.messageId === messageId &&
@@ -2244,9 +2371,9 @@ export class WorkspaceRuntime {
         reaction.emoji === emoji,
     );
     const result = await this.#client.removeMessageReaction(messageId, emoji);
-    if (!result.removed || generation !== this.#generation || cache !== this.#cache) return;
+    if (!result.removed || !this.#isProjectionCurrent(projection, conversationId)) return;
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       if (
         this.#syncCursor !== null &&
         this.#syncCursor.epoch === result.syncCursor.epoch &&
@@ -2256,7 +2383,7 @@ export class WorkspaceRuntime {
       }
       this.#cancelCollectionLoads("A reaction mutation superseded the collection read");
       if (existing !== undefined) await cache.removeReaction(existing.id);
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       this.#setState({
         reactions: this.#state.reactions.filter(
           (reaction) =>
@@ -2466,11 +2593,121 @@ export class WorkspaceRuntime {
   }
 
   async loadOlder(conversationId: string): Promise<void> {
+    const existing = this.#historyHydrations.get(conversationId);
+    if (existing !== undefined) return existing;
     const cache = this.#cache;
-    const before = this.#historyCursors.get(conversationId);
-    if (cache === null || before === null) return;
+    if (
+      cache === null ||
+      (this.#cachedConversationIds.has(conversationId) &&
+        (this.#offlineOnly || this.#historyCursors.get(conversationId) === null))
+    ) {
+      return;
+    }
     const projection = this.#captureProjection(cache);
     if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    const hydration = this.#loadAdditionalHistory(conversationId)
+      .catch((error: unknown) => {
+        if (this.#isProjectionCurrent(projection, conversationId)) {
+          this.#setState({
+            historyErrors: {
+              ...this.#state.historyErrors,
+              [conversationId]: errorMessage(error, "Could not load conversation history"),
+            },
+          });
+        }
+      })
+      .finally(() => {
+        if (this.#historyHydrations.get(conversationId) === hydration) {
+          this.#historyHydrations.delete(conversationId);
+          this.#setState({
+            historyLoading: this.#state.historyLoading.filter((id) => id !== conversationId),
+          });
+        }
+      });
+    this.#historyHydrations.set(conversationId, hydration);
+    const historyErrors = { ...this.#state.historyErrors };
+    delete historyErrors[conversationId];
+    this.#setState({
+      historyLoading: [...this.#state.historyLoading, conversationId],
+      historyErrors,
+    });
+    await hydration;
+  }
+
+  async #loadAdditionalHistory(conversationId: string): Promise<void> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    // Opening a conversation still refreshes only its first page. An explicit older-page
+    // request follows server cursors until it adds visible messages or reaches the end.
+    const continueOverlaps = this.#historyCursors.has(conversationId);
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < MAX_OVERLAPPING_HISTORY_PAGES; page++) {
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
+      const before = this.#historyCursors.get(conversationId);
+      if (before !== undefined && before !== null) {
+        if (seenCursors.has(before))
+          throw new Error("The server repeated a history page. Try loading older messages again.");
+        seenCursors.add(before);
+      }
+      const addedMessages = await this.#loadHistoryPage(conversationId);
+      if (
+        !this.#isProjectionCurrent(projection, conversationId) ||
+        !continueOverlaps ||
+        this.#state.selectedConversationId !== conversationId ||
+        addedMessages !== false ||
+        this.#historyCursors.get(conversationId) === null
+      ) {
+        return;
+      }
+    }
+    throw new Error("More history remains. Load older messages again to continue.");
+  }
+
+  async #loadHistoryPage(conversationId: string): Promise<boolean | undefined> {
+    const cache = this.#cache;
+    if (cache === null) return;
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
+    if (!this.#cachedConversationIds.has(conversationId)) {
+      await this.#serialize(async () => {
+        if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        const cached = await cache.load({ conversationId });
+        if (!this.#isProjectionCurrent(projection, conversationId) || cached.repairMarker !== null)
+          return;
+        if (
+          !cached.bootstrap?.conversations.some(
+            (summary) => summary.conversation.id === conversationId,
+          ) &&
+          !(
+            this.#catalogConfirmedIds?.has(conversationId) &&
+            this.#isConversationAuthorized(conversationId)
+          )
+        ) {
+          return;
+        }
+        this.#cachedConversationIds.add(conversationId);
+        const retainedMessages = this.#retainMessages(cached.messages);
+        this.#setState({
+          messages: mergeMessages(this.#state.messages, retainedMessages),
+          reactions: mergeReactions(
+            this.#state.reactions,
+            retainReactionsForLiveMessages(cached.reactions, retainedMessages),
+          ),
+          tasks: mergeTasks(this.#state.tasks, cached.tasks),
+        });
+      });
+    }
+    const before = this.#historyCursors.get(conversationId);
+    if (
+      !this.#isProjectionCurrent(projection, conversationId) ||
+      !this.#cachedConversationIds.has(conversationId) ||
+      this.#offlineOnly ||
+      before === null
+    ) {
+      return;
+    }
+    let addedMessages: boolean | undefined;
     let threadsSupported = this.#state.threadsSupported;
     await this.#loadCollection(
       { kind: "timeline", conversationId },
@@ -2496,6 +2733,19 @@ export class WorkspaceRuntime {
       (records) => {
         const messageIds = records.messages.map((message) => message.id);
         const retainedMessages = this.#retainMessages(records.messages);
+        const unseenVisibleIds = new Set(
+          retainedMessages
+            .filter(
+              (message) =>
+                message.deletedAt === null && (!threadsSupported || message.threadRootId === null),
+            )
+            .map((message) => message.id),
+        );
+        for (const message of this.#state.messages) {
+          unseenVisibleIds.delete(message.id);
+          if (unseenVisibleIds.size === 0) break;
+        }
+        addedMessages = unseenVisibleIds.size > 0;
         this.#setState({
           messages: mergeMessages(this.#state.messages, retainedMessages),
           threadSummaries:
@@ -2526,10 +2776,12 @@ export class WorkspaceRuntime {
         });
       },
     );
+    return addedMessages;
   }
 
   hasOlder(conversationId: string): boolean {
-    return this.#historyCursors.get(conversationId) !== null;
+    const cursor = this.#historyCursors.get(conversationId);
+    return cursor !== null && (!this.#offlineOnly || cursor !== undefined);
   }
 
   #directConversationId(memberId: string): string | null {
@@ -2548,23 +2800,14 @@ export class WorkspaceRuntime {
    * conversation. Selection must already be published so the pane can paint cached messages first.
    */
   #ensureConversationHistory(conversationId: string): void {
-    if (
-      this.#offlineOnly ||
-      (this.#catalogConfirmedIds !== null && !this.#catalogConfirmedIds.has(conversationId)) ||
-      this.#historyCursors.has(conversationId) ||
-      this.#historyHydrations.has(conversationId)
-    ) {
+    if (this.#catalogConfirmedIds !== null && !this.#catalogConfirmedIds.has(conversationId))
       return;
+    if (
+      !this.#cachedConversationIds.has(conversationId) ||
+      !this.#historyCursors.has(conversationId)
+    ) {
+      void this.loadOlder(conversationId);
     }
-    const hydration = this.loadOlder(conversationId)
-      // The collection lease owns failure reporting and retry. A global error here would follow
-      // navigation to healthy conversations and outlive a successful retry of this timeline.
-      .catch(() => undefined)
-      .finally(() => {
-        if (this.#historyHydrations.get(conversationId) === hydration)
-          this.#historyHydrations.delete(conversationId);
-      });
-    this.#historyHydrations.set(conversationId, hydration);
   }
 
   async resetLocalCache(): Promise<void> {
@@ -2869,7 +3112,8 @@ export class WorkspaceRuntime {
         if (!isCurrent()) return abandon();
         const installed = await cache.installMetadataSnapshot(snapshot, signal);
         if (!isCurrent()) return abandon();
-        if (!(await this.#reloadCache(generation, cache, true)) || !isCurrent()) return abandon();
+        if (!(await this.#reloadCache(generation, cache, undefined, true)) || !isCurrent())
+          return abandon();
         const visible = new Set(
           this.#state.bootstrap?.conversations.map((summary) => summary.conversation.id),
         );
@@ -2913,6 +3157,7 @@ export class WorkspaceRuntime {
         return true;
       });
     } catch (error) {
+      if (!isCurrent()) return abandon();
       this.#releasePartialCatalog(confirmed);
       if (isCurrent()) {
         this.#recovery.block(
@@ -2927,6 +3172,16 @@ export class WorkspaceRuntime {
         if (this.#membershipRepairPending) throw error;
       }
       return false;
+    } finally {
+      // Only this request can retire its partial-catalog gate. A superseding refresh keeps
+      // its own gate until the complete catalog has committed and been published.
+      if (
+        generation === this.#generation &&
+        request === this.#catalogRequest &&
+        this.#catalogConfirmedIds === confirmed
+      ) {
+        this.#catalogConfirmedIds = null;
+      }
     }
   }
 
@@ -3062,11 +3317,12 @@ export class WorkspaceRuntime {
     const syncRecovery = this.#recovery.begin("sync");
     try {
       this.#clearSyncRetryTimer();
-      let state = await cache.load();
-      let cursor = state.syncCursor;
+      let cursor = await cache.loadSyncCursor();
+      if (generation !== this.#generation || cache !== this.#cache) return;
       if (cursor === null) throw new Error("Sync requires an authoritative workspace position");
       let resets = 0;
       let sourceLessRetractApplied = false;
+      let projectionChanged = false;
       for (;;) {
         const result = await this.#client.syncWorkspace(cursor);
         if (generation !== this.#generation) return;
@@ -3100,6 +3356,7 @@ export class WorkspaceRuntime {
             return;
           }
           resets += 1;
+          projectionChanged = true;
           if (result.reason === "epoch_mismatch") {
             if (!(await this.#resetProtocolReplica(generation))) return;
           } else {
@@ -3107,13 +3364,14 @@ export class WorkspaceRuntime {
           }
           this.#syncCursor = null;
           await this.#refreshSnapshot(generation);
-          if (generation !== this.#generation) return;
-          state = await cache.load();
-          cursor = state.syncCursor;
+          if (generation !== this.#generation || cache !== this.#cache) return;
+          cursor = await cache.loadSyncCursor();
+          if (generation !== this.#generation || cache !== this.#cache) return;
           if (cursor === null) throw new Error("Bootstrap did not establish a sync position");
           continue;
         }
         let repairedMembership = false;
+        projectionChanged ||= result.response.events.length > 0;
         for (const event of result.response.events) {
           // This loop deliberately bypasses `#applyWorkspaceEvent`, so the invalidation is recorded
           // here and drained once below. Without this the fix would only work while the app is
@@ -3175,8 +3433,33 @@ export class WorkspaceRuntime {
       // Drained once for the whole backfill, and before the reload so the state this flush publishes
       // is the refreshed directory rather than the stale cached one. Also the retry site for a
       // realtime refetch that failed earlier.
-      if (this.#membersDirty) await this.#refreshMembers(generation);
-      if (!(await this.#reloadCache(generation, cache))) return;
+      if (this.#membersDirty) {
+        projectionChanged = true;
+        await this.#refreshMembers(generation);
+      }
+      if (projectionChanged || this.#state.bootstrap === null) {
+        const conversationId =
+          resets === 0 && !sourceLessRetractApplied
+            ? (this.#startupReloadConversationId() ?? undefined)
+            : undefined;
+        if (!(await this.#reloadCache(generation, cache, conversationId))) return;
+      } else {
+        // An empty catch-up only changes sync progress. The replica was already loaded before
+        // startup, and HTTP mutations publish their own durable projections. Decrypting every
+        // message again here adds work proportional to all previously visited conversations.
+        if (
+          generation !== this.#generation ||
+          !this.#isProjectionCurrent(this.#captureProjection(cache))
+        ) {
+          return;
+        }
+        if (
+          this.#syncCursor !== null &&
+          !sameSyncPosition(this.#state.bootstrap.syncCursor, this.#syncCursor)
+        ) {
+          this.#setState({ bootstrap: { ...this.#state.bootstrap, syncCursor: this.#syncCursor } });
+        }
+      }
       this.#recovery.complete(syncRecovery);
       if (sourceLessRetractApplied && refreshSourceLessRetracts) {
         await this.#refreshSourceLessRetractMetadata(generation);
@@ -3420,33 +3703,52 @@ export class WorkspaceRuntime {
   async #refreshWorkspaceMetadata(
     generation: number,
     requireCurrentCatalog = false,
+    refreshAttempt = 0,
   ): Promise<boolean> {
     const cache = this.#cache;
     const scope = this.#scope;
-    if (cache === null || scope === null || generation !== this.#generation) return false;
+    if (
+      cache === null ||
+      scope === null ||
+      generation !== this.#generation ||
+      this.#protocolBlocked ||
+      this.#membershipRepairPending
+    )
+      return false;
+    if (refreshAttempt > MAX_METADATA_REFRESH_RETRIES) {
+      throw new Error("The workspace metadata keeps changing. Reconnect to try again.");
+    }
     const preview =
       this.#startupReplicaCatchUpPending && !requireCurrentCatalog ? new Set<string>() : null;
     const projection = this.#captureProjection(cache);
     const catalogRecovery = preview === null ? undefined : this.#recovery.begin("catalog");
-    // Every exit below settles that lease: a superseded refresh completes it, a catalog that
-    // could not be applied blocks it with a reason, and neither leaves the preview gate installed.
     const completeCatalog = (): void => {
-      this.#recovery.complete(catalogRecovery);
       this.#releasePartialCatalog(preview);
+      this.#recovery.complete(catalogRecovery);
     };
     const superseded = (): boolean => {
       completeCatalog();
       return false;
     };
     const unusable = (reason: string): boolean => {
-      this.#recovery.block(catalogRecovery, reason);
       this.#releasePartialCatalog(preview);
+      this.#recovery.block(catalogRecovery, reason);
       return false;
     };
+    const refetchMetadata = (): Promise<boolean> => {
+      completeCatalog();
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        scope !== this.#scope ||
+        this.#protocolBlocked ||
+        this.#membershipRepairPending
+      )
+        return Promise.resolve(false);
+      return this.#refreshWorkspaceMetadata(generation, requireCurrentCatalog, refreshAttempt + 1);
+    };
+    if (preview !== null) this.#catalogConfirmedIds = preview;
     try {
-      if (preview !== null) {
-        this.#catalogConfirmedIds = preview;
-      }
       const snapshot = await this.#fetchSnapshot(
         preview === null
           ? undefined
@@ -3465,8 +3767,15 @@ export class WorkspaceRuntime {
                 compareSyncPositions(this.#syncCursor, page.syncCursor) !== 0
               )
                 return;
+              let staged: boolean;
+              try {
+                staged = await cache.stageMetadataPage(page, projection.signal);
+              } catch (error) {
+                if (!this.#isProjectionCurrent(projection)) return;
+                throw error;
+              }
               if (
-                !(await cache.stageMetadataPage(page, projection.signal)) ||
+                !staged ||
                 !this.#isProjectionCurrent(projection) ||
                 this.#catalogConfirmedIds !== preview
               )
@@ -3474,9 +3783,15 @@ export class WorkspaceRuntime {
               this.#publishMetadataPage(page, preview, true);
             },
       );
-      if (generation !== this.#generation || cache !== this.#cache || scope !== this.#scope) {
+      if (
+        generation !== this.#generation ||
+        cache !== this.#cache ||
+        scope !== this.#scope ||
+        this.#protocolBlocked
+      ) {
         return superseded();
       }
+      if (!this.#isProjectionCurrent(projection)) return refetchMetadata();
       if (
         snapshot.currentUser.user.id !== scope.userId ||
         snapshot.workspace.id !== scope.workspaceId
@@ -3487,7 +3802,7 @@ export class WorkspaceRuntime {
       const cursorBeforeMetadata = this.#syncCursor;
       if (cursorBeforeMetadata === null) return unusable(CATALOG_REFRESH_FAILED);
       if (cursorBeforeMetadata.epoch !== snapshot.syncCursor.epoch) {
-        // The replacement refresh opens its own catalog lease and page set, retiring both of these.
+        completeCatalog();
         return this.#refreshSnapshot(generation, undefined, snapshot);
       }
       if (compareSyncPositions(cursorBeforeMetadata, snapshot.syncCursor) < 0) {
@@ -3498,13 +3813,55 @@ export class WorkspaceRuntime {
         }
       }
 
-      return await this.#commitCacheProjection(async () => {
-        if (!this.#isProjectionCurrent(projection)) return superseded();
-        const loaded = await cache.load();
-        if (!this.#isProjectionCurrent(projection)) return superseded();
+      if (this.#syncCursor === null) return unusable(CATALOG_REFRESH_FAILED);
+      if (this.#syncCursor.epoch !== snapshot.syncCursor.epoch) return refetchMetadata();
+      const result = await this.#commitCacheProjection(async (): Promise<boolean | "refetch"> => {
+        if (!this.#isProjectionCurrent(projection)) return "refetch";
+        // A normal restart has already restored its histories and applied intervening events. At
+        // that same cursor, refreshing the unchanged catalog needs no history decryption or rewrite.
+        // Source-less retraction repair retains the full reload that reconciles its projections.
+        if (!requireCurrentCatalog) {
+          const projection = this.#captureProjection(cache);
+          let refreshed: WorkspaceSnapshot | null;
+          try {
+            refreshed = await cache.refreshMetadata(snapshot, projection.signal);
+          } catch (error) {
+            if (!this.#isProjectionCurrent(projection)) return "refetch";
+            throw error;
+          }
+          if (!this.#isProjectionCurrent(projection) || generation !== projection.generation) {
+            return "refetch";
+          }
+          if (refreshed !== null) {
+            if (
+              this.#syncCursor === null ||
+              !sameSyncPosition(this.#syncCursor, refreshed.syncCursor)
+            ) {
+              const reloaded = await this.#reloadCache(generation, cache);
+              if (!reloaded) return superseded();
+              completeCatalog();
+              return true;
+            }
+            this.#setState({ bootstrap: refreshed });
+            completeCatalog();
+            return true;
+          }
+        }
+
+        const fallbackProjection = this.#captureProjection(cache);
+        let loaded: CachedWorkspaceState;
+        try {
+          loaded = await cache.load();
+        } catch (error) {
+          if (!this.#isProjectionCurrent(fallbackProjection)) return "refetch";
+          throw error;
+        }
+        if (generation !== this.#generation || cache !== this.#cache) return superseded();
         if (loaded.bootstrap === null) return unusable(CATALOG_REFRESH_FAILED);
+        if (!this.#isProjectionCurrent(fallbackProjection)) return "refetch";
         const durableCursor = loaded.syncCursor;
         if (durableCursor === null) return unusable(CATALOG_REFRESH_FAILED);
+        if (durableCursor.epoch !== snapshot.syncCursor.epoch) return "refetch";
         if (compareSyncPositions(durableCursor, snapshot.syncCursor) < 0) {
           throw new Error("The workspace metadata advanced beyond the repaired cursor");
         }
@@ -3522,19 +3879,25 @@ export class WorkspaceRuntime {
           : loaded.bootstrap.conversations;
         const members = metadataAtDurableCursor ? snapshot.members : loaded.bootstrap.members;
         const visibleConversationIds = new Set(catalog.map((summary) => summary.conversation.id));
-        const signal = projection.signal;
-        const replaced = await cache.replaceMetadata(
-          {
-            currentUser: snapshot.currentUser,
-            workspace: snapshot.workspace,
-            members,
-            conversations: catalog,
-            syncCursor: durableCursor,
-            featureFlags: snapshot.featureFlags,
-          },
-          signal,
-        );
-        if (!this.#isProjectionCurrent(projection)) return superseded();
+        const signal = fallbackProjection.signal;
+        let replaced: boolean;
+        try {
+          replaced = await cache.replaceMetadata(
+            {
+              currentUser: snapshot.currentUser,
+              workspace: snapshot.workspace,
+              members,
+              conversations: catalog,
+              syncCursor: durableCursor,
+              featureFlags: snapshot.featureFlags,
+            },
+            signal,
+          );
+        } catch (error) {
+          if (!this.#isProjectionCurrent(fallbackProjection)) return "refetch";
+          throw error;
+        }
+        if (!this.#isProjectionCurrent(fallbackProjection)) return "refetch";
         if (!replaced) {
           const reloaded = await this.#reloadCache(generation, cache);
           // Source-less retractions cannot reconcile counters from their event payload. A durable
@@ -3565,9 +3928,12 @@ export class WorkspaceRuntime {
         completeCatalog();
         return true;
       });
+      if (result === "refetch") return refetchMetadata();
+      return result;
     } catch (error) {
-      this.#recovery.block(catalogRecovery, errorMessage(error, CATALOG_REFRESH_FAILED));
+      if (!this.#isProjectionCurrent(projection)) return refetchMetadata();
       this.#releasePartialCatalog(preview);
+      this.#recovery.block(catalogRecovery, errorMessage(error, CATALOG_REFRESH_FAILED));
       throw error;
     }
   }
@@ -3658,12 +4024,28 @@ export class WorkspaceRuntime {
         history.messages,
         hydrated.reactions,
         projection.signal,
+        {
+          state: {
+            identity: { kind: "timeline", conversationId },
+            loaded: true,
+            snapshotPosition: history.snapshotPosition,
+            nextCursor: history.nextCursor,
+            invalidatedAt: null,
+          },
+          expectedPosition: this.#syncCursor,
+          requestCursor: null,
+        },
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return false;
+      const collections = await cache.readCollections();
+      if (!this.#isProjectionCurrent(projection, conversationId)) return false;
+      for (const message of history.messages)
+        this.#threadSummaryPositions.set(message.id, history.snapshotPosition);
       const retainedMessages = this.#retainMessages(history.messages);
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#invalidatedThreadSummaryConversationIds.delete(conversationId);
       this.#setState({
+        collections,
         messages: mergeMessages(this.#state.messages, retainedMessages),
         threadSummaries: history.threadsSupported
           ? mergeThreadSummaries(
@@ -3818,13 +4200,12 @@ export class WorkspaceRuntime {
     if (this.#protocolBlocked) return;
     const cache = this.#cache;
     if (cache === null || generation !== this.#generation) return;
-    const loaded = await cache.load();
-    if (generation !== this.#generation) return;
-    this.#syncCursor = loaded.syncCursor;
+    const syncCursor = await cache.loadSyncCursor();
+    if (generation !== this.#generation || cache !== this.#cache) return;
+    this.#syncCursor = syncCursor;
     this.#realtimeEpoch += 1;
-    if (loaded.syncCursor === null) throw new Error("Realtime requires a committed sync position");
-    const prepared =
-      this.#realtimeScope ?? (await this.#prepareRealtime(generation, loaded.syncCursor));
+    if (syncCursor === null) throw new Error("Realtime requires a committed sync position");
+    const prepared = this.#realtimeScope ?? (await this.#prepareRealtime(generation, syncCursor));
     if (prepared === null || generation !== this.#generation) return;
     try {
       await this.#client.activateWorkspaceRealtime(prepared);
@@ -4097,9 +4478,12 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection)) return;
     if (applied.status === "ignored") return;
     this.#syncCursor = applied.committedPosition;
+    const membersInvalidated = applied.changes.invalidated.some(
+      (entry) => entry.kind === "members",
+    );
+    if (membersInvalidated) this.#recovery.begin("members");
     this.#publishCommittedEvent(event, applied);
-    if (applied.changes.invalidated.some((entry) => entry.kind === "members")) {
-      this.#recovery.begin("members");
+    if (membersInvalidated) {
       await this.#refreshMembers(generation);
     }
     if (applied.changes.invalidated.some((entry) => entry.kind === "conversation_metadata")) {
@@ -4697,9 +5081,31 @@ export class WorkspaceRuntime {
     return true;
   }
 
+  #startupReloadConversationId(): string | null {
+    const selected = this.#state.selectedConversationId;
+    if (
+      !this.#startupReplicaCatchUpPending ||
+      this.#membershipRepairPending ||
+      this.#resyncRecoveryPending ||
+      selected === null ||
+      this.#cachedConversationIds.size !== 1 ||
+      !this.#cachedConversationIds.has(selected) ||
+      this.#state.messages.some((message) => message.conversationId !== selected) ||
+      this.#state.threadSummaries.some(
+        (summary) => summary.latestReply.conversationId !== selected,
+      ) ||
+      this.#state.attachments.length > 0 ||
+      this.#state.conversationFiles.length > 0
+    ) {
+      return null;
+    }
+    return selected;
+  }
+
   async #reloadCache(
     generation: number,
     cache: WorkspaceCache,
+    conversationId?: string,
     allowMembershipRepair = false,
   ): Promise<boolean> {
     const membershipRecovery = this.#recovery.current("membership");
@@ -4711,8 +5117,24 @@ export class WorkspaceRuntime {
       !projection.signal.aborted &&
       (allowMembershipRepair || !this.#membershipRepairPending);
     if (!current()) return false;
-    const loaded = await cache.load();
+    // A normal cached startup has restored only its opening history. Catch-up updates all
+    // conversations durably, but unopened histories can still wait for their first visit.
+    const loaded =
+      conversationId === undefined
+        ? await cache.load()
+        : await cache.load({ conversationId, includeAllTasks: true });
     if (!current()) return false;
+    // A person can navigate while the asynchronous cache read is pending. Preserve the complete
+    // projection if another conversation or attachment state appeared during that read.
+    if (conversationId !== undefined && this.#startupReloadConversationId() !== conversationId) {
+      return this.#reloadCache(generation, cache);
+    }
+    this.#cachedConversationIds.clear();
+    for (const summary of loaded.bootstrap?.conversations ?? []) {
+      if (conversationId === undefined || summary.conversation.id === conversationId) {
+        this.#cachedConversationIds.add(summary.conversation.id);
+      }
+    }
     if (allowMembershipRepair) {
       if (loaded.repairMarker !== null || this.#acceptedMembershipRepairs.size > 0)
         this.#recovery.ensure("membership");
