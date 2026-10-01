@@ -59,6 +59,13 @@ import {
   type RetractReservation,
   upsertRetractReservation,
 } from "./workspace-projection";
+import {
+  committedCacheEvent,
+  ignoredCacheEvent,
+  type CacheEventResult,
+  type CommittedCacheChanges,
+} from "./workspace-cache-changes";
+
 import { mentionedMemberIds } from "./mentions";
 
 const CACHE_SCHEMA_VERSION = 1 as const;
@@ -122,6 +129,13 @@ export interface CachedWorkspaceState {
 
 type MembershipChangedEvent = Extract<WorkspaceEvent, { type: "channel.membership_changed" }>;
 
+/** Rolls back the complete optimistic write when another commit has already passed this event. */
+class SupersededCacheEvent extends Error {
+  constructor(readonly committedPosition: SyncPosition | null) {
+    super("The cache has already committed this event or a later position");
+  }
+}
+
 export interface WorkspaceCacheLoadOptions {
   /** null reads only metadata/outbox; an ID additionally reads that conversation's history. */
   readonly conversationId: string | null;
@@ -177,12 +191,14 @@ export interface WorkspaceCache {
    *
    * A retract has no message body. The runtime may supply its retained source when a closed
    * thread's latest reply is not part of the cached history page.
+   * Results contain only committed writes. Cancellation or transaction failure throws; a duplicate
+   * or superseded event returns its durable position without publishing record changes.
    */
   applyEvent(
     event: WorkspaceEvent,
     signal?: AbortSignal,
     retractSource?: Message,
-  ): Promise<boolean>;
+  ): Promise<CacheEventResult>;
   /** Exact server-verified mention IDs retained for a live message until it is retracted. */
   getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined>;
   advanceCursor(syncCursor: SyncPosition): Promise<void>;
@@ -1299,12 +1315,19 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     event: WorkspaceEvent,
     signal?: AbortSignal,
     retractSource?: Message,
-  ): Promise<boolean> {
+  ): Promise<CacheEventResult> {
     const parsed = workspaceEventSchema.parse(event);
     for (;;) {
       signal?.throwIfAborted();
-      const outcome = await this.#applyEventAttempt(parsed, signal, retractSource);
-      if (outcome !== "retry") return outcome;
+      try {
+        const outcome = await this.#applyEventAttempt(parsed, signal, retractSource);
+        if (outcome !== "retry") return outcome;
+      } catch (error) {
+        if (error instanceof SupersededCacheEvent) {
+          return ignoredCacheEvent(error.committedPosition);
+        }
+        throw error;
+      }
     }
   }
 
@@ -1316,7 +1339,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     parsed: WorkspaceEvent,
     signal?: AbortSignal,
     retractSource?: Message,
-  ): Promise<boolean | "retry"> {
+  ): Promise<CacheEventResult | "retry"> {
+    let changes: Partial<CommittedCacheChanges> = {};
     signal?.throwIfAborted();
     const metadata = await this.#database.metadata.get("state");
     const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
@@ -1326,11 +1350,19 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     ) {
       if (repairMarker === null) {
         const staged = await this.stageMembershipRepair(parsed);
-        if (!staged) return false;
+        if (!staged) return ignoredCacheEvent(metadata?.syncCursor ?? null);
       } else if (!sameMembershipRepair(repairMarker, parsed)) {
         throw new Error("Membership repair must complete before applying later events");
       }
-      return this.#finishStagedMembershipEvent();
+      const applied = await this.#finishStagedMembershipEvent();
+      const position = (await this.#database.metadata.get("state"))?.syncCursor ?? parsed.position;
+      return applied
+        ? committedCacheEvent(position, {
+            removedConversationIds:
+              parsed.payload.action === "removed" ? [parsed.conversationId] : [],
+            invalidated: [{ kind: "membership", conversationId: parsed.conversationId }],
+          })
+        : ignoredCacheEvent(position);
     }
     if (repairMarker !== null) {
       throw new Error("Membership repair must complete before applying later events");
@@ -1341,13 +1373,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         compareSyncPositions(parsed.position, metadata.syncCursor) <= 0) ||
       (await this.#database.events.get(parsed.id)) !== undefined
     ) {
-      return false;
+      return ignoredCacheEvent(metadata?.syncCursor ?? null);
     }
 
     if (parsed.type === "channel.membership_changed") {
       const current = await this.#conversation(parsed.conversationId);
       const summary =
         current === null ? null : projectConversationMembershipChange(current, parsed);
+      changes = { conversations: summary === null ? [] : [summary] };
       const encrypted = await encryptRecords(
         this.#crypto,
         summary === null ? [] : [protectedRecord("conversation", summary.conversation.id, summary)],
@@ -1392,6 +1425,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               currentUserId,
               parsed.payload.mentionedUserIds,
             );
+      changes = {
+        messages: [created],
+        conversations: nextSummary === null ? [] : [nextSummary],
+        removedOutboxIds: [created.clientMessageId],
+      };
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("message", created.id, created),
         ...(nextSummary === null
@@ -1421,7 +1459,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               compareSyncPositions(parsed.position, currentMetadata.syncCursor) <= 0) ||
             (await this.#database.events.get(parsed.id)) !== undefined
           ) {
-            return "stale";
+            throw new SupersededCacheEvent(currentMetadata?.syncCursor ?? null);
           }
           await this.#database.messages.put(messageRow(created, encrypted));
           if (nextSummary !== null) {
@@ -1438,7 +1476,6 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
       if (outcome === "retry") return "retry";
-      if (outcome === "stale") return false;
       if (created.deletedAt === null) {
         rememberCreatedMessageMentions(
           this.#createdMessageMentions,
@@ -1449,6 +1486,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#createdMessageMentions.delete(created.id);
       }
     } else if (parsed.type === "member.updated") {
+      changes = { invalidated: [{ kind: "members" }] };
       // An invalidation signal, not a delta: `payload.member` is a bare `User` with no status
       // field, so upserting it would re-assert a member the server just disabled instead of
       // dropping it. Record the cursor here; WorkspaceRuntime replaces the server-derived member
@@ -1462,6 +1500,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
     } else if (parsed.type === "reaction.added") {
+      changes = { reactions: [parsed.payload.reaction] };
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("reaction", parsed.payload.reaction.id, parsed.payload.reaction),
       ]);
@@ -1478,6 +1517,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
     } else if (parsed.type === "reaction.removed") {
+      changes = { removedReactionIds: [parsed.payload.reaction.id] };
       await this.#database.transaction(
         "rw",
         this.#database.metadata,
@@ -1502,6 +1542,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           const current = await this.#database.tasks.get(task.id);
           if (acceptsTaskVersion(current?.version, task.version)) {
             await this.#database.tasks.put(taskRow(task, encrypted));
+            changes = { tasks: [task] };
           }
           await this.#recordEvent(parsed, signal);
         },
@@ -1548,6 +1589,22 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               currentUser,
               mentionedUserIds,
             );
+      changes = {
+        messages: tombstone === null ? [] : [tombstone],
+        conversations: nextSummary === null ? [] : [nextSummary],
+        removedMessageReactionIds: [parsed.payload.messageId],
+        retractReservations: [
+          {
+            messageId: parsed.payload.messageId,
+            deletedAt: parsed.payload.deletedAt,
+            entityVersion: parsed.entityVersion,
+          },
+        ],
+        invalidated:
+          source === null
+            ? [{ kind: "conversation_metadata", conversationId: parsed.conversationId }]
+            : [],
+      };
       const encrypted = await encryptRecords(this.#crypto, [
         ...(tombstone === null ? [] : [protectedRecord("message", tombstone.id, tombstone)]),
         ...(nextSummary === null
@@ -1577,7 +1634,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
               compareSyncPositions(parsed.position, currentMetadata.syncCursor) <= 0) ||
             (await this.#database.events.get(parsed.id)) !== undefined
           ) {
-            return "stale";
+            throw new SupersededCacheEvent(currentMetadata?.syncCursor ?? null);
           }
           if (tombstone !== null) {
             await this.#database.messages.put(messageRow(tombstone, encrypted));
@@ -1599,7 +1656,6 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
       if (outcome === "retry") return "retry";
-      if (outcome === "stale") return false;
       this.#createdMessageMentions.delete(parsed.payload.messageId);
     } else {
       const current = await this.#conversation(parsed.conversationId);
@@ -1624,9 +1680,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
             await this.#recordEvent(parsed, signal);
           },
         );
-        return true;
+        return committedCacheEvent(parsed.position, changes);
       }
       const summary = nextSummary;
+      changes = { conversations: [summary] };
       const encrypted = await encryptRecords(this.#crypto, [
         protectedRecord("conversation", summary.conversation.id, summary),
       ]);
@@ -1646,7 +1703,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         },
       );
     }
-    return true;
+    return committedCacheEvent(parsed.position, changes);
   }
 
   async advanceCursor(syncCursor: SyncPosition): Promise<void> {
@@ -2289,6 +2346,13 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
     await this.#assertNoMembershipRepair();
     const current = await this.#database.metadata.get("state");
+    if (
+      (current?.syncCursor != null &&
+        compareSyncPositions(event.position, current.syncCursor) <= 0) ||
+      (await this.#database.events.get(event.id)) !== undefined
+    ) {
+      throw new SupersededCacheEvent(current?.syncCursor ?? null);
+    }
     const currentReservations = parseRetractReservations(current?.retractReservations);
     const retractReservations =
       extras.retractReservations === undefined
@@ -2616,7 +2680,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     event: WorkspaceEvent,
     signal?: AbortSignal,
     retractSource?: Message,
-  ): Promise<boolean> {
+  ): Promise<CacheEventResult> {
+    let changes: Partial<CommittedCacheChanges> = {};
     signal?.throwIfAborted();
     const parsed = workspaceEventSchema.parse(event);
     if (
@@ -2625,11 +2690,18 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     ) {
       if (this.#repairMarker === null) {
         const staged = await this.stageMembershipRepair(parsed);
-        if (!staged) return false;
+        if (!staged) return ignoredCacheEvent(this.#syncCursor);
       } else if (!sameMembershipRepair(this.#repairMarker, parsed)) {
         throw new Error("Membership repair must complete before applying later events");
       }
-      return this.#finishStagedMembershipEvent();
+      const applied = this.#finishStagedMembershipEvent();
+      return applied
+        ? committedCacheEvent(this.#syncCursor ?? parsed.position, {
+            removedConversationIds:
+              parsed.payload.action === "removed" ? [parsed.conversationId] : [],
+            invalidated: [{ kind: "membership", conversationId: parsed.conversationId }],
+          })
+        : ignoredCacheEvent(this.#syncCursor);
     }
     this.#assertNoMembershipRepair();
     const suppliedRetractSource =
@@ -2638,7 +2710,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       this.#events.has(parsed.id) ||
       (this.#syncCursor !== null && compareSyncPositions(parsed.position, this.#syncCursor) <= 0)
     ) {
-      return false;
+      return ignoredCacheEvent(this.#syncCursor);
     }
     this.#events.add(parsed.id);
     this.#syncCursor = parsed.position;
@@ -2655,6 +2727,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
             projectConversationMembershipChange(current, parsed),
           );
           this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
+          const changed = conversations.get(parsed.conversationId);
+          changes = { ...changes, conversations: changed === undefined ? [] : [changed] };
         }
       }
     } else if (parsed.type === "message.created") {
@@ -2664,6 +2738,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       );
       const created = preferRetainedMessage(this.#messages.get(incoming.id), incoming);
       this.#messages.set(created.id, created);
+      changes = { messages: [created], removedOutboxIds: [created.clientMessageId] };
       if (created.deletedAt === null) {
         rememberCreatedMessageMentions(
           this.#createdMessageMentions,
@@ -2694,20 +2769,26 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
             ...this.#snapshot,
             conversations: [...conversations.values()],
           };
+          const changed = conversations.get(parsed.conversationId);
+          changes = { ...changes, conversations: changed === undefined ? [] : [changed] };
         }
       }
     } else if (parsed.type === "reaction.added") {
+      changes = { reactions: [parsed.payload.reaction] };
       this.#reactions.set(parsed.payload.reaction.id, parsed.payload.reaction);
       this.#reactionConversationIds.set(parsed.payload.reaction.id, parsed.conversationId);
     } else if (parsed.type === "reaction.removed") {
+      changes = { removedReactionIds: [parsed.payload.reaction.id] };
       this.#reactions.delete(parsed.payload.reaction.id);
       this.#reactionConversationIds.delete(parsed.payload.reaction.id);
     } else if (parsed.type === "task.created" || parsed.type === "task.updated") {
       const current = this.#tasks.get(parsed.payload.task.id);
       if (acceptsTaskVersion(current?.version, parsed.payload.task.version)) {
         this.#tasks.set(parsed.payload.task.id, parsed.payload.task);
+        changes = { tasks: [parsed.payload.task] };
       }
     } else if (parsed.type === "member.updated") {
+      changes = { invalidated: [{ kind: "members" }] };
       // WorkspaceRuntime replaces the server-derived member list because `payload.member` cannot
       // express a removal. Advancing the cursor above keeps this event idempotent until then.
     } else if (parsed.type === "message.retracted") {
@@ -2731,9 +2812,24 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         (lastMessage?.id === parsed.payload.messageId
           ? lastMessage
           : (suppliedRetractSource ?? undefined));
+      changes = {
+        removedMessageReactionIds: [parsed.payload.messageId],
+        retractReservations: [
+          {
+            messageId: parsed.payload.messageId,
+            deletedAt: parsed.payload.deletedAt,
+            entityVersion: parsed.entityVersion,
+          },
+        ],
+        invalidated:
+          source === undefined
+            ? [{ kind: "conversation_metadata", conversationId: parsed.conversationId }]
+            : [],
+      };
       if (source !== undefined) {
         const tombstone = tombstoneMessage(source, parsed);
         this.#messages.set(tombstone.id, tombstone);
+        changes = { ...changes, messages: [tombstone] };
         if (this.#snapshot !== null && parsed.conversationId !== null) {
           const conversations = new Map(
             this.#snapshot.conversations.map((summary) => [summary.conversation.id, summary]),
@@ -2761,6 +2857,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
               ...this.#snapshot,
               conversations: [...conversations.values()],
             };
+            const changed = conversations.get(parsed.conversationId);
+            changes = { ...changes, conversations: changed === undefined ? [] : [changed] };
           }
         }
       }
@@ -2781,9 +2879,11 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         );
       }
       this.#snapshot = { ...this.#snapshot, conversations: [...conversations.values()] };
+      const changed = conversations.get(parsed.conversationId);
+      changes = { ...changes, conversations: changed === undefined ? [] : [changed] };
     }
     signal?.throwIfAborted();
-    return true;
+    return committedCacheEvent(parsed.position, changes);
   }
 
   async advanceCursor(syncCursor: SyncPosition): Promise<void> {
