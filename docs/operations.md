@@ -46,6 +46,11 @@ databases whose names are not explicitly test-only.
 - Set `HYPE_COMMS_METRICS_TOKEN` to an unguessable 32–256 character secret to register `GET /metrics`.
   Scrapers send `Authorization: Bearer <token>`; the endpoint otherwise does not exist. Never place
   this token in repository variables, desktop configuration, query strings, or logs.
+  Secrets must contain valid HTTP header characters and no leading or trailing whitespace.
+  Startup rejects invalid secrets rather than trimming them; update both the server and scraper
+  secrets if validation fails. HTTP parsers strip trailing whitespace from header values, and
+  rejecting leading whitespace keeps the Bearer secret boundary unambiguous. Internal spaces and
+  tabs are allowed and compared byte-for-byte.
 - The current Prometheus surface is `hype_comms_http_requests_total`,
   `hype_comms_http_request_duration_seconds_{sum,count}`, `hype_comms_realtime_connections`,
   `hype_comms_postgres_pool_connections`, and `hype_comms_refresh_token_reuse_total`. Route labels use Fastify templates, not raw URLs, so IDs and
