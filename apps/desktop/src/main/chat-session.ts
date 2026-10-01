@@ -208,6 +208,10 @@ export class ChatSession {
   #renewalFailures = 0;
   #credentialGeneration = 0;
   #sessionEpoch: object = {};
+  readonly #responseCredentials = new WeakMap<
+    Response,
+    { readonly sessionEpoch: object; readonly credentialGeneration: number }
+  >();
   #logoutUrl: AuthKitLogoutUrl | null = null;
 
   constructor(options: {
@@ -841,25 +845,61 @@ export class ChatSession {
     headers.set("x-hype-comms-capabilities", [...capabilities].join(","));
     const request = { ...init, headers };
     const response = await this.#fetch(url, request);
-    if (response.status !== 401) return response;
+    if (response.status !== 401) {
+      this.#responseCredentials.set(response, {
+        sessionEpoch: requestSessionEpoch,
+        credentialGeneration: requestCredentialGeneration,
+      });
+      return response;
+    }
 
     // Renewal changes the cookie while already-authorized requests may still be in flight with the
     // predecessor. Wait for the serialized session change, then retry once if this session stayed
     // active and a validated replacement credential was installed. Without this check, the stale
     // 401 reaches `markSignedOut` and deletes the valid successor credential.
     await this.#runMutation(async () => undefined);
-    const currentContext = this.#authenticatedContextFromState();
-    if (
-      this.#sessionEpoch !== requestSessionEpoch ||
-      !sameAuthenticatedSession(requestContext, currentContext)
-    ) {
+    try {
+      this.#assertRequestSession(requestContext, requestSessionEpoch);
+    } catch (error) {
       await response.body?.cancel().catch(() => undefined);
-      throw new ChatSessionError("Workspace request session changed");
+      throw error;
     }
-    if (this.#credentialGeneration === requestCredentialGeneration) return response;
+    if (this.#credentialGeneration === requestCredentialGeneration) {
+      this.#responseCredentials.set(response, {
+        sessionEpoch: requestSessionEpoch,
+        credentialGeneration: requestCredentialGeneration,
+      });
+      return response;
+    }
 
     await response.body?.cancel().catch(() => undefined);
-    return this.#fetch(url, request);
+    this.#assertRequestSession(requestContext, requestSessionEpoch);
+    const retryCredentialGeneration = this.#credentialGeneration;
+    const retryResponse = await this.#fetch(url, request);
+    await this.#runMutation(async () => undefined);
+    try {
+      this.#assertRequestSession(requestContext, requestSessionEpoch);
+    } catch (error) {
+      await retryResponse.body?.cancel().catch(() => undefined);
+      throw error;
+    }
+    this.#responseCredentials.set(retryResponse, {
+      sessionEpoch: requestSessionEpoch,
+      credentialGeneration: retryCredentialGeneration,
+    });
+    return retryResponse;
+  }
+
+  #assertRequestSession(
+    requestContext: AuthenticatedSessionContext | null,
+    requestSessionEpoch: object,
+  ): void {
+    if (
+      this.#sessionEpoch !== requestSessionEpoch ||
+      !sameAuthenticatedSession(requestContext, this.#authenticatedContextFromState())
+    ) {
+      throw new ChatSessionError("Workspace request session changed");
+    }
   }
 
   async #fetch(url: string, init: RequestInit): Promise<Response> {
@@ -872,9 +912,18 @@ export class ChatSession {
     });
   }
 
-  /** Marks the session as ended after the server rejects an authenticated request. */
-  markSignedOut(): Promise<void> {
+  /** Ends only the session whose credential the server rejected, checking after queued changes. */
+  markSignedOut(response: Response): Promise<void> {
+    const credential = this.#responseCredentials.get(response);
     return this.#runMutation(async () => {
+      if (
+        response.status !== 401 ||
+        credential === undefined ||
+        credential.sessionEpoch !== this.#sessionEpoch ||
+        credential.credentialGeneration !== this.#credentialGeneration
+      ) {
+        return;
+      }
       this.#stopRenewal();
       this.#revokeCacheAuthorization();
       await this.#clearCookie(IDENTITY_COOKIE_NAME);

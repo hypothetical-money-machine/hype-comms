@@ -110,6 +110,14 @@ class MemoryAuthenticatedContexts implements AuthenticatedSessionContextPersiste
   }
 }
 
+function deferredSignal(): { readonly promise: Promise<void>; readonly release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -1038,6 +1046,180 @@ describe("ChatSession renewal", () => {
     expect(productAttempts).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
     expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    session.stop();
+  });
+
+  it("does not replay a mutation when sign-in changes while cancelling a stale response", async () => {
+    const cookies = storedIdentityCookies();
+    const firstStarted = deferredSignal();
+    const firstCanFinish = deferredSignal();
+    const cancellationStarted = deferredSignal();
+    const cancellationCanFinish = deferredSignal();
+    const productCredentials: (string | undefined)[] = [];
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      if (url.endsWith("/v1/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v1/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productCredentials.push(cookies.values.get("hype_comms_session"));
+      if (productCredentials.length === 1) {
+        firstStarted.release();
+        await firstCanFinish.promise;
+        return new Response(
+          new ReadableStream({
+            async cancel() {
+              cancellationStarted.release();
+              await cancellationCanFinish.promise;
+            },
+          }),
+          { status: 401 },
+        );
+      }
+      return emptyResponse();
+    }, cookies);
+
+    await session.restore();
+    const outcome = session
+      .fetch("https://chat.example/v1/messages/message-1", { method: "DELETE" })
+      .catch((error: unknown) => error);
+    await firstStarted.promise;
+    await session.renewSession();
+    firstCanFinish.release();
+    await cancellationStarted.promise;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    cancellationCanFinish.release();
+
+    expect(await outcome).toEqual(new ChatSessionError("Workspace request session changed"));
+    expect(productCredentials).toEqual(["identity-cookie"]);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("rejects a retry response from before sign-out and same-user sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    const firstStarted = deferredSignal();
+    const firstCanFinish = deferredSignal();
+    const retryStarted = deferredSignal();
+    const retryCanFinish = deferredSignal();
+    let productAttempts = 0;
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      if (url.endsWith("/v1/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v1/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        firstStarted.release();
+        await firstCanFinish.promise;
+        return emptyResponse(401);
+      }
+      retryStarted.release();
+      await retryCanFinish.promise;
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const outcome = session
+      .fetch("https://chat.example/v1/product", { method: "GET" })
+      .catch((error: unknown) => error);
+    await firstStarted.promise;
+    await session.renewSession();
+    firstCanFinish.release();
+    await retryStarted.promise;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    retryCanFinish.release();
+
+    expect(await outcome).toEqual(new ChatSessionError("Workspace request session changed"));
+    expect(productAttempts).toBe(2);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("ignores a rejected response queued for sign-out behind a new sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    const exchangeStarted = deferredSignal();
+    const exchangeCanFinish = deferredSignal();
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url.endsWith("/v1/auth/session") && init.method === "POST") {
+        exchangeStarted.release();
+        await exchangeCanFinish.promise;
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v1/product");
+    const exchange = session.exchangeMagicLink(TOKEN);
+    await exchangeStarted.promise;
+    const signOut = session.markSignedOut(response);
+    exchangeCanFinish.release();
+    await exchange;
+    await signOut;
+
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("ignores a rejected response after its credential was renewed", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v1/product");
+    await session.renewSession();
+    await session.markSignedOut(response);
+
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("rotated-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("clears a credential when its own authenticated request is rejected", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async (url) => (url === CURRENT_USER_URL ? jsonResponse(CURRENT_USER) : emptyResponse(401)),
+      cookies,
+    );
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v1/product");
+    await session.markSignedOut(response);
+
+    expect(cookies.values.has("hype_comms_session")).toBe(false);
+    expect(session.state).toEqual({ status: "signed-out" });
     session.stop();
   });
 

@@ -199,7 +199,7 @@ export class WorkspaceTransport {
 
   async #payload(response: Response): Promise<unknown> {
     if (response.ok) return response.json();
-    if (response.status === 401) await this.session.markSignedOut();
+    if (response.status === 401) await this.session.markSignedOut(response);
     let message = `Workspace request failed (${response.status})`;
     try {
       const parsed = apiErrorEnvelopeSchema.safeParse(await response.json());
@@ -587,7 +587,7 @@ export class WorkspaceTransport {
         });
       }
       if (response.status === 401) {
-        await this.session.markSignedOut();
+        await this.session.markSignedOut(response);
         return { status: "authentication_required" };
       }
       if (response.status === 429) {
@@ -658,7 +658,7 @@ export class WorkspaceTransport {
       return accepted.data;
     }
     if (response.status === 401) {
-      await this.session.markSignedOut();
+      await this.session.markSignedOut(response);
       return { status: "authentication_required" };
     }
     if (response.status === 410) {
