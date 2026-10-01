@@ -1512,32 +1512,31 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter, gateway, factory, key, _watch = await self.deferred_recovery_fixture(
             count=3, capacity=1
         )
-        sleeping, resume = asyncio.Event(), asyncio.Event()
+        backoffs: asyncio.Queue[int] = asyncio.Queue()
+        resume = asyncio.Event()
 
         async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
-            del attempt, retry_after
-            sleeping.set()
+            del retry_after
+            backoffs.put_nowait(attempt)
             await resume.wait()
             resume.clear()
-            sleeping.clear()
 
         self.control_ambient_replay_wait(adapter, controlled_backoff)
         failed_id = message_id_for("101")
         gateway.results[failed_id] = {"failed": True, "final_response": ""}
         try:
             self.assertTrue(await adapter.connect())
-            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            self.assertEqual(await asyncio.wait_for(backoffs.get(), timeout=0.5), 1)
             task = adapter._ambient_replay_task
             await self.finish_recovery_fifo(adapter, gateway, key)
             resume.set()
 
-            async def finish_second_turn() -> None:
-                while key not in adapter._pending_messages:
-                    await asyncio.sleep(0)
-                await self.finish_recovery_fifo(adapter, gateway, key)
-
-            await asyncio.wait_for(finish_second_turn(), timeout=0.5)
-            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            # Keep the second turn queued until the worker has tried the third
+            # anchor and entered its next capacity backoff.
+            self.assertEqual(await asyncio.wait_for(backoffs.get(), timeout=0.5), 2)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 1)
+            self.assertEqual(adapter._pending_messages[key].message_id, message_id_for("102"))
+            await self.finish_recovery_fifo(adapter, gateway, key)
             resume.set()
             await asyncio.wait_for(task, timeout=0.5)
             await self.finish_recovery_fifo(adapter, gateway, key)
@@ -5044,7 +5043,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await restarted.connect())
         self.assertEqual(restarted.handled_events, [])
         self.assertEqual(json.loads(seed._cursor_path.read_bytes()), {
-            "version": 3, "cursor": position("600"), "pendingReadCursors": {},
+            "version": 4, "cursor": position("600"), "pendingReadCursors": {}, "pendingAmbientWakes": {},
         })
         await restarted.disconnect()
 
