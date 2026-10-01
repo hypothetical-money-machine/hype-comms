@@ -4,7 +4,8 @@
     "rootDir": "src",
     "composite": true,
     "rewriteRelativeImportExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "test"],

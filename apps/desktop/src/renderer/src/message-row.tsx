@@ -107,8 +107,9 @@ export function MessageRow({
   useEffect(() => {
     if (!retractVisible) return;
     const remaining = retractWindowRemainingMs(message.createdAt, nowMs);
-    if (remaining <= 0) return;
-    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining);
+    if (remaining < 0) return;
+    // The retract window includes its final millisecond; update after that boundary.
+    const timer = window.setTimeout(() => setNowMs(Date.now()), remaining + 1);
     return () => window.clearTimeout(timer);
   }, [message.createdAt, nowMs, retractVisible]);
   const threadActionLabel =

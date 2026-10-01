@@ -94,7 +94,7 @@ export class OverlayOwnership {
         // Cleanup can run before React removes the focused portal. Restore after that commit.
         queueMicrotask(() => {
           if (this.#containerRevisions.get(entry.container) !== entry.revision) return;
-          const top = this.#entries.at(-1);
+          const modal = [...this.#entries].reverse().find((remaining) => remaining.modal);
           const focused = document.activeElement;
           const stillOwned = focused === document.body || entry.container.contains(focused);
           const target = entry.returnTarget;
@@ -102,7 +102,7 @@ export class OverlayOwnership {
             restoreFocus &&
             stillOwned &&
             available(target) &&
-            (top === undefined || top.container.contains(target));
+            (modal === undefined || modal.container.contains(target));
           if (restored) target.focus();
           for (const listener of this.#closed) listener(restored);
         });
@@ -131,7 +131,7 @@ interface OverlayOptions {
   /** Reapply initial focus on a domain transition without replacing the lease or its opener. */
   readonly focusKey?: string | boolean | number;
   readonly returnFocus?: () => HTMLElement | null;
-  readonly onEscape: () => void;
+  readonly onEscape: (event: KeyboardEvent) => void;
   readonly trapFocus?: boolean;
   readonly escapeWithinContainer?: boolean;
 }
@@ -165,7 +165,7 @@ export function useOwnedOverlay(open: boolean, options: OverlayOptions) {
           return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        latest.current.onEscape();
+        latest.current.onEscape(event);
       } else if (event.key === "Tab" && latest.current.trapFocus !== false) {
         const focusable = controls(container);
         const first = focusable[0];

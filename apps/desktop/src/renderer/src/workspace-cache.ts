@@ -204,9 +204,27 @@ export interface SnapshotCollections {
   readonly reactionPositions: ReadonlyMap<string, SyncPosition>;
 }
 
+export interface WorkspaceCacheLoadOptions {
+  /** null reads only metadata/outbox; an ID additionally reads that conversation's history. */
+  readonly conversationId: string | null;
+  /** Restore the workspace task catalog independently of the requested message history. */
+  readonly includeAllTasks?: boolean;
+}
+
 export interface WorkspaceCache {
   readonly mode: CacheCryptoStatus["mode"];
-  load(): Promise<CachedWorkspaceState>;
+  /** Omit options to restore all histories, as required by full snapshot/repair callers. */
+  load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState>;
+  /** Reads durable sync progress without decrypting message history; finishes any staged purge. */
+  loadSyncCursor(): Promise<SyncPosition | null>;
+  /**
+   * Refreshes metadata at the durable cursor without rewriting histories. Returns null when the
+   * cursor or conversation set changed, or a membership repair requires a full snapshot.
+   */
+  refreshMetadata(
+    snapshot: WorkspaceSnapshot,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceSnapshot | null>;
   readCollections(): Promise<readonly CollectionState[]>;
   commitCollectionMetadata(commit: CollectionCommit, signal?: AbortSignal): Promise<void>;
   /**
@@ -232,7 +250,7 @@ export interface WorkspaceCache {
   /**
    * Replaces the whole member directory with the server's answer to `GET /v2/members`.
    *
-   * This is the only writer of the cached member list outside `replaceSnapshot`. `member.updated`
+   * Along with snapshot/metadata replacement, this owns the cached member list. `member.updated`
    * deliberately does not write here: its payload is a bare `User` with no status field, so it
    * cannot express a removal, and upserting it would re-assert a member the server just disabled.
    * A caller may abort a replacement when the cache generation that requested it is retired.
@@ -940,10 +958,117 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     );
   }
 
-  async load(): Promise<CachedWorkspaceState> {
+  async loadSyncCursor(): Promise<SyncPosition | null> {
+    await this.#finishStagedMembershipEvent();
+    const cursor = (await this.#database.metadata.get("state"))?.syncCursor;
+    return cursor === null || cursor === undefined ? null : syncPositionSchema.parse(cursor);
+  }
+
+  async refreshMetadata(
+    snapshot: WorkspaceSnapshot,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceSnapshot | null> {
+    const parsed = parseSnapshotInput(snapshot);
+    if (
+      parsed.currentUser.user.id !== this.#scope.userId ||
+      parsed.workspace.id !== this.#scope.workspaceId
+    ) {
+      throw new Error("The workspace metadata did not match the cache scope");
+    }
+    signal?.throwIfAborted();
+    const base = await this.#database.metadata.get("state");
+    if (
+      base?.syncCursor == null ||
+      !sameSyncPosition(base.syncCursor, parsed.syncCursor) ||
+      parseMembershipRepairMarker(base.repairMarker) !== null
+    ) {
+      return null;
+    }
+    const reservations = parseRetractReservations(base.retractReservations);
+    const refreshed = canonicalSnapshot({
+      ...parsed,
+      conversations: applyRetractReservationsToConversations(
+        parsed.conversations,
+        retractReservationMap(reservations),
+      ),
+    });
+    const encrypted = await encryptRecords(this.#crypto, [
+      protectedRecord("workspace", parsed.workspace.id, {
+        currentUser: parsed.currentUser,
+        workspace: parsed.workspace,
+        featureFlags: parsed.featureFlags,
+      } satisfies WorkspacePayload),
+      ...parsed.members.map((member) => protectedRecord("member", member.id, member)),
+      ...refreshed.conversations.map((summary) =>
+        protectedRecord("conversation", summary.conversation.id, summary),
+      ),
+    ]);
+    signal?.throwIfAborted();
+    return this.#database.transaction(
+      "rw",
+      [
+        this.#database.metadata,
+        this.#database.workspaces,
+        this.#database.members,
+        this.#database.conversations,
+      ],
+      async () => {
+        signal?.throwIfAborted();
+        const current = await this.#database.metadata.get("state");
+        if (
+          current?.syncCursor == null ||
+          !sameSyncPosition(current.syncCursor, parsed.syncCursor) ||
+          parseMembershipRepairMarker(current.repairMarker) !== null ||
+          !sameRetractReservations(
+            reservations,
+            parseRetractReservations(current.retractReservations),
+          )
+        ) {
+          return null;
+        }
+        const ids = await this.#database.conversations.toCollection().primaryKeys();
+        const incomingIds = new Set(parsed.conversations.map((summary) => summary.conversation.id));
+        if (ids.length !== incomingIds.size || ids.some((id) => !incomingIds.has(id))) return null;
+        if ((await this.#database.workspaces.get(parsed.workspace.id)) === undefined) return null;
+        await this.#database.workspaces.put({
+          id: parsed.workspace.id,
+          value: encryptedValue(encrypted, "workspace", parsed.workspace.id),
+        });
+        await this.#writeMembers(parsed.members, encrypted);
+        await this.#database.conversations.bulkPut(
+          refreshed.conversations.map((summary) => ({
+            id: summary.conversation.id,
+            kind: summary.conversation.kind,
+            updatedAt: summary.conversation.updatedAt,
+            value: encryptedValue(encrypted, "conversation", summary.conversation.id),
+          })),
+        );
+        await this.#database.metadata.put(
+          mergeMetadataRow(current, this.#scope, { lastSyncedAt: new Date().toISOString() }),
+        );
+        signal?.throwIfAborted();
+        return refreshed;
+      },
+    );
+  }
+
+  async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
     // A process may have stopped after staging the fail-closed marker but before the event's purge
     // transaction began. Finish that transaction before decrypting or returning any cached state.
     await this.#finishStagedMembershipEvent();
+    // One statement of the load scope: the whole table when unscoped, nothing when the caller
+    // asked for no conversation, and the conversation index otherwise.
+    const scopedRows = <Row extends { conversationId: string }>(
+      table: Table<Row, string>,
+    ): Promise<Row[]> => {
+      if (options === undefined) {
+        return table.toArray();
+      }
+      if (options.conversationId === null) {
+        return Promise.resolve([]);
+      }
+      return table.where("conversationId").equals(options.conversationId).toArray();
+    };
     const [
       metadata,
       workspaceRows,
@@ -958,9 +1083,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       this.#database.workspaces.toArray(),
       this.#database.members.toArray(),
       this.#database.conversations.toArray(),
-      this.#database.messages.toArray(),
-      this.#database.reactions.toArray(),
-      this.#database.tasks.toArray(),
+      scopedRows(this.#database.messages),
+      scopedRows(this.#database.reactions),
+      options?.includeAllTasks === true
+        ? this.#database.tasks.toArray()
+        : scopedRows(this.#database.tasks),
       this.#database.outbox.orderBy("createdAt").toArray(),
     ]);
     const [workspacePayloads, members, conversations, messages, reactions, tasks, operations] =
@@ -2605,6 +2732,27 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async #evictMessages(): Promise<void> {
+    const belowRetentionLimits = await this.#database.transaction(
+      "r",
+      this.#database.messages,
+      async () => {
+        const [count, oldestKeys] = await Promise.all([
+          this.#database.messages.count(),
+          this.#database.messages.orderBy("createdAt").limit(1).keys(),
+        ]);
+        if (count === 0) return true;
+        const oldest = oldestKeys[0];
+        // Wire timestamps are UTC, but seconds and fractional precision can differ. Compare
+        // minute prefixes so index ordering within the cutoff minute cannot hide an expired row.
+        const cutoffMinute = new Date(Date.now() - MAX_MESSAGE_AGE_MS).toISOString().slice(0, 16);
+        return (
+          count <= MAX_ACKNOWLEDGED_MESSAGES &&
+          typeof oldest === "string" &&
+          oldest.slice(0, 16) > cutoffMinute
+        );
+      },
+    );
+    if (belowRetentionLimits) return;
     const rows = await this.#database.messages.toArray();
     rows.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const cutoff = Date.now() - MAX_MESSAGE_AGE_MS;
@@ -2669,11 +2817,57 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#collections = commitCollectionState(this.#collections, this.#syncCursor, commit);
   }
 
-  async load(): Promise<CachedWorkspaceState> {
+  async loadSyncCursor(): Promise<SyncPosition | null> {
     this.#finishStagedMembershipEvent();
+    return this.#syncCursor;
+  }
+
+  async refreshMetadata(
+    snapshot: WorkspaceSnapshot,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceSnapshot | null> {
+    const parsed = parseSnapshotInput(snapshot);
+    signal?.throwIfAborted();
+    if (this.#snapshot === null) return null;
+    if (
+      parsed.currentUser.user.id !== this.#snapshot.currentUser.user.id ||
+      parsed.workspace.id !== this.#snapshot.workspace.id
+    ) {
+      throw new Error("The workspace metadata did not match the cache scope");
+    }
+    if (
+      this.#repairMarker !== null ||
+      this.#syncCursor === null ||
+      !sameSyncPosition(this.#syncCursor, parsed.syncCursor)
+    ) {
+      return null;
+    }
+    const incomingIds = new Set(parsed.conversations.map((summary) => summary.conversation.id));
+    if (
+      this.#snapshot.conversations.length !== incomingIds.size ||
+      this.#snapshot.conversations.some((summary) => !incomingIds.has(summary.conversation.id))
+    ) {
+      return null;
+    }
+    this.#snapshot = canonicalSnapshot({
+      ...parsed,
+      conversations: applyRetractReservationsToConversations(
+        parsed.conversations,
+        retractReservationMap(this.#retractReservations),
+      ),
+    });
+    this.#members = this.#snapshot.members;
+    this.#lastSyncedAt = new Date().toISOString();
+    return this.#snapshot;
+  }
+
+  async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
+    this.#finishStagedMembershipEvent();
+    const inScope = (conversationId: string | null | undefined): boolean =>
+      options === undefined || conversationId === options.conversationId;
     const reservations = retractReservationMap(this.#retractReservations);
     const retainedMessages = applyRetractReservationsToMessages(
-      [...this.#messages.values()],
+      [...this.#messages.values()].filter((message) => inScope(message.conversationId)),
       reservations,
     );
     const retractedIds = retractedMessageIds(retainedMessages, reservations);
@@ -2704,9 +2898,15 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       // the newest message, exactly like PersistentWorkspaceCache.
       messages: retainedMessages.sort(compareMessages),
       reactions: [...this.#reactions.values()]
-        .filter((reaction) => !retractedIds.has(reaction.messageId))
+        .filter(
+          (reaction) =>
+            inScope(this.#reactionConversationIds.get(reaction.id)) &&
+            !retractedIds.has(reaction.messageId),
+        )
         .sort(compareReactions),
-      tasks: [...this.#tasks.values()].sort(compareTasks),
+      tasks: [...this.#tasks.values()]
+        .filter((task) => options?.includeAllTasks === true || inScope(task.conversationId))
+        .sort(compareTasks),
       outbox: [...this.#outbox.values()]
         .map((item): OutboxItem => ({
           ...item,

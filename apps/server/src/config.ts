@@ -1,7 +1,9 @@
-import { databasePoolSizeSchema, databaseUrlSchema } from "./db/config.js";
+import { validateHeaderValue } from "node:http";
 import { isIP } from "node:net";
 
 import { z } from "zod";
+
+import { databasePoolSizeSchema, databaseUrlSchema } from "./db/config.js";
 
 import { emailSchema, type Email } from "@hype-comms/contracts";
 
@@ -22,7 +24,26 @@ const rawConfigSchema = z
       .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
       .default("info"),
     shutdownTimeoutMs: z.coerce.number().int().min(100).max(60_000).default(10_000),
-    metricsToken: optionalString(z.string().min(32).max(256)),
+    metricsToken: optionalString(
+      z
+        .string()
+        .min(32)
+        .max(256)
+        .refine((token) => token === token.trim(), {
+          message: "HYPE_COMMS_METRICS_TOKEN must not start or end with whitespace",
+        })
+        .refine(
+          (token) => {
+            try {
+              validateHeaderValue("Authorization", token);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          { message: "HYPE_COMMS_METRICS_TOKEN must contain only valid HTTP header characters" },
+        ),
+    ),
     allowedOrigins: optionalString(z.string().min(1)),
     publicApiUrl: optionalString(z.string().min(1)),
     webRoot: optionalString(z.string().min(1)),
