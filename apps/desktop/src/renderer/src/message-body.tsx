@@ -6,6 +6,7 @@ import {
   isValidElement,
   memo,
   useContext,
+  useMemo,
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -17,6 +18,7 @@ import type { FencedBlockquoteMode } from "./fenced-blockquote-runtime";
 import { expandFencedBlockquotes } from "./fenced-blockquotes";
 import { normalizeExternalMailtoUrl } from "../../shared/external-mailto";
 import { segmentMentions } from "./mentions";
+import { isPlainMessageParagraph } from "./plain-message-paragraph";
 
 interface MarkdownSyntaxNode {
   children?: MarkdownSyntaxNode[];
@@ -120,24 +122,32 @@ function annotateMessageText(
 
 const ChannelReferencesEnabledContext = createContext(true);
 
-function ChannelAwareText({
-  children,
-  channels,
-  members,
-  onOpenChannel,
-}: {
-  readonly children: ReactNode;
+interface MessageReferences {
   readonly channels: readonly ChannelReferenceTarget[];
   readonly members: readonly User[];
-  readonly onOpenChannel: ((conversationId: string) => void) | undefined;
-}) {
+  readonly onOpenChannel?: (conversationId: string) => void;
+}
+
+const EMPTY_CHANNELS: readonly ChannelReferenceTarget[] = [];
+const EMPTY_MEMBERS: readonly User[] = [];
+const MessageReferencesContext = createContext<MessageReferences>({
+  channels: EMPTY_CHANNELS,
+  members: EMPTY_MEMBERS,
+});
+
+function ChannelAwareText({ children }: { readonly children: ReactNode }) {
   const referencesEnabled = useContext(ChannelReferencesEnabledContext);
+  const { channels, members, onOpenChannel } = useContext(MessageReferencesContext);
   return annotateMessageText(
     children,
     channels,
-    referencesEnabled ? members : [],
+    referencesEnabled ? members : EMPTY_MEMBERS,
     referencesEnabled ? onOpenChannel : undefined,
   );
+}
+
+function renderText(children: ReactNode): ReactNode {
+  return <ChannelAwareText>{children}</ChannelAwareText>;
 }
 
 interface MarkdownBodyProps {
@@ -150,13 +160,128 @@ interface MarkdownBodyProps {
   readonly onOpenChannel?: (conversationId: string) => void;
 }
 
+const MARKDOWN_PLUGINS = [remarkGfm, remarkLiteralHtml];
+
+const MARKDOWN_COMPONENTS: Components = {
+  p: ({ children, node, ...props }) => {
+    void node;
+    return <p {...props}>{renderText(children)}</p>;
+  },
+  h1: ({ children, node, ...props }) => {
+    void node;
+    return <h1 {...props}>{renderText(children)}</h1>;
+  },
+  h2: ({ children, node, ...props }) => {
+    void node;
+    return <h2 {...props}>{renderText(children)}</h2>;
+  },
+  h3: ({ children, node, ...props }) => {
+    void node;
+    return <h3 {...props}>{renderText(children)}</h3>;
+  },
+  h4: ({ children, node, ...props }) => {
+    void node;
+    return <h4 {...props}>{renderText(children)}</h4>;
+  },
+  h5: ({ children, node, ...props }) => {
+    void node;
+    return <h5 {...props}>{renderText(children)}</h5>;
+  },
+  h6: ({ children, node, ...props }) => {
+    void node;
+    return <h6 {...props}>{renderText(children)}</h6>;
+  },
+  li: ({ children, node, ...props }) => {
+    void node;
+    return <li {...props}>{renderText(children)}</li>;
+  },
+  strong: ({ children, node, ...props }) => {
+    void node;
+    return <strong {...props}>{renderText(children)}</strong>;
+  },
+  em: ({ children, node, ...props }) => {
+    void node;
+    return <em {...props}>{renderText(children)}</em>;
+  },
+  del: ({ children, node, ...props }) => {
+    void node;
+    return <del {...props}>{renderText(children)}</del>;
+  },
+  th: ({ children, node, ...props }) => {
+    void node;
+    return <th {...props}>{renderText(children)}</th>;
+  },
+  td: ({ children, node, ...props }) => {
+    void node;
+    return <td {...props}>{renderText(children)}</td>;
+  },
+  a: ({ children, href, node, ...props }) => {
+    void node;
+    const linkChildren = (
+      <ChannelReferencesEnabledContext.Provider value={false}>
+        {children}
+      </ChannelReferencesEnabledContext.Provider>
+    );
+    const fragmentUrl = normalizeFragmentUrl(href);
+    if (fragmentUrl !== null) {
+      return (
+        <a {...props} href={fragmentUrl}>
+          {linkChildren}
+        </a>
+      );
+    }
+    const safeUrl = normalizeHttpsUrl(href);
+    if (safeUrl !== null) {
+      return (
+        <a {...props} href={safeUrl} target="_blank" rel="noreferrer noopener">
+          {linkChildren}
+          {externalLinkDestination(children, safeUrl)}
+        </a>
+      );
+    }
+    const safeMailto = normalizeExternalMailtoUrl(href);
+    if (safeMailto !== null) {
+      return (
+        <a {...props} href={safeMailto} target="_blank" rel="noreferrer noopener">
+          {linkChildren}
+          {externalMailtoDestination(children, safeMailto)}
+        </a>
+      );
+    }
+    return <span>{linkChildren}</span>;
+  },
+  img: ({ alt, src, title }) => {
+    const label = alt?.trim() === "" || alt === undefined ? "Image" : alt;
+    const safeUrl = normalizeHttpsUrl(src);
+    return safeUrl === null ? (
+      <span className="markdown-image-alt" title={title}>
+        {label}
+      </span>
+    ) : (
+      <a href={safeUrl} target="_blank" rel="noreferrer noopener" title={title}>
+        <span className="markdown-image-alt">{label}</span>
+        {externalLinkDestination(label, safeUrl)}
+      </a>
+    );
+  },
+};
+
+const ParsedMarkdown = memo(function ParsedMarkdown({ body }: { readonly body: string }) {
+  if (isPlainMessageParagraph(body)) return <p>{body}</p>;
+  return (
+    <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} skipHtml components={MARKDOWN_COMPONENTS}>
+      {body}
+    </ReactMarkdown>
+  );
+});
+
 export const MarkdownBody = memo(function MarkdownBody({
   body,
   className,
   fencedBlockquoteMode,
   suffix,
-  channels = [],
-  members = [],
+  channels = EMPTY_CHANNELS,
+  members = EMPTY_MEMBERS,
   onOpenChannel,
 }: MarkdownBodyProps) {
   const contextualFencedBlockquoteMode = useFencedBlockquoteMode();
@@ -164,126 +289,18 @@ export const MarkdownBody = memo(function MarkdownBody({
     body,
     fencedBlockquoteMode ?? contextualFencedBlockquoteMode,
   );
-  const renderText = (children: ReactNode): ReactNode => (
-    <ChannelAwareText channels={channels} members={members} onOpenChannel={onOpenChannel}>
-      {children}
-    </ChannelAwareText>
+  const references = useMemo(
+    () => ({ channels, members, onOpenChannel }),
+    [channels, members, onOpenChannel],
   );
-  const components: Components = {
-    p: ({ children, node, ...props }) => {
-      void node;
-      return <p {...props}>{renderText(children)}</p>;
-    },
-    h1: ({ children, node, ...props }) => {
-      void node;
-      return <h1 {...props}>{renderText(children)}</h1>;
-    },
-    h2: ({ children, node, ...props }) => {
-      void node;
-      return <h2 {...props}>{renderText(children)}</h2>;
-    },
-    h3: ({ children, node, ...props }) => {
-      void node;
-      return <h3 {...props}>{renderText(children)}</h3>;
-    },
-    h4: ({ children, node, ...props }) => {
-      void node;
-      return <h4 {...props}>{renderText(children)}</h4>;
-    },
-    h5: ({ children, node, ...props }) => {
-      void node;
-      return <h5 {...props}>{renderText(children)}</h5>;
-    },
-    h6: ({ children, node, ...props }) => {
-      void node;
-      return <h6 {...props}>{renderText(children)}</h6>;
-    },
-    li: ({ children, node, ...props }) => {
-      void node;
-      return <li {...props}>{renderText(children)}</li>;
-    },
-    strong: ({ children, node, ...props }) => {
-      void node;
-      return <strong {...props}>{renderText(children)}</strong>;
-    },
-    em: ({ children, node, ...props }) => {
-      void node;
-      return <em {...props}>{renderText(children)}</em>;
-    },
-    del: ({ children, node, ...props }) => {
-      void node;
-      return <del {...props}>{renderText(children)}</del>;
-    },
-    th: ({ children, node, ...props }) => {
-      void node;
-      return <th {...props}>{renderText(children)}</th>;
-    },
-    td: ({ children, node, ...props }) => {
-      void node;
-      return <td {...props}>{renderText(children)}</td>;
-    },
-    a: ({ children, href, node, ...props }) => {
-      void node;
-      const linkChildren = (
-        <ChannelReferencesEnabledContext.Provider value={false}>
-          {children}
-        </ChannelReferencesEnabledContext.Provider>
-      );
-      const fragmentUrl = normalizeFragmentUrl(href);
-      if (fragmentUrl !== null) {
-        return (
-          <a {...props} href={fragmentUrl}>
-            {linkChildren}
-          </a>
-        );
-      }
-      const safeUrl = normalizeHttpsUrl(href);
-      if (safeUrl !== null) {
-        return (
-          <a {...props} href={safeUrl} target="_blank" rel="noreferrer noopener">
-            {linkChildren}
-            {externalLinkDestination(children, safeUrl)}
-          </a>
-        );
-      }
-      const safeMailto = normalizeExternalMailtoUrl(href);
-      if (safeMailto !== null) {
-        return (
-          <a {...props} href={safeMailto} target="_blank" rel="noreferrer noopener">
-            {linkChildren}
-            {externalMailtoDestination(children, safeMailto)}
-          </a>
-        );
-      }
-      return <span>{linkChildren}</span>;
-    },
-    img: ({ alt, src, title }) => {
-      const label = alt?.trim() === "" || alt === undefined ? "Image" : alt;
-      const safeUrl = normalizeHttpsUrl(src);
-      return safeUrl === null ? (
-        <span className="markdown-image-alt" title={title}>
-          {label}
-        </span>
-      ) : (
-        <a href={safeUrl} target="_blank" rel="noreferrer noopener" title={title}>
-          <span className="markdown-image-alt">{label}</span>
-          {externalLinkDestination(label, safeUrl)}
-        </a>
-      );
-    },
-  };
 
   return (
     <div
       className={`${className} markdown-body${suffix === undefined ? "" : " markdown-body-with-suffix"}`}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkLiteralHtml]}
-        skipHtml
-        components={components}
-      >
-        {renderedBody}
-      </ReactMarkdown>
+      <MessageReferencesContext.Provider value={references}>
+        <ParsedMarkdown body={renderedBody} />
+      </MessageReferencesContext.Provider>
       {suffix}
     </div>
   );
@@ -299,8 +316,8 @@ export const MessageBody = memo(function MessageBody({
   body,
   fencedBlockquoteMode,
   suffix,
-  channels = [],
-  members = [],
+  channels = EMPTY_CHANNELS,
+  members = EMPTY_MEMBERS,
   onOpenChannel,
 }: {
   readonly body: string;
