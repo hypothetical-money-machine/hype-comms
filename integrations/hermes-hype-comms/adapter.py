@@ -1405,7 +1405,17 @@ class HypeCommsAdapter(BasePlatformAdapter):
         if not isinstance(wakes, dict) or len(wakes) > MAX_PENDING_AMBIENT_WAKES:
             raise unsupported
         next_wakes: Dict[str, Dict[str, Any]] = {}
-        for message_id, target in wakes.items():
+        wake_items = list(wakes.items())
+        if legacy_ambient:
+            # Validate before sorting so malformed scalar input is never coerced.
+            if any(
+                not self._valid_ambient_wake(message_id, target, legacy=True)
+                for message_id, target in wake_items
+            ):
+                raise unsupported
+            wake_items.sort(key=lambda item: (int(item[1]["workspaceSequence"]), item[0]))
+        orders: set[str] = set()
+        for ordinal, (message_id, target) in enumerate(wake_items, start=1):
             if not self._valid_ambient_wake(message_id, target, legacy=legacy_ambient):
                 raise unsupported
             if legacy_ambient:
@@ -1414,8 +1424,13 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 rebound = dict(target)
                 rebound["legacyWorkspaceSequence"] = rebound.pop("workspaceSequence")
                 rebound["position"] = json.loads(checked_position(bootstrap_cursor))
+                rebound["recoveryOrder"] = str(ordinal)
                 next_wakes[message_id] = rebound
             else:
+                order = target["recoveryOrder"]
+                if order in orders:
+                    raise unsupported
+                orders.add(order)
                 next_wakes[message_id] = dict(target)
         if cursor is not None and bootstrap_cursor is not None:
             bootstrap = checked_position(bootstrap_cursor)
@@ -1519,6 +1534,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
             position_key, "conversationId", "conversationSequence", "authorId",
             "threadRootId", "createdAt",
         }
+        if not legacy:
+            expected_keys.add("recoveryOrder")
+            if not _is_sequence(target.get("recoveryOrder")) or target["recoveryOrder"] == "0":
+                return False
         if not legacy and "legacyWorkspaceSequence" in target:
             expected_keys.add("legacyWorkspaceSequence")
             if not _is_sequence(target["legacyWorkspaceSequence"]):
@@ -1566,6 +1585,15 @@ class HypeCommsAdapter(BasePlatformAdapter):
             ),
         }
         previous = self._pending_ambient_wakes.get(message_id)
+        if previous is not None:
+            target["recoveryOrder"] = previous["recoveryOrder"]
+        else:
+            target["recoveryOrder"] = str(
+                max(
+                    (int(wake["recoveryOrder"]) for wake in self._pending_ambient_wakes.values()),
+                    default=0,
+                ) + 1
+            )
         if previous is not None and "legacyWorkspaceSequence" in previous:
             target["legacyWorkspaceSequence"] = previous["legacyWorkspaceSequence"]
         if previous == target:
@@ -1618,15 +1646,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 for message_id, target in self._pending_ambient_wakes.items()
                 if message_id in remaining_ids
             ),
-            # Migrated scalar anchors precede live positions in their rebound
-            # epoch. Their old sequences order only that legacy group; they are
-            # never compared with a current-epoch sequence or checkpoint.
-            key=lambda item: (
-                item[1]["position"]["epoch"],
-                0 if "legacyWorkspaceSequence" in item[1] else 1,
-                int(item[1].get("legacyWorkspaceSequence", item[1]["position"]["sequence"])),
-                item[0],
-            ),
+            # The durable ordinal records admission chronology across epochs.
+            # UUID spelling and sequences from different epochs cannot order it.
+            key=lambda item: int(item[1]["recoveryOrder"]),
         )
         for message_id, target in ordered:
             if (

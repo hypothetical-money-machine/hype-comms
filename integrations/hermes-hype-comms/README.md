@@ -363,16 +363,19 @@ ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
 mode `0600`. Version 4 stores the workspace `{epoch, sequence}` checkpoint,
 per-conversation pending read targets, and at most 4,096 unfinished ambient-turn
 anchors. Each anchor contains a workspace position, message, conversation,
-author and thread-root IDs, a conversation sequence, and a timestamp. It contains
-no message text or credentials.
+author and thread-root IDs, a conversation sequence, a timestamp, and a unique
+positive `recoveryOrder` ordinal. It contains no message text or credentials.
 
 Migration accepts two strict version-3 formats: an epoch position with read targets,
 and the older scalar checkpoint with read targets and ambient anchors. Scalar
 checkpoints restart from a fresh bootstrap position; validated read targets and
-ambient identities remain pending. The old scalar sequence is retained only as `legacyWorkspaceSequence` for ordering
-the migrated anchors before newer live wakes. It is never compared with an epoch
-sequence or checkpoint. Epoch checkpoints retain their position when the bootstrap epoch
-matches, and use the fresh bootstrap position when it changes. Unknown, mixed or
+ambient identities remain pending. The old scalar sequence is retained as
+`legacyWorkspaceSequence` provenance and orders only the initial migrated anchors
+when assigning their durable ordinals.
+Recovery then uses `recoveryOrder` across all epochs; newly retained anchors follow
+the maximum pending ordinal. Epoch UUID spelling and legacy scalars are never
+compared with current checkpoint sequences. Epoch checkpoints retain their position
+when the bootstrap epoch matches, and use the fresh bootstrap position when it changes. Unknown, mixed or
 malformed state fails startup. Version 1 and 2 scalar formats also use a fresh
 bootstrap; version 2 read targets are retained.
 

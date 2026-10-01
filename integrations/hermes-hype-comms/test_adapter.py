@@ -1695,6 +1695,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         malformed = [
             {**valid, "pendingAmbientWakes": []},
             {**valid, "pendingAmbientWakes": {"bad-id": valid["pendingAmbientWakes"][anchor_id]}},
+            {**valid, "pendingAmbientWakes": {
+                anchor_id: valid["pendingAmbientWakes"][anchor_id],
+                message_id_for("102"): valid["pendingAmbientWakes"][anchor_id],
+            }},
+            {**valid, "pendingAmbientWakes": {anchor_id: {
+                key: value for key, value in valid["pendingAmbientWakes"][anchor_id].items()
+                if key != "recoveryOrder"
+            }}},
         ]
         for target_field, value in (
             ("position", {"epoch": PROTOCOL_EPOCH, "sequence": "-1"}),
@@ -1703,6 +1711,9 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ("authorId", None),
             ("threadRootId", "bad-id"),
             ("createdAt", "yesterday"),
+            ("recoveryOrder", "0"),
+            ("recoveryOrder", "01"),
+            ("recoveryOrder", True),
             ("body", "must not persist message text"),
         ):
             target = {**valid["pendingAmbientWakes"][anchor_id], target_field: value}
@@ -1880,6 +1891,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                     if wakes:
                         target = writes[0]["pendingAmbientWakes"][message_id_for("101")]
                         self.assertEqual(target["position"], position("500"))
+                        self.assertEqual(target["recoveryOrder"], "1")
                         self.assertNotIn("workspaceSequence", target)
                         self.assertEqual(target["authorId"], USER_ID)
                         self.assertIn("fresh authorized server context", restarted.handled_events[0].text)
@@ -1906,6 +1918,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         for target in migrated["pendingAmbientWakes"].values():
             self.assertEqual(target["position"], position("500"))
             self.assertIn(target["legacyWorkspaceSequence"], {"601", "602"})
+        self.assertEqual(migrated["pendingAmbientWakes"][message_id_for("500")]["recoveryOrder"], "1")
+        self.assertEqual(migrated["pendingAmbientWakes"][message_id_for("100")]["recoveryOrder"], "2")
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(startup_specs("500") + [
             ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch),
@@ -1987,6 +2001,102 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(restarted._cursor), new_position)
         finally:
             await restarted.disconnect()
+
+    async def test_mixed_epoch_failed_wakes_recover_in_original_order_after_restart(self) -> None:
+        seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")
+        old_epoch = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        new_epoch = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        old_id, new_id = message_id_for("101"), message_id_for("6")
+        source["cursor"]["epoch"] = old_epoch
+        source["pendingAmbientWakes"][old_id]["position"]["epoch"] = old_epoch
+        seed._cursor_path.write_text(json.dumps(source))
+        message_event("101", CHANNEL_ID, USER_ID, body="older authorized recovery context")
+        live = message_event("6", CHANNEL_ID, USER_ID, body="newer authorized live context")
+        live["position"]["epoch"] = new_epoch
+        fresh_position = {"epoch": new_epoch, "sequence": "5"}
+        checkpoint = {"epoch": new_epoch, "sequence": "6"}
+        fresh = bootstrap("5")
+        fresh["syncCursor"] = fresh_position
+
+        def factory_after(after: dict[str, str]) -> FakeProcessFactory:
+            startup = startup_specs("5")
+            startup[1] = ProcessSpec(("workspace", "bootstrap", "--json"), json_process(fresh))
+            return FakeProcessFactory(startup + [ProcessSpec(
+                ("watch", "--json", "--after", json.dumps(after, separators=(",", ":"))),
+                FakeWatchProcess(blocking=True),
+            )])
+
+        first_factory = factory_after(fresh_position)
+        first = self.new_adapter(first_factory)
+        gateway = FakeTurnGateway(first)
+        gateway.results = {old_id: {"failed": True}, new_id: {"failed": True}}
+        first.gateway_runner = gateway
+
+        async def fail_decision(event: Any) -> dict[str, Any]:
+            return await gateway._run_agent_inner(
+                source=event.source, event_message_id=event.message_id
+            )
+
+        first.set_message_handler(fail_decision)
+        try:
+            self.assertTrue(await first.connect())
+            await first._accept_event(live)
+            self.assertEqual(gateway.turns, [old_id, new_id])
+            persisted = json.loads(seed._cursor_path.read_text())
+            self.assertEqual(persisted["cursor"], checkpoint)
+            self.assertEqual(persisted["pendingReadCursors"], source["pendingReadCursors"])
+            wakes = persisted["pendingAmbientWakes"]
+            self.assertEqual(set(wakes), {old_id, new_id})
+            self.assertEqual(wakes[old_id]["position"], {"epoch": old_epoch, "sequence": "101"})
+            self.assertEqual(wakes[new_id]["position"], checkpoint)
+            self.assertEqual(wakes[old_id]["recoveryOrder"], "1")
+            self.assertEqual(wakes[new_id]["recoveryOrder"], "2")
+            self.assertEqual(first._admitted_ambient_wakes, set())
+        finally:
+            await first.disconnect()
+
+        # Restart from the persisted file after both turns were admitted and
+        # failed. UUID sort order and per-epoch sequence order both put the newer
+        # wake first; the durable recovery ordinal must preserve chronology.
+        second_factory = factory_after(checkpoint)
+        second = self.new_adapter(second_factory)
+        decisions: list[str] = []
+        authorization_calls: list[tuple[str, Optional[str], Optional[str]]] = []
+
+        async def decide(event: Any) -> str:
+            decisions.append(event.message_id)
+            return "NO_REPLY"
+
+        def authorize(user_id: str, chat_type: Optional[str], chat_id: Optional[str]) -> bool:
+            authorization_calls.append((user_id, chat_type, chat_id))
+            return True
+
+        second.set_message_handler(decide)
+        second.set_authorization_check(authorize)
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
+
+        def capture(source_path: Any, destination: Any) -> None:
+            if Path(destination) == seed._cursor_path:
+                writes.append(json.loads(Path(source_path).read_text()))
+            real_replace(source_path, destination)
+
+        try:
+            with patch.object(adapter_module.os, "replace", side_effect=capture):
+                self.assertTrue(await second.connect())
+            self.assertEqual(decisions, [old_id, new_id])
+            self.assertEqual([call["args"][5] for call in context_calls(second_factory)], decisions)
+            self.assertEqual(authorization_calls, [(USER_ID, "channel", CHANNEL_ID)] * 4)
+            self.assertIn("older authorized recovery context", second.handled_events[0].text)
+            self.assertIn("newer authorized live context", second.handled_events[1].text)
+            self.assertTrue(writes)
+            self.assertTrue(all(state["cursor"] == checkpoint for state in writes))
+            final = json.loads(seed._cursor_path.read_text())
+            self.assertEqual(final["pendingAmbientWakes"], {})
+            self.assertEqual(final["pendingReadCursors"], source["pendingReadCursors"])
+            self.assertEqual(json.loads(second._cursor), checkpoint)
+        finally:
+            await second.disconnect()
 
     async def test_ambiguous_and_malformed_v3_shapes_fail_without_state_rewrite(self) -> None:
         seed, ambient = self.write_cursor_fixture("cursor-v3-ambient.json")
