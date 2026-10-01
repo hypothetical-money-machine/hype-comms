@@ -548,8 +548,9 @@ export class WorkspaceAuthorization {
     identity: AuthenticatedIdentity,
     memberIds: readonly string[],
   ): Promise<void> {
-    const actorId = identity.currentUser.user.id;
-    const participantIds = [...new Set([actorId, ...memberIds])].sort();
+    const actorId = identity.currentUser.user.id.toLowerCase();
+    const canonicalMemberIds = memberIds.map((id) => id.toLowerCase());
+    const participantIds = [...new Set([actorId, ...canonicalMemberIds])].sort();
     const result = await client.query<{ id: string } & QueryResultRow>(
       `SELECT membership.user_id AS id
          FROM workspace_memberships AS membership
@@ -566,7 +567,7 @@ export class WorkspaceAuthorization {
     if (!activeIds.has(actorId)) {
       throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
     }
-    if (memberIds.some((id) => !activeIds.has(id))) {
+    if (canonicalMemberIds.some((id) => !activeIds.has(id))) {
       throw new ApiError(404, "NOT_FOUND", "One or more members were not found");
     }
     // Membership rows are locked in deterministic UUID order before the workspace row. Agent
