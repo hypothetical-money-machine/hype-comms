@@ -3,7 +3,7 @@ import { deferred } from "./test-support/deferred";
 import { serverResponse } from "./test-support/server-response";
 import { DesktopSessionLifecycle } from "./desktop-session-lifecycle";
 import { scopedWorkspaceSession } from "./scoped-workspace-session";
-import { WorkspaceSessionOwner } from "./workspace-session-owner";
+import { OwnedWorkspaceSession, WorkspaceSessionOwner } from "./workspace-session-owner";
 import { WorkspaceTransport } from "./workspace-transport";
 
 import type {
@@ -31,6 +31,7 @@ const NOW = "2026-07-24T12:00:00.000Z";
 const CURRENT_USER_URL = "https://chat.example/v2/auth/me";
 const SESSION_REFRESH_URL = "https://chat.example/v2/auth/session/refresh";
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const TWENTY_NINE_DAYS_MS = 29 * 24 * 60 * 60 * 1000;
 const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 const FIVE_MINUTES_MS = 5 * 60_000;
 const AUTHKIT_CODE = "C".repeat(43);
@@ -113,6 +114,14 @@ class MemoryAuthenticatedContexts implements AuthenticatedSessionContextPersiste
     this.credential = null;
     this.session = null;
   }
+}
+
+function deferredSignal(): { readonly promise: Promise<void>; readonly release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -1068,7 +1077,7 @@ describe("ChatSession renewal", () => {
     }, cookies);
   }
 
-  it("rotates the stored credential before the thirty-day window lapses", async () => {
+  it("checks twice a day but rotates only when the renewal window begins", async () => {
     const requests: string[] = [];
     const cookies = storedIdentityCookies();
     const session = createRenewingSession(() => emptyResponse(), cookies, requests);
@@ -1078,9 +1087,278 @@ describe("ChatSession renewal", () => {
 
     await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
 
+    expect(rotations(requests)).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(TWENTY_NINE_DAYS_MS - TWELVE_HOURS_MS);
+
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
     expect(cookies.removals).toEqual([]);
+    session.stop();
+  });
+
+  it("retries a request that loses a race with credential rotation", async () => {
+    const requests: string[] = [];
+    const cookies = storedIdentityCookies();
+    let productAttempts = 0;
+    let notifyFirstRequest: (() => void) | undefined;
+    let releaseFirstRequest: (() => void) | undefined;
+    const firstRequestStarted = new Promise<void>((resolve) => {
+      notifyFirstRequest = resolve;
+    });
+    const firstRequestMayFinish = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    const session = createSession(async (url, init) => {
+      requests.push(`${init.method} ${url}`);
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        cookies.expirations.set("hype_comms_session", (Date.now() + THIRTY_DAYS_MS) / 1000);
+        return emptyResponse();
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        notifyFirstRequest?.();
+        await firstRequestMayFinish;
+        return emptyResponse(401);
+      }
+      return jsonResponse({ ok: true });
+    }, cookies);
+
+    await session.restore();
+    const productRequest = session.fetch("https://chat.example/v2/product", { method: "GET" });
+    await firstRequestStarted;
+    await session.renewSession();
+    releaseFirstRequest?.();
+
+    await expect(productRequest).resolves.toMatchObject({ status: 200 });
+    expect(productAttempts).toBe(2);
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("rotated-identity-cookie");
+    session.stop();
+  });
+
+  it("does not replay a request after sign-out and same-user sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    let notifyFirstRequest!: () => void;
+    let releaseFirstRequest!: () => void;
+    const firstRequestStarted = new Promise<void>((resolve) => {
+      notifyFirstRequest = resolve;
+    });
+    const firstRequestMayFinish = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    let productAttempts = 0;
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url.endsWith("/v2/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v2/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        notifyFirstRequest();
+        await firstRequestMayFinish;
+        return emptyResponse(401);
+      }
+      return emptyResponse();
+    }, cookies);
+
+    await session.restore();
+    const productRequest = session.fetch("https://chat.example/v2/messages/message-1", {
+      method: "DELETE",
+    });
+    await firstRequestStarted;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    const productOutcome = expect(productRequest).rejects.toThrow(
+      "Workspace request session changed",
+    );
+    releaseFirstRequest();
+
+    await productOutcome;
+    expect(productAttempts).toBe(1);
+    expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    session.stop();
+  });
+
+  it("does not replay a mutation when sign-in changes while cancelling a stale response", async () => {
+    const cookies = storedIdentityCookies();
+    const firstStarted = deferredSignal();
+    const firstCanFinish = deferredSignal();
+    const cancellationStarted = deferredSignal();
+    const cancellationCanFinish = deferredSignal();
+    const productCredentials: (string | undefined)[] = [];
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      if (url.endsWith("/v2/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v2/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productCredentials.push(cookies.values.get("hype_comms_session"));
+      if (productCredentials.length === 1) {
+        firstStarted.release();
+        await firstCanFinish.promise;
+        return serverResponse(
+          new ReadableStream({
+            async cancel() {
+              cancellationStarted.release();
+              await cancellationCanFinish.promise;
+            },
+          }),
+          { status: 401 },
+        );
+      }
+      return emptyResponse();
+    }, cookies);
+
+    await session.restore();
+    const outcome = session
+      .fetch("https://chat.example/v2/messages/message-1", { method: "DELETE" })
+      .catch((error: unknown) => error);
+    await firstStarted.promise;
+    await session.renewSession();
+    firstCanFinish.release();
+    await cancellationStarted.promise;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    cancellationCanFinish.release();
+
+    expect(await outcome).toEqual(new ChatSessionError("Workspace request session changed"));
+    expect(productCredentials).toEqual(["identity-cookie"]);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("rejects a retry response from before sign-out and same-user sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    const firstStarted = deferredSignal();
+    const firstCanFinish = deferredSignal();
+    const retryStarted = deferredSignal();
+    const retryCanFinish = deferredSignal();
+    let productAttempts = 0;
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      if (url.endsWith("/v2/auth/session") && init.method === "DELETE") {
+        return emptyResponse();
+      }
+      if (url.endsWith("/v2/auth/session") && init.method === "POST") {
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      productAttempts += 1;
+      if (productAttempts === 1) {
+        firstStarted.release();
+        await firstCanFinish.promise;
+        return emptyResponse(401);
+      }
+      retryStarted.release();
+      await retryCanFinish.promise;
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const outcome = session
+      .fetch("https://chat.example/v2/product", { method: "GET" })
+      .catch((error: unknown) => error);
+    await firstStarted.promise;
+    await session.renewSession();
+    firstCanFinish.release();
+    await retryStarted.promise;
+    await session.signOut();
+    await session.exchangeMagicLink(TOKEN);
+    retryCanFinish.release();
+
+    expect(await outcome).toEqual(new ChatSessionError("Workspace request session changed"));
+    expect(productAttempts).toBe(2);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("ignores a rejected response queued for sign-out behind a new sign-in", async () => {
+    const cookies = storedIdentityCookies();
+    const exchangeStarted = deferredSignal();
+    const exchangeCanFinish = deferredSignal();
+    const session = createSession(async (url, init) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url.endsWith("/v2/auth/session") && init.method === "POST") {
+        exchangeStarted.release();
+        await exchangeCanFinish.promise;
+        cookies.values.set("hype_comms_session", "replacement-identity-cookie");
+        return jsonResponse(CURRENT_USER);
+      }
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v2/product");
+    const exchange = session.exchangeMagicLink(TOKEN);
+    await exchangeStarted.promise;
+    const signOut = session.markSignedOut(response);
+    exchangeCanFinish.release();
+    await exchange;
+    await signOut;
+
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("replacement-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("ignores a rejected response after its credential was renewed", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(async (url) => {
+      if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+      if (url === SESSION_REFRESH_URL) {
+        cookies.values.set("hype_comms_session", "rotated-identity-cookie");
+        return emptyResponse();
+      }
+      return emptyResponse(401);
+    }, cookies);
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v2/product");
+    await session.renewSession();
+    await session.markSignedOut(response);
+
+    expect(cookies.removals).toEqual([]);
+    expect(cookies.values.get("hype_comms_session")).toBe("rotated-identity-cookie");
+    expect(session.state).toMatchObject({ status: "signed-in" });
+    session.stop();
+  });
+
+  it("clears a credential when its own authenticated request is rejected", async () => {
+    const cookies = storedIdentityCookies();
+    const session = createSession(
+      async (url) => (url === CURRENT_USER_URL ? jsonResponse(CURRENT_USER) : emptyResponse(401)),
+      cookies,
+    );
+
+    await session.restore();
+    const response = await session.fetch("https://chat.example/v2/product");
+    await session.markSignedOut(response);
+
+    expect(cookies.values.has("hype_comms_session")).toBe(false);
+    expect(session.state).toEqual({ status: "signed-out" });
     session.stop();
   });
 
@@ -1090,7 +1368,7 @@ describe("ChatSession renewal", () => {
     const session = createRenewingSession(() => emptyResponse(503), cookies, requests);
 
     await session.restore();
-    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+    await session.renewSession();
 
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
@@ -1114,7 +1392,7 @@ describe("ChatSession renewal", () => {
     );
 
     await session.restore();
-    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+    await session.renewSession();
 
     expect(rotations(requests)).toBe(1);
     expect(session.state).toMatchObject({ status: "signed-in" });
@@ -1133,7 +1411,7 @@ describe("ChatSession renewal", () => {
     );
 
     await session.restore();
-    await vi.advanceTimersByTimeAsync(TWELVE_HOURS_MS);
+    await session.renewSession();
 
     expect(session.state).toMatchObject({
       status: "session-unavailable",
@@ -1212,33 +1490,57 @@ describe("ChatSession request lifetime", () => {
     await expect(response).rejects.toThrow("caller cancelled");
   });
 
-  it("checks a queued passive sign-out after a replacement login finishes", async () => {
+  it("ignores a queued rejection after its lifetime retires without a credential rotation", async () => {
     const entered = deferred<void>();
     const release = deferred<void>();
     const cookies = storedIdentityCookies();
     const contexts = new MemoryAuthenticatedContexts();
-    let current = true;
     const session = createSession(
       async (url) => {
-        if (url === CURRENT_USER_URL) return jsonResponse(OTHER_USER);
-        entered.resolve();
-        await release.promise;
-        return jsonResponse(OTHER_USER);
+        if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+        if (url === SESSION_REFRESH_URL) {
+          entered.resolve();
+          await release.promise;
+          return emptyResponse(503);
+        }
+        return emptyResponse(401);
       },
       cookies,
       "production",
       contexts,
     );
-    const exchange = session.exchangeMagicLink(TOKEN);
-    await entered.promise;
-    const oldRejection = session.markSignedOut(() => current);
-    current = false;
-    release.resolve();
-    await exchange;
-    await oldRejection;
-    expect(session.state).toMatchObject({ status: "signed-in", userId: OTHER_USER.user.id });
-    expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
-    expect(contexts.session?.userId).toBe(OTHER_USER.user.id);
-    await session.markSignedOut();
+    const lifetime = new OwnedWorkspaceSession({
+      userId: CURRENT_USER.user.id,
+      workspaceId: CURRENT_USER.workspaceId,
+      generation: 1,
+    });
+    const scoped = scopedWorkspaceSession(session, lifetime);
+    try {
+      await session.restore();
+      const response = await scoped.fetch(API_ORIGIN + "/v2/product");
+      const renewal = session.renewSession();
+      await entered.promise;
+      const oldRejection = scoped.markSignedOut(response);
+      await lifetime.dispose();
+      release.resolve();
+      await renewal;
+      await expect(oldRejection).resolves.toBe(false);
+      expect(session.state).toMatchObject({ status: "signed-in", userId: CURRENT_USER.user.id });
+      expect(cookies.removals).toEqual([]);
+      expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+      expect(contexts.session?.userId).toBe(CURRENT_USER.user.id);
+
+      const currentLifetime = new OwnedWorkspaceSession({ ...lifetime.scope, generation: 2 });
+      const current = scopedWorkspaceSession(session, currentLifetime);
+      const currentResponse = await current.fetch(API_ORIGIN + "/v2/product");
+      await expect(current.markSignedOut(currentResponse)).resolves.toBe(true);
+      expect(session.state).toEqual({ status: "signed-out" });
+      expect(cookies.values.has("hype_comms_session")).toBe(false);
+      await currentLifetime.dispose();
+    } finally {
+      release.resolve();
+      session.stop();
+      await lifetime.dispose();
+    }
   });
 });

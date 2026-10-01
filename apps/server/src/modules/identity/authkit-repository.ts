@@ -23,7 +23,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { withTransaction } from "../../db/pool.js";
 import {
-  IdentityRepository,
+  insertDeviceSession,
   lockHumanActivationSyncAudienceMemberships,
   publishHumanActivationSyncEvents,
 } from "./repository.js";
@@ -770,7 +770,7 @@ export class AuthKitRepository {
       );
       if (consumed.rowCount !== 1) throw new AuthKitCredentialRejectedError();
 
-      await new IdentityRepository(client).insertDeviceSession({
+      await insertDeviceSession(client, {
         id: randomUUID(),
         userId: entityIdSchema.parse(handoff.user_id),
         tokenHash: session.hash,

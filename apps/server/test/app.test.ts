@@ -98,6 +98,41 @@ describe("operational routes", () => {
     expect(authorized.body).toMatch(/^hype_comms_refresh_token_reuse_total 1$/m);
   });
 
+  it.each([
+    "metrics token that is at least 32 characters",
+    "metrics\ttoken-that-is-at-least-32-characters",
+    "  metrics-token-that-is-at-least-32-characters",
+    "metrics-token-that-is-at-least-32-characters  ",
+  ])("preserves the configured metrics secret %j", async (token) => {
+    const app = await buildApp({ metrics: { registry: new MetricsRegistry(), token } });
+    apps.push(app);
+
+    for (const prefix of ["Bearer ", "bearer ", "BEARER\t", "bEaReR \t  "]) {
+      const authorized = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: prefix + token },
+      });
+      expect(authorized.statusCode).toBe(200);
+    }
+
+    const incorrect = await app.inject({
+      method: "GET",
+      url: "/metrics",
+      headers: { authorization: `Bearer ${token.slice(0, -1)}x` },
+    });
+    expect(incorrect.statusCode).toBe(401);
+
+    for (const prefix of ["Basic ", "Bearer", " Bearer ", "Bearer \n", "Bearer \r\n"]) {
+      const malformed = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: prefix + token },
+      });
+      expect(malformed.statusCode).toBe(401);
+    }
+  });
+
   it("answers malformed bodies with 400 rather than an internal error", async () => {
     const app = await buildApp();
     apps.push(app);

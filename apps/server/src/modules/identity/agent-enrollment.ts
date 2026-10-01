@@ -29,8 +29,8 @@ import {
   runIdempotentMutation,
 } from "../workspace/idempotency.js";
 import { insertSyncEvent } from "../workspace/sync-events.js";
-import { IdentityRepository } from "./repository.js";
 import { hashToken } from "./tokens.js";
+import { IdentityRepository } from "./repository.js";
 const MAX_ACTIVE_MEMBERS = 25;
 const MAX_OPEN_ENROLLMENTS_PER_REQUESTER = 100;
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;

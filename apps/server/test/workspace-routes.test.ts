@@ -123,9 +123,6 @@ class FakeBotService {
 }
 
 class FakeWorkspaceRepository {
-  readonly requireGroupDirectMessagesForConversations = vi.fn(async () => undefined);
-  readonly requireGroupDirectMessagesForMessages = vi.fn(async () => undefined);
-  readonly requireGroupDirectMessagesForAttachments = vi.fn(async () => undefined);
   readonly bootstrap = vi.fn(async () => ({
     currentUser,
     workspace: {

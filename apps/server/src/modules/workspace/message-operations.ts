@@ -279,7 +279,10 @@ export class WorkspaceMessageOperations {
     private readonly events: ConversationEventWriter,
     private readonly hooks: Pick<
       WorkspaceRepositoryHooks,
-      "afterConversationLocked" | "afterMessageAuthorizationLocked" | "onAnnouncementAudit"
+      | "afterConversationLocked"
+      | "afterMessageAuthorizationLocked"
+      | "onAnnouncementAudit"
+      | "afterSearchVisibilityRead"
     > = {},
   ) {}
   async history(
@@ -729,53 +732,71 @@ export class WorkspaceMessageOperations {
     const queryHash = searchQueryHash(normalizedQuery);
     const cursor = decodeSearchCursor(after, queryHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), MESSAGE_SEARCH_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<SearchMessageRow>(
-        `WITH search_query AS (
-           SELECT websearch_to_tsquery('simple', $3) AS value
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        if (this.hooks.afterSearchVisibilityRead !== undefined) {
+          // Establish the repeatable-read snapshot before the test interleaves committed writes.
+          await client.query("SELECT 1");
+          await this.hooks.afterSearchVisibilityRead();
+        }
+        // Keep the access set in the database and compute it once before ranking. Sort only
+        // IDs and rank/sequence, then fetch bodies for the page to avoid sorting full messages.
+        const result = await client.query<SearchMessageRow>(
+          `WITH search_query AS (SELECT websearch_to_tsquery('simple', $2) AS value),
+         visible_conversations AS MATERIALIZED (
+           SELECT conversation.id
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND ${conversationVisibilitySql("conversation", "$7")}
+         ), search_page AS (
+           SELECT message.id, message.committed_workspace_sequence,
+                  ts_rank_cd(message.search_vector, search_query.value) AS search_rank
+             FROM messages AS message
+             JOIN visible_conversations AS visible ON visible.id = message.conversation_id
+            CROSS JOIN search_query
+            WHERE message.workspace_id = $1
+              AND message.deleted_at IS NULL
+              AND message.search_vector @@ search_query.value
+              AND (
+                $3::real IS NULL
+                OR (
+                  ts_rank_cd(message.search_vector, search_query.value),
+                  message.committed_workspace_sequence,
+                  message.id
+                ) < ($3::real, $4::bigint, $5::uuid)
+              )
+            ORDER BY ts_rank_cd(message.search_vector, search_query.value) DESC,
+                     message.committed_workspace_sequence DESC,
+                     message.id DESC
+            LIMIT $6
          )
-         SELECT message.*,
-                ts_rank_cd(message.search_vector, search_query.value)::text AS search_rank
-           FROM messages AS message
-           JOIN conversations AS conversation ON conversation.id = message.conversation_id
-          CROSS JOIN search_query
-          WHERE message.workspace_id = $1
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            AND message.deleted_at IS NULL
-            AND message.search_vector @@ search_query.value
-            AND (
-              $4::real IS NULL
-              OR (
-                ts_rank_cd(message.search_vector, search_query.value),
-                message.committed_workspace_sequence,
-                message.id
-              ) < ($4::real, $5::bigint, $6::uuid)
-            )
-          ORDER BY ts_rank_cd(message.search_vector, search_query.value) DESC,
-                   message.committed_workspace_sequence DESC,
-                   message.id DESC
-          LIMIT $7`,
-        [
-          identity.currentUser.workspaceId,
-          identity.currentUser.user.id,
-          normalizedQuery,
-          cursor?.rank ?? null,
-          cursor?.workspaceSequence ?? null,
-          cursor?.id ?? null,
-          pageLimit + 1,
-        ],
-      );
-      const hasMore = result.rows.length > pageLimit;
-      const selected = result.rows.slice(0, pageLimit);
-      const last = selected.at(-1);
-      return messageSearchResponseSchema.parse({
-        results: selected.map((row) => ({ message: mapMessage(row) })),
-        nextCursor: hasMore && last !== undefined ? encodeSearchCursor(last, queryHash) : null,
-      });
-    } finally {
-      client.release();
-    }
+         SELECT message.*, search_page.search_rank::text AS search_rank
+           FROM search_page
+           JOIN messages AS message ON message.id = search_page.id
+          ORDER BY search_page.search_rank DESC,
+                   search_page.committed_workspace_sequence DESC,
+                   search_page.id DESC`,
+          [
+            identity.currentUser.workspaceId,
+            normalizedQuery,
+            cursor?.rank ?? null,
+            cursor?.workspaceSequence ?? null,
+            cursor?.id ?? null,
+            pageLimit + 1,
+            identity.currentUser.user.id,
+          ],
+        );
+        const hasMore = result.rows.length > pageLimit;
+        const selected = result.rows.slice(0, pageLimit);
+        const last = selected.at(-1);
+        return messageSearchResponseSchema.parse({
+          results: selected.map((row) => ({ message: mapMessage(row) })),
+          nextCursor: hasMore && last !== undefined ? encodeSearchCursor(last, queryHash) : null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   async sendMessage(
