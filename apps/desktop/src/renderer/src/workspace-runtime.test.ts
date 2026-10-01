@@ -5357,8 +5357,18 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
     const newer = { ...task, version: 2 };
-    api.taskMutationResults.push({ task: newer, syncCursor: testPosition("11") });
+    api.taskMutationResults.push(
+      { task, syncCursor: testPosition("11") },
+      { task: newer, syncCursor: testPosition("12") },
+    );
     await runtime.createTask({ conversationId: CONVERSATION_ID, title: task.title });
+    await runtime.updateTask(task.id, {
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      assigneeId: task.assigneeId,
+      dueOn: task.dueOn,
+    });
     api.conversationTaskResults.push(
       { tasks: [task], nextCursor: "task-page-1", hasMore: true },
       { tasks: [task], nextCursor: null, hasMore: false },
