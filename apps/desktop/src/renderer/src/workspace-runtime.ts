@@ -894,7 +894,10 @@ export class WorkspaceRuntime {
             ? preferredConversationId
             : firstConversation(cached.bootstrap);
       if (openingConversationId !== null) {
-        cached = await cache.load({ conversationId: openingConversationId });
+        cached = await cache.load({
+          conversationId: openingConversationId,
+          includeAllTasks: true,
+        });
         if (generation !== this.#generation || scope !== this.#scope || cache !== this.#cache)
           return;
         if (
@@ -1556,6 +1559,9 @@ export class WorkspaceRuntime {
       });
       applied = true;
     });
+    if (applied && this.#isCurrentNotificationAction(action, currentContext, generation)) {
+      this.#ensureConversationHistory(action.conversationId);
+    }
     return applied;
   }
 
@@ -1866,6 +1872,7 @@ export class WorkspaceRuntime {
     // The serialized projection can retire quietly when a session replacement wins during an
     // awaited reaction read. Do not let its continuation open an old thread in the new scope.
     if (!projected || !this.#isProjectionCurrent(projection, conversationId)) return;
+    this.#ensureConversationHistory(conversationId);
     if (threadRootId !== null) await this.openThread(threadRootId, result.message.id);
   }
 
@@ -2754,23 +2761,24 @@ export class WorkspaceRuntime {
       ? this.#state.selectedConversationId
       : firstConversation(snapshot);
     for (const summary of snapshot.conversations) {
-      if (hydration === "selected" && summary.conversation.id !== initialConversationId) continue;
-      const history = await this.#client.getConversationMessages({
-        conversationId: summary.conversation.id,
-        limit: 50,
-      });
-      if (!isCurrent()) return false;
-      historyCursors.set(summary.conversation.id, history.nextCursor);
-      messages.push(...history.messages);
-      threadSummaries.push(...history.threadSummaries);
-      attachments.push(...(history.attachments ?? []));
-      threadsSupported &&= history.threadsSupported;
-      if (history.messages.length > 0) {
-        const hydrated = await this.#client.listMessageReactions(
-          history.messages.map((message) => message.id),
-        );
+      if (hydration === "all" || summary.conversation.id === initialConversationId) {
+        const history = await this.#client.getConversationMessages({
+          conversationId: summary.conversation.id,
+          limit: 50,
+        });
         if (!isCurrent()) return false;
-        reactions.push(...hydrated.reactions);
+        historyCursors.set(summary.conversation.id, history.nextCursor);
+        messages.push(...history.messages);
+        threadSummaries.push(...history.threadSummaries);
+        attachments.push(...(history.attachments ?? []));
+        threadsSupported &&= history.threadsSupported;
+        if (history.messages.length > 0) {
+          const hydrated = await this.#client.listMessageReactions(
+            history.messages.map((message) => message.id),
+          );
+          if (!isCurrent()) return false;
+          reactions.push(...hydrated.reactions);
+        }
       }
       if (isTaskConversation(summary, snapshot.currentUser.user.id)) {
         let after: string | undefined;
@@ -4724,7 +4732,6 @@ export class WorkspaceRuntime {
       this.#cachedConversationIds.size !== 1 ||
       !this.#cachedConversationIds.has(selected) ||
       this.#state.messages.some((message) => message.conversationId !== selected) ||
-      this.#state.tasks.some((task) => task.conversationId !== selected) ||
       this.#state.threadSummaries.some(
         (summary) => summary.latestReply.conversationId !== selected,
       ) ||
@@ -4747,7 +4754,9 @@ export class WorkspaceRuntime {
     // A normal cached startup has restored only its opening history. Catch-up updates all
     // conversations durably, but unopened histories can still wait for their first visit.
     const loaded =
-      conversationId === undefined ? await cache.load() : await cache.load({ conversationId });
+      conversationId === undefined
+        ? await cache.load()
+        : await cache.load({ conversationId, includeAllTasks: true });
     if (!this.#isProjectionCurrent(projection) || generation !== projection.generation)
       return false;
     // A person can navigate while the asynchronous cache read is pending. Preserve the complete

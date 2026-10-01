@@ -906,8 +906,16 @@ describe("main composer focus on conversation changes", () => {
 
   it("lets the reader scroll while older history is still loading", async () => {
     const harness = await renderWorkspace();
+    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValueOnce({
+      messages: [launchMessage],
+      attachments: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "older-launch",
+    });
     act(() => harness.pushNotificationAction(openMessageAction(launchMessage)));
     await screen.findByText(launchMessage.body);
+    await screen.findByRole("button", { name: "Load older messages" });
     const row = document.getElementById(`message-${launchMessage.id}`);
     const list = row?.closest<HTMLElement>(".message-list");
     if (row === null || list === null || list === undefined) throw new Error("Missing timeline");
@@ -921,7 +929,8 @@ describe("main composer focus on conversation changes", () => {
     const history = new Promise<MessageHistoryResponse>((resolve) => {
       resolveHistory = resolve;
     });
-    const request = vi.spyOn(harness.client, "getConversationMessages").mockReturnValue(history);
+    request.mockClear();
+    request.mockReturnValue(history);
     try {
       fireEvent.click(screen.getByRole("button", { name: "Load older messages" }));
       await waitFor(() => expect(request).toHaveBeenCalled());
@@ -948,6 +957,13 @@ describe("main composer focus on conversation changes", () => {
 
   it("keeps the reading position after a search jump when older history loads, but permits a new jump", async () => {
     const harness = await renderWorkspace();
+    const request = vi.spyOn(harness.client, "getConversationMessages").mockResolvedValueOnce({
+      messages: [launchMessage],
+      attachments: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "older-launch",
+    });
     const openResult = async (): Promise<void> => {
       fireEvent.click(screen.getByRole("button", { name: "Search messages" }));
       const input = await screen.findByRole("searchbox", { name: "Search messages" });
@@ -957,11 +973,12 @@ describe("main composer focus on conversation changes", () => {
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     };
     await openResult();
+    await screen.findByRole("button", { name: "Load older messages" });
     const row = document.getElementById(`message-${launchMessage.id}`);
     if (row === null) throw new Error("Search target did not render");
     const scroll = vi.spyOn(row, "scrollIntoView");
     try {
-      vi.spyOn(harness.client, "getConversationMessages").mockResolvedValue({
+      request.mockResolvedValue({
         messages: [threadRoot, launchMessage],
         attachments: [],
         threadSummaries: [],
@@ -977,6 +994,7 @@ describe("main composer focus on conversation changes", () => {
       expect(scroll).toHaveBeenLastCalledWith({ block: "center" });
     } finally {
       scroll.mockRestore();
+      request.mockRestore();
     }
   });
 

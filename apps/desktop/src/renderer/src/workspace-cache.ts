@@ -103,6 +103,8 @@ type MembershipChangedEvent = Extract<WorkspaceEvent, { type: "channel.membershi
 export interface WorkspaceCacheLoadOptions {
   /** null reads only metadata/outbox; an ID additionally reads that conversation's history. */
   readonly conversationId: string | null;
+  /** Restore the workspace task catalog independently of the requested message history. */
+  readonly includeAllTasks?: boolean;
 }
 
 export interface WorkspaceCache {
@@ -1196,7 +1198,9 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       this.#database.conversations.toArray(),
       scopedRows(this.#database.messages),
       scopedRows(this.#database.reactions),
-      scopedRows(this.#database.tasks),
+      options?.includeAllTasks === true
+        ? this.#database.tasks.toArray()
+        : scopedRows(this.#database.tasks),
       this.#database.outbox.orderBy("createdAt").toArray(),
     ]);
     const [workspacePayloads, members, conversations, messages, reactions, tasks, operations] =
@@ -2711,7 +2715,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
         )
         .sort(compareReactions),
       tasks: [...this.#tasks.values()]
-        .filter((task) => inScope(task.conversationId))
+        .filter((task) => options?.includeAllTasks === true || inScope(task.conversationId))
         .sort(compareTasks),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),

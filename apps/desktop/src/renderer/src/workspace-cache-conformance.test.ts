@@ -2006,12 +2006,29 @@ describe("workspace cache implementation parity", () => {
       expect(zebra.messages).toEqual([zebraMessage]);
       expect(zebra.tasks).toEqual([]);
       expect(zebra.reactions).toEqual([]);
+      const workspaceTasks = await cache.load({
+        conversationId: ZEBRA_ID,
+        includeAllTasks: true,
+      });
+      expect(workspaceTasks.messages).toEqual([zebraMessage]);
+      expect(workspaceTasks.reactions).toEqual([]);
+      expect(workspaceTasks.tasks).toEqual([task]);
+      expect(
+        (await cache.load({ conversationId: ZEBRA_ID, includeAllTasks: false })).tasks,
+      ).toEqual([]);
+      const tasksWithoutHistory = await cache.load({
+        conversationId: null,
+        includeAllTasks: true,
+      });
+      expect(tasksWithoutHistory.messages).toEqual([]);
+      expect(tasksWithoutHistory.tasks).toEqual([task]);
       expect((await cache.load()).messages).toEqual([zebraMessage, messageSequence2]);
       await cache.stageMembershipRepair(selfRemovedEvent);
       const removed = await cache.load({ conversationId: ALPHA_ID });
       expect(removed.messages).toEqual([]);
       expect(removed.outbox).toEqual([]);
       expect(removed.repairMarker?.eventId).toBe(selfRemovedEvent.id);
+      expect((await cache.load({ conversationId: null, includeAllTasks: true })).tasks).toEqual([]);
     }
   });
 
