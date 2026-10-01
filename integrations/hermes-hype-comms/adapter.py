@@ -961,6 +961,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
         self._ambient_handoff_failures: Dict[int, CliFailure] = {}
         self._pending_ambient_wakes: Dict[str, Dict[str, Any]] = {}
         self._admitted_ambient_wakes: set[str] = set()
+        # Durable anchors also include failed decisions. Only these IDs still
+        # await admission in this connection; admitted failures never rejoin it.
+        self._pending_ambient_admissions: set[str] = set()
         self._ambient_replay_task: Optional[asyncio.Task[Any]] = None
         self._cursor: Optional[str] = None
         self._cursor_path: Optional[Path] = None
@@ -1650,12 +1653,17 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # UUID spelling and sequences from different epochs cannot order it.
             key=lambda item: int(item[1]["recoveryOrder"]),
         )
+        blocked_conversations: set[str] = set()
+        retry_failure: Optional[CliFailure] = None
         for message_id, target in ordered:
             if (
                 message_id not in self._pending_ambient_wakes
                 or message_id in self._admitted_ambient_wakes
             ):
                 remaining_ids.discard(message_id)
+                continue
+            conversation_id = str(target["conversationId"])
+            if conversation_id in blocked_conversations:
                 continue
             replay = {
                 "type": "message.created",
@@ -1677,19 +1685,24 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 },
             }
             try:
-                if not await self._dispatch_message(replay):
+                if not await self._dispatch_message(replay, replaying_ambient=True):
                     self._complete_ambient_wake(message_id)
             except CliFailure as failure:
                 if not failure.retryable:
                     raise
                 logger.warning("Hype Comms ambient recovery is pending (%s)", failure.code)
-                return failure
+                blocked_conversations.add(conversation_id)
+                if retry_failure is None or (failure.retry_after or 0) > (
+                    retry_failure.retry_after or 0
+                ):
+                    retry_failure = failure
+                continue
             # The batch tracks admission, not successful model completion.
             # Failed model decisions stay durable for the next connection;
             # this recovery loop must not infer on them repeatedly.
             remaining_ids.discard(message_id)
         remaining_ids.intersection_update(self._pending_ambient_wakes)
-        return None
+        return retry_failure
 
     def _schedule_ambient_replay(
         self,
@@ -1701,10 +1714,11 @@ class HypeCommsAdapter(BasePlatformAdapter):
         existing = self._ambient_replay_task
         if existing is not None and not existing.done():
             return
-        # Only the new task writes its batch. New live wakes and failed model
-        # decisions do not join it; their anchors remain available on restart.
+        # A single task admits this bounded set. Watch may synchronously add a
+        # durable newer wake behind its channel's unfinished admission; failed
+        # model decisions never join again during this connection.
         self._ambient_replay_task = asyncio.create_task(
-            self._ambient_replay_loop(set(remaining_ids), failure),
+            self._ambient_replay_loop(remaining_ids, failure),
             name="hype-comms-ambient-recovery",
         )
 
@@ -1752,6 +1766,15 @@ class HypeCommsAdapter(BasePlatformAdapter):
         finally:
             if self._ambient_replay_task is task:
                 self._ambient_replay_task = None
+
+    def _has_pending_ambient_admission(self, conversation_id: str) -> bool:
+        for message_id in self._pending_ambient_admissions:
+            if message_id in self._admitted_ambient_wakes:
+                continue
+            target = self._pending_ambient_wakes.get(message_id)
+            if target is not None and target["conversationId"] == conversation_id:
+                return True
+        return False
 
     def _queue_read_cursor(
         self,
@@ -2075,7 +2098,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 self._persist_cursor(self._cursor)
 
             read_cursor_outcome = await self._flush_pending_read_cursors()
-            ambient_replay_ids = set(self._pending_ambient_wakes)
+            self._pending_ambient_admissions = set(self._pending_ambient_wakes)
+            ambient_replay_ids = self._pending_ambient_admissions
             ambient_replay_failure = await self._replay_pending_ambient_wakes(ambient_replay_ids)
 
             process = await self._spawn_watch()
@@ -3104,7 +3128,12 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # The pinned runner drains each FIFO entry as a separate model turn.
         enqueue(session_key, event, self)
 
-    async def _dispatch_message(self, event: Mapping[str, Any]) -> bool:
+    async def _dispatch_message(
+        self,
+        event: Mapping[str, Any],
+        *,
+        replaying_ambient: bool = False,
+    ) -> bool:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             raise CliFailure(
@@ -3204,6 +3233,32 @@ class HypeCommsAdapter(BasePlatformAdapter):
         if chat_info is None or author is None:
             logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
             return False
+
+        if (
+            not replaying_ambient
+            and chat_info["type"] == "channel"
+            and self._agent_user_id not in mentioned_user_ids
+            and self._has_pending_ambient_admission(conversation_id)
+        ):
+            # Check and append without yielding. An older recovery context may
+            # currently be in flight, or its FIFO retry may be sleeping. Save
+            # this newer wake and let the single admission task refetch it in
+            # channel order rather than occupy a newly freed FIFO slot first.
+            # Returning advances watch only; no read target exists until the
+            # fresh authorized context is actually handed to Hermes.
+            deferred = self._normalized_message_event(
+                text="",
+                event=event,
+                message=message,
+                mentioned_user_ids=list(mentioned_user_ids),
+                chat_info=chat_info,
+                author_id=author_id,
+                author=author,
+            )
+            self._retain_ambient_wake(deferred)
+            self._pending_ambient_admissions.add(str(deferred.message_id))
+            self._schedule_ambient_replay(self._pending_ambient_admissions, None)
+            return True
 
         anchor_message_id = str(message["id"])
         pack = await self._fetch_context_pack(
