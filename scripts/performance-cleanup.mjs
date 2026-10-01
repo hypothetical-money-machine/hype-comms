@@ -12,7 +12,13 @@ export async function removePerformanceRuntimeData(directory) {
 // Preserve the scenario error and runtime data if shutdown or evidence persistence fails.
 // Attempt result persistence even when stop() fails, and delete only after both succeed.
 export async function finishPerformanceRuntime(
-  { stop, directory, result, keepRuntimeData = false },
+  {
+    stop,
+    directory,
+    result,
+    keepRuntimeData = false,
+    removeRuntimeData = removePerformanceRuntimeData,
+  },
   scenarioError,
 ) {
   let cleanupError = null;
@@ -46,7 +52,7 @@ export async function finishPerformanceRuntime(
   }
   if (cleanupError === null && !keepRuntimeData) {
     try {
-      await removePerformanceRuntimeData(directory);
+      await removeRuntimeData(directory);
     } catch (error) {
       recordFailure(error);
       try {

@@ -171,3 +171,65 @@ test("reports a result-write failure without replacing the earlier shutdown fail
   assert.equal(report.mock.calls[0].arguments[1].path, path.join(directory, "results.json"));
   await assertRuntimeRetained(directory);
 });
+
+for (const scenarioError of [null, new Error("benchmark scenario failed")]) {
+  test(
+    scenarioError === null
+      ? "rewrites saved success results as failed and reports a runtime-removal error"
+      : "records a runtime-removal error in saved results while preserving the scenario error",
+    async (t) => {
+      const directory = await runtimeFixture(t);
+      const removalError = new Error("runtime removal failed");
+      const report = t.mock.method(console, "error", () => {});
+      const result =
+        scenarioError === null
+          ? { status: "complete", metrics: { sample: 42 } }
+          : { status: "failed", error: scenarioError.message, metrics: { sample: 42 } };
+      const beforeRemoval = structuredClone(result);
+      let stopped = false;
+      let removalAttempted = false;
+      await assert.rejects(
+        async () => {
+          try {
+            if (scenarioError !== null) throw scenarioError;
+          } finally {
+            await finishPerformanceRuntime(
+              {
+                stop: () => {
+                  stopped = true;
+                },
+                directory,
+                result,
+                removeRuntimeData: async (runtimeDirectory) => {
+                  removalAttempted = true;
+                  assert.equal(runtimeDirectory, directory);
+                  assert.equal(stopped, true);
+                  await assertRuntimeRetained(directory);
+                  assert.deepEqual(
+                    JSON.parse(await readFile(path.join(directory, "results.json"), "utf8")),
+                    beforeRemoval,
+                  );
+                  assert.equal(result.cleanupError, undefined);
+                  throw removalError;
+                },
+              },
+              scenarioError,
+            );
+          }
+        },
+        (error) => error === (scenarioError ?? removalError),
+      );
+      assert.equal(removalAttempted, true);
+      assert.deepEqual(JSON.parse(await readFile(path.join(directory, "results.json"), "utf8")), {
+        status: "failed",
+        metrics: { sample: 42 },
+        error: (scenarioError ?? removalError).message,
+        cleanupError: removalError.message,
+      });
+      await assertRuntimeRetained(directory);
+      if (scenarioError !== null) {
+        assert.equal(report.mock.calls[0].arguments[1], removalError);
+      }
+    },
+  );
+}
