@@ -138,11 +138,14 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(new Set());
   const [pendingAddIds, setPendingAddIds] = useState<ReadonlySet<string>>(new Set());
-  const [busyUserId, setBusyUserId] = useState<string | null>(null);
+  const [busyUserIds, setBusyUserIds] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState("");
   const snapshotSeqRef = useRef(0);
   const appliedSeqRef = useRef(0);
   const pendingAddIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const busyUserIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const mutationEpochRef = useRef(0);
+  const mutationCursorRef = useRef<bigint | null>(null);
   const isChannel = source === "channel";
   const conversationId = source === "channel" ? props.conversationId : null;
   const isAnnouncementChannel = source === "channel" && props.channelMode === "announcement";
@@ -162,9 +165,27 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     setPendingAddIds(ids);
   };
 
-  const applySnapshot = (seq: number, snapshot: ChannelMembersResponse): void => {
-    if (seq <= appliedSeqRef.current) return;
-    appliedSeqRef.current = seq;
+  const hasPendingMutation = (): boolean =>
+    pendingAddIdsRef.current.size > 0 || busyUserIdsRef.current.size > 0;
+
+  const applySnapshot = (
+    seq: number,
+    snapshot: ChannelMembersResponse,
+    syncCursor?: string,
+    mutationEpoch?: number,
+  ): void => {
+    if (syncCursor !== undefined) {
+      const cursor = BigInt(syncCursor);
+      if (mutationCursorRef.current !== null && cursor <= mutationCursorRef.current) return;
+      mutationCursorRef.current = cursor;
+    } else if (
+      seq <= appliedSeqRef.current ||
+      mutationEpoch !== mutationEpochRef.current ||
+      hasPendingMutation()
+    ) {
+      return;
+    }
+    appliedSeqRef.current = Math.max(appliedSeqRef.current, seq);
     const pending = pendingAddIdsRef.current;
     if (pending.size === 0) {
       setDetails(snapshot);
@@ -182,9 +203,10 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     if (load === null || conversationId === null) return;
     let active = true;
     const seq = nextSnapshotSeq();
+    const mutationEpoch = mutationEpochRef.current;
     void load(conversationId)
       .then((response) => {
-        if (active) applySnapshot(seq, response);
+        if (active) applySnapshot(seq, response, undefined, mutationEpoch);
       })
       .catch((loadError: unknown) => {
         if (active) setError(errorMessage(loadError));
@@ -263,7 +285,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const showChannelRole = details?.access === "members";
   const canManageChannel = details?.canManage === true && details.access === "members";
   const loadingChannel = isChannel && details === null && error === "";
-  const anyBusy = busyUserId !== null || pendingAddIds.size > 0;
+  const anyBusy = busyUserIds.size > 0 || pendingAddIds.size > 0;
 
   const toggleChecked = (userId: string): void => {
     setCheckedIds((current) => {
@@ -275,10 +297,11 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   };
 
   const reconcileFromServer = async (): Promise<void> => {
-    if (load === null || conversationId === null) return;
+    if (load === null || conversationId === null || hasPendingMutation()) return;
     const seq = nextSnapshotSeq();
+    const mutationEpoch = mutationEpochRef.current;
     try {
-      applySnapshot(seq, await load(conversationId));
+      applySnapshot(seq, await load(conversationId), undefined, mutationEpoch);
     } catch {
       // Keep the reconciled local state when the refresh fails.
     }
@@ -290,7 +313,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
       ids.map(async (userId) => {
         const seq = nextSnapshotSeq();
         const response = await upsert(conversationId, userId, "member");
-        applySnapshot(seq, response.channelMembers);
+        applySnapshot(seq, response.channelMembers, response.syncCursor);
       }),
     );
     const failedIds = ids.filter((_, index) => results.at(index)?.status === "rejected");
@@ -320,8 +343,11 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
 
   const addCheckedMembers = (): void => {
     if (upsert === null || conversationId === null) return;
-    const ids = checkedAvailableIds;
+    const ids = checkedAvailableIds.filter(
+      (userId) => !pendingAddIdsRef.current.has(userId) && !busyUserIdsRef.current.has(userId),
+    );
     if (ids.length === 0) return;
+    mutationEpochRef.current += 1;
     setCheckedIds(new Set());
     setError("");
     const nextPending = new Set(pendingAddIdsRef.current);
@@ -344,19 +370,27 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     userId: string,
     operation: () => Promise<ChannelMembershipMutationResponse>,
   ): Promise<void> => {
-    setBusyUserId(userId);
+    if (busyUserIdsRef.current.has(userId) || pendingAddIdsRef.current.has(userId)) return;
+    mutationEpochRef.current += 1;
+    const busy = new Set(busyUserIdsRef.current);
+    busy.add(userId);
+    busyUserIdsRef.current = busy;
+    setBusyUserIds(busy);
     setError("");
     const seq = nextSnapshotSeq();
     try {
-      applySnapshot(seq, (await operation()).channelMembers);
+      const response = await operation();
+      applySnapshot(seq, response.channelMembers, response.syncCursor);
     } catch (mutationError) {
       setError(errorMessage(mutationError));
     } finally {
-      setBusyUserId((current) => (current === userId ? null : current));
+      const remaining = new Set(busyUserIdsRef.current);
+      remaining.delete(userId);
+      busyUserIdsRef.current = remaining;
+      setBusyUserIds(remaining);
     }
-    // Snapshot seqs order responses by request start, not server commit, so a concurrent batch
-    // add can apply a later snapshot first and cause this response to be discarded as stale.
-    // Reconcile against the server so the mutation's effect always becomes visible.
+    // Only the last outstanding mutation reloads. A reload started before another action must
+    // not replace that action's snapshot when it finishes.
     await reconcileFromServer();
   };
 
@@ -476,7 +510,7 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
           <ul className="channel-member-list">
             {directory.map((entry) => {
               const kind = kindLabel(entry.user.kind);
-              const rowBusy = entry.pending || busyUserId === entry.user.id;
+              const rowBusy = entry.pending || busyUserIds.has(entry.user.id);
               const messageable = canMessage(entry.user);
               const openDirectMessage = (): void => {
                 if (!messageable || rowBusy) return;

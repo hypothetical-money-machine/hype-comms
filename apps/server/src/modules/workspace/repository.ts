@@ -1843,14 +1843,11 @@ export class WorkspaceRepository {
       // only flips the target's own membership row live, and the target was validated as an
       // active human/agent workspace member earlier in this transaction — so the post-upsert
       // audience is the pre-upsert audience plus the target, and deriving it avoids a second
-      // audience query. Accepted race: this transaction runs at READ COMMITTED and holds no lock
-      // on the target's workspace_memberships row, so a concurrent workspace-level deactivation
-      // can commit in between; a re-query would then drop the target where this derivation keeps
-      // them. That is harmless — deactivated users cannot sync — and every conversation-scoped
-      // writer is serialized by the #requireManagedChannel conversation row lock.
+      // audience query. #requireManagedChannel holds the conversation and workspace locks;
+      // normal channel mutations and workspace deactivations cannot commit in between.
       const action = current === undefined || current.left_at !== null ? "added" : "updated";
-      // The member list is stable once the membership upsert has run; read it before
-      // #insertEvent so the workspace-row event lock is held for as little time as possible.
+      // Assemble the response before inserting the event. #requireManagedChannel has already
+      // acquired the workspace lock, so this ordering does not shorten the lock duration.
       const channelMembers = await this.#channelMembers(client, identity, conversation);
       const event = await this.#insertEvent(client, identity, {
         type: "channel.membership_changed",
@@ -1913,9 +1910,8 @@ export class WorkspaceRepository {
           RETURNING *`,
         [conversationId, memberId, identity.currentUser.user.id],
       );
-      // Read the post-removal member list before any #insertEvent call so the workspace-row
-      // event lock is held for as little time as possible. #channelMembers reads only
-      // users/memberships/grants and does not depend on inserted events.
+      // Read the post-removal member list before inserting events; it does not depend on those
+      // events. #requireManagedChannel has already acquired the workspace lock.
       const channelMembers = await this.#channelMembers(client, identity, conversation);
       for (const row of unassigned.rows) {
         const task = mapTask(row);

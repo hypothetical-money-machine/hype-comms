@@ -264,7 +264,7 @@ describe("ChannelMembersDialog", () => {
     const removal = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
     const upsert = vi.fn().mockReturnValue(promote.promise);
     const remove = vi.fn().mockReturnValue(removal.promise);
-    // Reconciliation loads fail, so the rendered list depends on the snapshot seq guard alone.
+    // Reconciliation loads fail, so the rendered list depends on the server cursor guard alone.
     const load = vi
       .fn()
       .mockResolvedValueOnce(membersWith(member, agent))
@@ -296,14 +296,14 @@ describe("ChannelMembersDialog", () => {
       },
       syncCursor: "5",
     });
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull();
     const promotedRow = screen.getByText("Member").closest("li");
     if (promotedRow === null) throw new Error("Member row was not rendered");
     expect(within(promotedRow).getByText("owner")).toBeTruthy();
   });
 
-  it("reconciles a remove whose response is discarded after a concurrent batch add", async () => {
+  it("applies a later-committed remove after a concurrent batch add and then reconciles", async () => {
     const removal = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
     const remove = vi.fn().mockReturnValue(removal.promise);
     const upsert = vi.fn().mockResolvedValue({
@@ -317,9 +317,6 @@ describe("ChannelMembersDialog", () => {
     const load = vi
       .fn()
       .mockResolvedValueOnce(membersWith(member))
-      // The batch reconciliation still reads pre-remove state...
-      .mockResolvedValueOnce(membersWith(member, agent))
-      // ...and the remove's own trailing reconciliation reads the committed removal.
       .mockResolvedValue(withoutMember);
     renderChannelDialog({ workspaceMembers: [owner, member, agent], upsert, remove, load });
 
@@ -329,15 +326,15 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(within(memberRow).getByRole("button", { name: "Remove" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Hermes Agent" }));
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("Adding…")).toBeNull());
+    expect(load).toHaveBeenCalledTimes(1);
 
-    // The removal commits last; its response snapshot is stale by seq and gets discarded, so
-    // the trailing reconciliation is what makes the removal visible.
+    // The removal commits last, so its higher server cursor applies even though it started first.
     removal.resolve({ channelMembers: withoutMember, syncCursor: "7" });
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /Member @member/ })).toBeNull(),
     );
-    expect(load).toHaveBeenCalledTimes(3);
+    expect(load).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("checkbox", { name: "Member" })).toBeTruthy();
     expect(screen.getByText("Hermes Agent")).toBeTruthy();
   });
@@ -374,6 +371,113 @@ describe("ChannelMembersDialog", () => {
     pendingPromote.resolve({ channelMembers: promoted, syncCursor: "5" });
     await waitFor(() => expect(within(memberRow).getByText("owner")).toBeTruthy());
     expect(within(memberRow).getByRole("button", { name: "Make member" })).toBeTruthy();
+  });
+
+  it("keeps every mutated row locked until its own request settles", async () => {
+    const first = deferred<ChannelMembershipMutationResponse>();
+    const second = deferred<ChannelMembershipMutationResponse>();
+    const upsert = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const load = vi.fn().mockResolvedValue(membersWith(member, agent));
+    renderChannelDialog({ workspaceMembers: [owner, member, agent], load, upsert });
+
+    await screen.findByText("Hermes Agent");
+    const memberRow = screen.getByText("Member").closest("li");
+    const agentRow = screen.getByText("Hermes Agent").closest("li");
+    if (memberRow === null || agentRow === null) throw new Error("Rows missing");
+    const memberPromote = within(memberRow).getByRole("button", {
+      name: "Make owner",
+    }) as HTMLButtonElement;
+    const agentPromote = within(agentRow).getByRole("button", {
+      name: "Make owner",
+    }) as HTMLButtonElement;
+    fireEvent.click(memberPromote);
+    fireEvent.click(agentPromote);
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(memberPromote.disabled).toBe(true);
+    expect(agentPromote.disabled).toBe(true);
+    fireEvent.click(memberPromote);
+    expect(upsert).toHaveBeenCalledTimes(2);
+
+    // A failure unlocks only that row, without reloading while the other action is pending.
+    second.reject(new Error("Could not promote agent"));
+    await screen.findByRole("alert");
+    expect(agentPromote.disabled).toBe(false);
+    expect(memberPromote.disabled).toBe(true);
+    expect(load).toHaveBeenCalledTimes(1);
+    first.resolve({ channelMembers: membersWith(member, agent), syncCursor: "5" });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(memberPromote.disabled).toBe(false);
+  });
+
+  it("applies a later server commit even when its request started first and reload fails", async () => {
+    const promote = deferred<ChannelMembershipMutationResponse>();
+    const removal = deferred<ChannelMembershipMutationResponse>();
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce(membersWith(member, agent))
+      .mockRejectedValue(new Error("offline"));
+    renderChannelDialog({
+      workspaceMembers: [owner, member, agent],
+      load,
+      upsert: vi.fn().mockReturnValue(promote.promise),
+      remove: vi.fn().mockReturnValue(removal.promise),
+    });
+
+    await screen.findByText("Hermes Agent");
+    const memberRow = screen.getByText("Member").closest("li");
+    const agentRow = screen.getByText("Hermes Agent").closest("li");
+    if (memberRow === null || agentRow === null) throw new Error("Rows missing");
+    fireEvent.click(within(memberRow).getByRole("button", { name: "Make owner" }));
+    fireEvent.click(within(agentRow).getByRole("button", { name: "Remove" }));
+    removal.resolve({ channelMembers: membersWith(member), syncCursor: "9007199254740995" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull());
+    expect(load).toHaveBeenCalledTimes(1);
+
+    const promoted = { user: member, role: "owner" as const, joinedAt: NOW };
+    promote.resolve({
+      channelMembers: { ...initial, members: [...initial.members, promoted] },
+      syncCursor: "9007199254740996",
+    });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(within(memberRow).getByText("owner")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull();
+  });
+
+  it("discards an old reload after another membership action succeeds", async () => {
+    const oldReload = deferred<ChannelMembersResponse>();
+    const removal = deferred<ChannelMembershipMutationResponse>();
+    const promoted = { user: member, role: "owner" as const, joinedAt: NOW };
+    const beforeRemoval: ChannelMembersResponse = {
+      ...initial,
+      members: [...initial.members, promoted, { user: agent, role: "member", joinedAt: NOW }],
+    };
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce(membersWith(member, agent))
+      .mockReturnValueOnce(oldReload.promise)
+      .mockRejectedValue(new Error("offline"));
+    renderChannelDialog({
+      workspaceMembers: [owner, member, agent],
+      load,
+      upsert: vi.fn().mockResolvedValue({ channelMembers: beforeRemoval, syncCursor: "5" }),
+      remove: vi.fn().mockReturnValue(removal.promise),
+    });
+
+    await screen.findByText("Hermes Agent");
+    const memberRow = screen.getByText("Member").closest("li");
+    const agentRow = screen.getByText("Hermes Agent").closest("li");
+    if (memberRow === null || agentRow === null) throw new Error("Rows missing");
+    fireEvent.click(within(memberRow).getByRole("button", { name: "Make owner" }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    fireEvent.click(within(agentRow).getByRole("button", { name: "Remove" }));
+    removal.resolve({
+      channelMembers: { ...initial, members: [...initial.members, promoted] },
+      syncCursor: "6",
+    });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    oldReload.resolve(beforeRemoval);
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull());
+    expect(within(memberRow).getByText("owner")).toBeTruthy();
   });
 
   it("clears a non-empty search query on Escape without closing the dialog", async () => {
