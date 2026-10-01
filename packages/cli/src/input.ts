@@ -5,13 +5,16 @@ import type { CliIo } from "./types.js";
 
 const MAX_INPUT_BYTES = 64 * 1_024;
 
-export async function readStream(stream: NodeJS.ReadableStream): Promise<string> {
+export async function readStream(
+  stream: NodeJS.ReadableStream,
+  maxBytes = MAX_INPUT_BYTES,
+): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of stream) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
     total += buffer.length;
-    if (total > MAX_INPUT_BYTES) throw new UsageError("Input is too large", "INPUT_TOO_LARGE");
+    if (total > maxBytes) throw new UsageError("Input is too large", "INPUT_TOO_LARGE");
     chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");

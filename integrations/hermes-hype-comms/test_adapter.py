@@ -11,6 +11,8 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
+import shutil
 import sys
 import tempfile
 import types
@@ -31,106 +33,6 @@ def position(sequence: str) -> dict[str, str]:
 
 def cursor_text(sequence: str) -> str:
     return json.dumps(position(sequence), separators=(",", ":"))
-
-_CURSOR_STATE_FIXTURES = {
-    "cursor-v3-ambient.json": """
-{
-  "version": 3,
-  "cursor": "9999",
-  "pendingReadCursors": {
-    "00000000-0000-4000-8000-000000000020": {
-      "messageId": "00000000-0000-4000-8000-000000000102",
-      "conversationSequence": "102"
-    }
-  },
-  "pendingAmbientWakes": {
-    "00000000-0000-4000-8000-000000000101": {
-      "workspaceSequence": "101",
-      "conversationId": "00000000-0000-4000-8000-000000000021",
-      "conversationSequence": "101",
-      "authorId": "00000000-0000-4000-8000-000000000002",
-      "threadRootId": null,
-      "createdAt": "2026-07-26T12:00:00Z"
-    }
-  }
-}
-""",
-    "cursor-v3-ambient-ordered.json": """
-{
-  "version": 3,
-  "cursor": "9999",
-  "pendingReadCursors": {
-    "00000000-0000-4000-8000-000000000020": {
-      "messageId": "00000000-0000-4000-8000-000000000102",
-      "conversationSequence": "102"
-    }
-  },
-  "pendingAmbientWakes": {
-    "00000000-0000-4000-8000-000000000500": {
-      "workspaceSequence": "601",
-      "conversationId": "00000000-0000-4000-8000-000000000021",
-      "conversationSequence": "500",
-      "authorId": "00000000-0000-4000-8000-000000000002",
-      "threadRootId": null,
-      "createdAt": "2026-07-26T12:00:00Z"
-    },
-    "00000000-0000-4000-8000-000000000100": {
-      "workspaceSequence": "602",
-      "conversationId": "00000000-0000-4000-8000-000000000021",
-      "conversationSequence": "100",
-      "authorId": "00000000-0000-4000-8000-000000000002",
-      "threadRootId": null,
-      "createdAt": "2026-07-26T12:00:00Z"
-    }
-  }
-}
-""",
-    "cursor-v3-epoch.json": """
-{
-  "version": 3,
-  "cursor": {
-    "epoch": "eeeeeeee-0000-4000-8000-000000000001",
-    "sequence": "77"
-  },
-  "pendingReadCursors": {
-    "00000000-0000-4000-8000-000000000020": {
-      "messageId": "00000000-0000-4000-8000-000000000102",
-      "conversationSequence": "102"
-    }
-  }
-}
-""",
-    "cursor-v4-ambient.json": """
-{
-  "version": 4,
-  "cursor": {
-    "epoch": "eeeeeeee-0000-4000-8000-000000000001",
-    "sequence": "77"
-  },
-  "pendingReadCursors": {
-    "00000000-0000-4000-8000-000000000020": {
-      "messageId": "00000000-0000-4000-8000-000000000102",
-      "conversationSequence": "102"
-    }
-  },
-  "pendingAmbientWakes": {
-    "00000000-0000-4000-8000-000000000101": {
-      "position": {
-        "epoch": "eeeeeeee-0000-4000-8000-000000000001",
-        "sequence": "101"
-      },
-      "conversationId": "00000000-0000-4000-8000-000000000021",
-      "conversationSequence": "101",
-      "authorId": "00000000-0000-4000-8000-000000000002",
-      "threadRootId": null,
-      "createdAt": "2026-07-26T12:00:00Z",
-      "recoveryOrder": "1"
-    }
-  }
-}
-""",
-}
-
 
 
 class FakePlatform:
@@ -767,7 +669,15 @@ class FakeWatchProcess:
         blocking: bool = False,
     ):
         self.returncode: Optional[int] = None if blocking else returncode
-        self.stdout = FakeStream(list(lines or []), closed=not blocking)
+        wrapped = []
+        for line in lines or []:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                value = None
+            wrapped.append(adapter_envelope(value, "event") + b"\n"
+                           if isinstance(value, dict) and "adapterProtocol" not in value else line)
+        self.stdout = FakeStream(wrapped, closed=not blocking)
         self.stderr = FakeStream(list(stderr_lines or []), closed=not blocking)
         self._done = asyncio.Event()
         if not blocking:
@@ -809,7 +719,8 @@ class FakeProcessFactory:
         self.calls: list[dict[str, Any]] = []
 
     async def __call__(self, cli: str, *args: str, **kwargs: Any) -> Any:
-        argv = tuple(args)
+        assert args[0] == "--adapter-protocol=1", "Every process must require its output protocol"
+        argv = tuple(args[1:])
         if self.specs and argv == self.specs[0].args:
             spec = self.specs.popleft()
         elif (
@@ -823,14 +734,38 @@ class FakeProcessFactory:
             message_id = argv[5]
             if message_id not in _MESSAGE_CONTEXT:
                 raise AssertionError(f"No fake context for trigger: {message_id!r}")
-            spec = ProcessSpec(argv, json_process(context_pack_result(message_id)))
+            value = context_pack_result(message_id)
+            # Lifecycle fixtures use prevalidated data; the explicit context cases below
+            # run the real CLI. Keep subprocess startup out of retry-timing tests.
+            value["renderedContext"] = (
+                "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---\n"
+                "UNTRUSTED CONVERSATION CONTENT (test fixture)\n"
+                + json.dumps(value["contextPack"], separators=(",", ":"))
+                + "\n--- END HYPE COMMS CONTEXT PACK V1 ---"
+            )
+            spec = ProcessSpec(argv, json_process(value))
         else:
             expected = self.specs[0].args if self.specs else None
             raise AssertionError(f"Expected {expected!r}, got {args!r}")
-        self.calls.append({"cli": cli, "args": tuple(args), "kwargs": kwargs, "process": spec.result})
+        self.calls.append({"cli": cli, "args": argv, "wire_args": args, "kwargs": kwargs, "process": spec.result})
         if isinstance(spec.result, BaseException):
             raise spec.result
-        return spec.result
+        process = spec.result
+        if isinstance(process, FakeProcess) and process.returncode == 0:
+            try:
+                value = json.loads(process._communicate_stdout)
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and "contextPack" in value and "renderedContext" not in value:
+                # Run the real CLI validation/rendering for context fixtures. These tests
+                # now exercise the cross-language boundary instead of a Python schema copy.
+                result = render_with_cli(value, argv[2], argv[5], int(argv[7]))
+                process._communicate_stdout = result.stdout
+                process._communicate_stderr = result.stderr
+                process.returncode = result.returncode
+            elif isinstance(value, dict) and "adapterProtocol" not in value:
+                process._communicate_stdout = adapter_envelope(value, "result")
+        return process
 
 
 def send_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
@@ -839,6 +774,21 @@ def send_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
 
 def context_calls(factory: FakeProcessFactory) -> list[dict[str, Any]]:
     return [call for call in factory.calls if call["args"][:2] == ("messages", "history")]
+
+
+def adapter_envelope(value: dict[str, Any], kind: str) -> bytes:
+    return json.dumps({"adapterProtocol": 1, "kind": kind, "data": value}).encode("utf-8")
+
+
+def render_with_cli(value: dict[str, Any], conversation: str, anchor: str, limit: int = 8) -> subprocess.CompletedProcess[bytes]:
+    cli = Path(__file__).resolve().parents[2] / "packages/cli/dist/bin.js"
+    node = shutil.which("node")
+    assert node is not None and cli.exists(), "Build the CLI before running Hermes tests"
+    return subprocess.run(
+        [node, str(cli), "--adapter-protocol=1", "adapter", "render-context", conversation,
+         "--through-message-id", anchor, "--limit", str(limit), "--json"],
+        input=json.dumps(value).encode("utf-8"), capture_output=True, timeout=10, check=False,
+    )
 
 
 def json_process(value: dict[str, Any]) -> FakeProcess:
@@ -1562,32 +1512,31 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter, gateway, factory, key, _watch = await self.deferred_recovery_fixture(
             count=3, capacity=1
         )
-        sleeping, resume = asyncio.Event(), asyncio.Event()
+        backoffs: asyncio.Queue[int] = asyncio.Queue()
+        resume = asyncio.Event()
 
         async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
-            del attempt, retry_after
-            sleeping.set()
+            del retry_after
+            backoffs.put_nowait(attempt)
             await resume.wait()
             resume.clear()
-            sleeping.clear()
 
         self.control_ambient_replay_wait(adapter, controlled_backoff)
         failed_id = message_id_for("101")
         gateway.results[failed_id] = {"failed": True, "final_response": ""}
         try:
             self.assertTrue(await adapter.connect())
-            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            self.assertEqual(await asyncio.wait_for(backoffs.get(), timeout=0.5), 1)
             task = adapter._ambient_replay_task
             await self.finish_recovery_fifo(adapter, gateway, key)
             resume.set()
 
-            async def finish_second_turn() -> None:
-                while key not in adapter._pending_messages:
-                    await asyncio.sleep(0)
-                await self.finish_recovery_fifo(adapter, gateway, key)
-
-            await asyncio.wait_for(finish_second_turn(), timeout=0.5)
-            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            # Keep the second turn queued until the worker has tried the third
+            # anchor and entered its next capacity backoff.
+            self.assertEqual(await asyncio.wait_for(backoffs.get(), timeout=0.5), 2)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 1)
+            self.assertEqual(adapter._pending_messages[key].message_id, message_id_for("102"))
+            await self.finish_recovery_fifo(adapter, gateway, key)
             resume.set()
             await asyncio.wait_for(task, timeout=0.5)
             await self.finish_recovery_fifo(adapter, gateway, key)
@@ -2359,7 +2308,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
     def write_cursor_fixture(self, filename: str) -> tuple[Any, dict[str, Any]]:
         seed = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(seed)
-        source = json.loads(_CURSOR_STATE_FIXTURES[filename])
+        fixture = Path(__file__).parent / "test-fixtures" / filename
+        source = json.loads(fixture.read_text(encoding="utf-8"))
         seed._cursor_path.write_text(json.dumps(source), encoding="utf-8")
         return seed, source
 
@@ -2414,7 +2364,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await restarted.disconnect()
 
-
     async def test_legacy_ambient_order_survives_migration_and_v4_restart(self) -> None:
         seed, source = self.write_cursor_fixture("cursor-v3-ambient-ordered.json")
         message_event("500", CHANNEL_ID, USER_ID, body="first original queued wake")
@@ -2452,7 +2401,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         finally:
             await restarted.disconnect()
 
-
     async def test_v3_ambient_migration_rechecks_authorization_before_refetch(self) -> None:
         seed, _source = self.write_cursor_fixture("cursor-v3-ambient.json")
         watch = FakeWatchProcess(blocking=True)
@@ -2472,6 +2420,29 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         finally:
             await restarted.disconnect()
 
+    async def test_v3_epoch_cursor_migrates_to_v4_without_rewinding(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter._cursor_path.write_text(json.dumps({
+            "version": 3,
+            "cursor": position("101"),
+            "pendingReadCursors": {
+                DM_ID: {
+                    "messageId": message_id_for("101"),
+                    "conversationSequence": "101",
+                },
+            },
+        }), encoding="utf-8")
+
+        cursor = adapter._load_cursor()
+        self.assertEqual(cursor, cursor_text("101"))
+        self.assertTrue(adapter._state_needs_migration)
+        adapter._persist_cursor(cursor)
+        migrated = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["version"], 4)
+        self.assertEqual(migrated["cursor"], position("101"))
+        self.assertEqual(migrated["pendingReadCursors"][DM_ID]["messageId"], message_id_for("101"))
+        self.assertEqual(migrated["pendingAmbientWakes"], {})
 
     async def test_v4_restart_uses_new_epoch_without_rewinding_or_losing_recovery(self) -> None:
         seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")
@@ -2514,7 +2485,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(restarted._cursor), new_position)
         finally:
             await restarted.disconnect()
-
 
     async def test_mixed_epoch_failed_wakes_recover_in_original_order_after_restart(self) -> None:
         seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")
@@ -2612,10 +2582,9 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         finally:
             await second.disconnect()
 
-
     async def test_ambiguous_and_malformed_v3_shapes_fail_without_state_rewrite(self) -> None:
         seed, ambient = self.write_cursor_fixture("cursor-v3-ambient.json")
-        epoch = json.loads(_CURSOR_STATE_FIXTURES["cursor-v3-epoch.json"])
+        epoch = json.loads((Path(__file__).parent / "test-fixtures" / "cursor-v3-epoch.json").read_text())
         bad_anchor = dict(ambient["pendingAmbientWakes"][message_id_for("101")])
         malformed = [
             {**ambient, "cursor": position("77")},
@@ -2643,8 +2612,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await restarted.disconnect()
 
-
-    async def test_v2_cursor_migrates_to_v4_with_bootstrap_and_read_targets(self) -> None:
+    async def test_v2_cursor_migrates_to_v4_without_losing_read_targets(self) -> None:
         seed = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(seed, cursor="77")
         seed._cursor_path.write_text(
@@ -2944,7 +2912,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(adapter.handled_events), 1)
         dispatched = adapter.handled_events[0]
         lines = dispatched.text.splitlines()
-        self.assertEqual(lines[0], "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---")
+        self.assertEqual(lines[1], "--- BEGIN HYPE COMMS CONTEXT PACK V1 ---")
         self.assertEqual(lines[-1], "--- END HYPE COMMS CONTEXT PACK V1 ---")
         rendered = json.loads(lines[-2])
         self.assertEqual(
@@ -2999,11 +2967,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         noncanonical_adapter = self.new_adapter(noncanonical_factory)
         self.prepare_adapter(noncanonical_adapter)
 
-        with self.assertRaises(adapter_module.CliFailure) as caught:
-            await noncanonical_adapter._accept_event(trigger)
-
-        self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
-        self.assertEqual(noncanonical_adapter.handled_events, [])
+        await noncanonical_adapter._accept_event(trigger)
+        rendered = json.loads(noncanonical_adapter.handled_events[0].text.splitlines()[-2])
+        self.assertEqual(rendered["messages"][0]["author"]["username"], "morgan")
+        self.assertEqual(rendered["messages"][0]["author"]["displayName"], HUMAN_USER["displayName"])
 
     async def test_context_author_metadata_uses_utf16_lengths(self) -> None:
         anchor_id = message_id_for("101")
@@ -3024,10 +2991,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(valid_adapter.handled_events), 1)
 
-        for field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
-            with self.subTest(field=field):
+        for author_field, value in (("username", "😀" * 41), ("displayName", "😀" * 61)):
+            with self.subTest(field=author_field):
                 response = context_pack_result(anchor_id)
-                response["contextPack"]["messages"][0]["author"][field] = value
+                response["contextPack"]["messages"][0]["author"][author_field] = value
                 factory = FakeProcessFactory(
                     [
                         ProcessSpec(
@@ -3243,8 +3210,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLessEqual(
             len(accepted_text.encode("utf-8")),
-            adapter_module.MAX_CONTEXT_PACK_BYTES
-            + adapter_module._CONTEXT_PACK_RENDER_OVERHEAD_BYTES,
+            adapter_module.MAX_RENDERED_CONTEXT_PACK_BYTES,
         )
 
         expanded_response = separator_response(5, 3_500)
@@ -3254,10 +3220,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             separators=(",", ":"),
         ).encode("utf-8")
         self.assertLessEqual(len(raw_json), adapter_module.MAX_CONTEXT_PACK_BYTES)
-        safe_json = adapter_module._injection_safe_context_json(
-            expanded_response["contextPack"]
-        ).encode("utf-8")
-        self.assertGreater(len(safe_json), adapter_module.MAX_CONTEXT_PACK_BYTES)
         rejected_factory = FakeProcessFactory(
             [
                 ProcessSpec(
@@ -3528,7 +3490,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await adapter.get_chat_info(PEER_AGENT_DM_ID))["name"], "Direct message"
         )
-        # The watch cursor advances from the event's own position;
+        # The watch cursor advances from the event's own workspaceSequence;
         # the reload's bootstrap cursor ("150") is discarded, not assigned.
         self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(adapter._load_cursor(), cursor_text("101"))
@@ -3841,15 +3803,15 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.code, "INVALID_MEMBERSHIP_EVENT")
         self.assertEqual(adapter._cursor, cursor_text("100"))
 
-    async def test_unrecognized_event_type_is_ignored_without_advancing_cursor(self) -> None:
+    async def test_validated_event_without_a_hermes_action_advances_cursor(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)
         unknown = event("reaction.added", "101", {"reaction": "thumbsup"})
 
         outcome = await adapter._accept_event(unknown)
 
-        self.assertEqual(outcome, "ignored")
-        self.assertEqual(adapter._cursor, cursor_text("100"))
+        self.assertEqual(outcome, "accepted")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_unrecognized_event_with_null_workspace_id_is_ignored_not_fatal(self) -> None:
         # system.error has a nullable workspaceId in the contract. Unknown
@@ -3943,7 +3905,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter: Any
 
         async def observing_factory(cli: str, *args: str, **kwargs: Any) -> Any:
-            if args[:2] == ("read-cursors", "advance"):
+            if args[1:3] == ("read-cursors", "advance"):
                 durable_state_seen_by_server.append(
                     json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
                 )
@@ -5047,30 +5009,6 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         })
         await restarted.disconnect()
 
-    async def test_v3_epoch_cursor_migrates_to_v4_without_rewinding(self) -> None:
-        adapter = self.new_adapter(FakeProcessFactory([]))
-        self.prepare_adapter(adapter)
-        adapter._cursor_path.write_text(json.dumps({
-            "version": 3,
-            "cursor": position("101"),
-            "pendingReadCursors": {
-                DM_ID: {
-                    "messageId": message_id_for("101"),
-                    "conversationSequence": "101",
-                },
-            },
-        }), encoding="utf-8")
-
-        cursor = adapter._load_cursor()
-        self.assertEqual(cursor, cursor_text("101"))
-        self.assertTrue(adapter._state_needs_migration)
-        adapter._persist_cursor(cursor)
-        migrated = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
-        self.assertEqual(migrated["version"], 4)
-        self.assertEqual(migrated["cursor"], position("101"))
-        self.assertEqual(migrated["pendingReadCursors"][DM_ID]["messageId"], message_id_for("101"))
-        self.assertEqual(migrated["pendingAmbientWakes"], {})
-
     async def test_changed_event_epoch_requires_bootstrap_without_checkpointing_or_handoff(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)
@@ -6024,6 +5962,43 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(send_calls(factory)), 2)
         self.assertTrue(adapter._thread_root_supported)
 
+    async def test_a_protocol_rejection_is_never_retried_flat(self) -> None:
+        # A CLI that refuses this adapter's protocol is rejecting the whole
+        # conversation, not the thread root. Retrying flat would post nothing
+        # and latch threading off for the life of the process on the way, so
+        # the protocol code is excluded whatever exit code carries it -- the
+        # CLI raises it as a contract failure, but an older build exits 2.
+        anchor_id = message_id_for("101")
+        upgrade_required = json.dumps(
+            {
+                "error": {
+                    "code": "ADAPTER_UPGRADE_REQUIRED",
+                    "message": "This CLI supports adapter protocol 1",
+                }
+            }
+        ).encode("utf-8")
+        factory = FakeProcessFactory(
+            [
+                ProcessSpec(
+                    ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
+                    FakeProcess(stderr=upgrade_required, returncode=2),
+                ),
+            ]
+        )
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID], body="what broke?")
+        )
+        failed = await adapter.send(CHANNEL_ID, "the answer", reply_to=anchor_id)
+
+        self.assertFalse(failed.success)
+        self.assertIn("ADAPTER_UPGRADE_REQUIRED", failed.error or "")
+        self.assertFalse(failed.retryable)
+        self.assertEqual(len(send_calls(factory)), 1)
+        self.assertTrue(adapter._thread_root_supported)
+
     async def test_a_direct_message_reply_is_never_threaded(self) -> None:
         # Threading is right for a channel and wrong for a direct message. Once
         # a client negotiates threads-v1 the desktop drops every message with a
@@ -6365,6 +6340,19 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             send_calls(factory)[1]["args"],
             ("messages", "send", CHANNEL_ID, "--json", "--thread-root-id", anchor_id),
         )
+
+    async def test_incompatible_cli_stops_startup_before_watch_or_context(self) -> None:
+        factory = FakeProcessFactory([
+            ProcessSpec(("auth", "whoami", "--json"), json_process({
+                "adapterProtocol": 2, "kind": "result", "data": {},
+            })),
+        ])
+        adapter = self.new_adapter(factory)
+        self.assertFalse(await adapter.connect())
+        self.assertEqual(len(factory.calls), 1)
+        self.assertIsNone(adapter._watch_task)
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(adapter.fatal_error[0], "ADAPTER_UPGRADE_REQUIRED")
 
     async def test_lock_conflict_stops_before_watch(self) -> None:
         factory = FakeProcessFactory(startup_specs())

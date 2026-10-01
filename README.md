@@ -52,12 +52,18 @@ audits run after the database commit.
 - Node.js 24.18.x
 - npm 11.16.x
 - PostgreSQL 16, normally through Docker Compose
+- Python 3.11 or newer, with venv and pip, for mandatory Hermes verification
 
 Install exactly from the lockfile:
 
 ```bash
 npm ci
+python3 -m venv .venv/hermes
+.venv/hermes/bin/python -m pip install -r integrations/hermes-hype-comms/requirements-dev.txt
 ```
+
+On Windows, use `.venv/hermes/Scripts/python.exe`. The check selects that environment automatically;
+`HYPE_COMMS_PYTHON` can select a prepared interpreter elsewhere. Missing Python tools fail the check.
 
 ## Local development
 
