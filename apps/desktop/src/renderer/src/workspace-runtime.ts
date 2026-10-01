@@ -2104,12 +2104,17 @@ export class WorkspaceRuntime {
   }
 
   async removeReaction(messageId: string, emoji: ReactionEmoji): Promise<void> {
-    const generation = this.#generation;
     const cache = this.#cache;
     const currentUserId = this.#state.bootstrap?.currentUser.user.id;
     if (cache === null || currentUserId === undefined) {
       throw new Error("Workspace is still loading");
     }
+    const conversationId =
+      this.#state.messages.find((message) => message.id === messageId)?.conversationId ??
+      this.#state.selectedConversationId;
+    if (conversationId === null) throw new Error("Message is unavailable");
+    const projection = this.#captureProjection(cache);
+    if (!this.#isProjectionCurrent(projection, conversationId)) return;
     const existing = this.#state.reactions.find(
       (reaction) =>
         reaction.messageId === messageId &&
@@ -2117,9 +2122,9 @@ export class WorkspaceRuntime {
         reaction.emoji === emoji,
     );
     const result = await this.#client.removeMessageReaction(messageId, emoji);
-    if (!result.removed || generation !== this.#generation || cache !== this.#cache) return;
+    if (!result.removed || !this.#isProjectionCurrent(projection, conversationId)) return;
     await this.#serialize(async () => {
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       if (
         this.#syncCursor !== null &&
         this.#syncCursor.epoch === result.syncCursor.epoch &&
@@ -2128,7 +2133,7 @@ export class WorkspaceRuntime {
         return;
       }
       if (existing !== undefined) await cache.removeReaction(existing.id);
-      if (generation !== this.#generation || cache !== this.#cache) return;
+      if (!this.#isProjectionCurrent(projection, conversationId)) return;
       this.#setState({
         reactions: this.#state.reactions.filter(
           (reaction) =>

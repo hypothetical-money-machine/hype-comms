@@ -4513,6 +4513,45 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).reactions).toEqual([]);
   });
 
+  it("preserves a re-added reaction when an old epoch removal response arrives after recovery", async () => {
+    const cache = new MemoryWorkspaceCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    api.reactions.push(ownReaction);
+    const runtime = runtimeWith(api, cache);
+    const removalResponse = deferred<RemoveReactionResponse>();
+    vi.spyOn(api, "removeMessageReaction").mockImplementationOnce(() => removalResponse.promise);
+    try {
+      await runtime.start(session);
+      expect(runtime.state.reactions).toEqual([ownReaction]);
+      const removing = runtime.removeReaction(OWN_MESSAGE_ID, "🎉");
+      const nextEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+      const readded = { ...ownReaction, id: "eeeeeeee-0000-4000-8000-000000000003" };
+      api.bootstrap = bootstrapAt("20", { syncCursor: testPosition("20", nextEpoch) });
+      api.reactions.splice(0, api.reactions.length, readded);
+      api.emitWorkspaceEvent({ ...resyncRequired, payload: { reason: "epoch_mismatch" } });
+      await settle(
+        () =>
+          runtime.state.bootstrap?.syncCursor.epoch === nextEpoch &&
+          runtime.state.reactions.some((reaction) => reaction.id === readded.id),
+        "new epoch reaction recovered",
+      );
+      await drain();
+      removalResponse.resolve({ removed: true, syncCursor: testPosition("11") });
+      await removing;
+      expect((await cache.load()).reactions).toEqual([readded]);
+      expect(runtime.state.reactions).toEqual([readded]);
+    } finally {
+      removalResponse.resolve({ removed: true, syncCursor: testPosition("11") });
+      await runtime.stop();
+    }
+  });
+
   it("loads and mutates tasks while keeping newer optimistic versions over stale events", async () => {
     const cache = new FakeWorkspaceCache();
     const api = new FakeDesktopApi(bootstrapAt("10"));
