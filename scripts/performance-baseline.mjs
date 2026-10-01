@@ -12,7 +12,8 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import electron from "electron";
 import { _electron } from "playwright";
-import { removePerformanceRuntimeData } from "./performance-cleanup.mjs";
+import { finishPerformanceRuntime, removePerformanceRuntimeData } from "./performance-cleanup.mjs";
+import { createPerformancePostgres } from "./performance-postgres.mjs";
 import { startCacheReadProbe, stopCacheReadProbe } from "./performance-cache-reads.mjs";
 import {
   verifyVisibleReadTracking,
@@ -233,7 +234,8 @@ async function main() {
   const clients = new Set();
   let server;
   let rendererServer;
-  let postgresStarted = false;
+  const postgres = createPerformancePostgres(run, pgBin, pgDirectory);
+  let scenarioError = null;
   const interrupt = () => {
     interrupted = true;
     for (const child of clients) child.kill("SIGTERM");
@@ -452,17 +454,7 @@ async function main() {
       "-E",
       "UTF8",
     ]);
-    run(path.join(pgBin, "pg_ctl"), [
-      "-D",
-      pgDirectory,
-      "-l",
-      path.join(directory, "postgres.log"),
-      "-o",
-      `-h 127.0.0.1 -p ${pgPort} -c unix_socket_directories=''`,
-      "-w",
-      "start",
-    ]);
-    postgresStarted = true;
+    postgres.start(path.join(directory, "postgres.log"), pgPort);
     const fixture = await seedPerformanceFixture(
       databaseUrl,
       apiPort,
@@ -936,22 +928,28 @@ async function main() {
     }
     result.status = "complete";
   } catch (error) {
+    scenarioError = error;
     result.status = "failed";
     result.error = error.message;
     throw error;
   } finally {
     process.removeListener("SIGINT", interrupt);
     process.removeListener("SIGTERM", interrupt);
-    for (const child of clients) await stop(child);
-    await stop(server);
-    if (rendererServer?.listening) await new Promise((resolve) => rendererServer.close(resolve));
-    if (postgresStarted)
-      run(path.join(pgBin, "pg_ctl"), ["-D", pgDirectory, "-m", "fast", "-w", "stop"]);
-    await writeFile(path.join(directory, "results.json"), `${JSON.stringify(result, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    if (!options.keepRuntimeData) await removePerformanceRuntimeData(directory);
-    console.log(`Results: ${directory}/results.json`);
+    await finishPerformanceRuntime(async () => {
+      for (const child of clients) await stop(child);
+      await stop(server);
+      if (rendererServer?.listening) await new Promise((resolve) => rendererServer.close(resolve));
+      postgres.stop();
+      await writeFile(
+        path.join(directory, "results.json"),
+        `${JSON.stringify(result, null, 2)}\n`,
+        {
+          mode: 0o600,
+        },
+      );
+      if (!options.keepRuntimeData) await removePerformanceRuntimeData(directory);
+      console.log(`Results: ${directory}/results.json`);
+    }, scenarioError);
   }
 }
 

@@ -8,3 +8,14 @@ export async function removePerformanceRuntimeData(directory) {
     await rm(path.join(directory, name), { recursive: true, force: true });
   }
 }
+
+// A scenario failure remains the reported error if shutdown also fails. The cleanup callback
+// must stop processes before saving results or deleting runtime data, and stop at its first error.
+export async function finishPerformanceRuntime(cleanup, scenarioError) {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    if (scenarioError === null) throw cleanupError;
+    console.error("Benchmark cleanup failed; runtime data retained:", cleanupError);
+  }
+}
