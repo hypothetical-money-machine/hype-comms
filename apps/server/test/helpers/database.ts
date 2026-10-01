@@ -59,22 +59,42 @@ export async function createTestSchema(options: CreateTestSchemaOptions): Promis
   }
   const schemaName = `${options.prefix}_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const adminPool = createPool({ url: testDatabaseUrl, poolSize: options.adminPoolSize ?? 2 });
-  await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-  const pool = createPool({
-    url: schemaScopedUrl(testDatabaseUrl, schemaName),
-    poolSize: options.poolSize ?? 8,
-  });
-  await runMigrations(pool, options.migrationsDirectory);
-  return {
-    adminPool,
-    pool,
-    schemaName,
-    async drop() {
-      await pool.end();
-      await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-      await adminPool.end();
-    },
+  let pool: Pool | undefined;
+  let created = false;
+  let disposal: Promise<void> | undefined;
+  const drop = (): Promise<void> => {
+    disposal ??= (async () => {
+      try {
+        await pool?.end();
+      } finally {
+        try {
+          if (created) await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
+        } finally {
+          await adminPool.end();
+        }
+      }
+    })();
+    return disposal;
   };
+  try {
+    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
+    created = true;
+    pool = createPool({
+      url: schemaScopedUrl(testDatabaseUrl, schemaName),
+      poolSize: options.poolSize ?? 8,
+    });
+    await runMigrations(pool, options.migrationsDirectory);
+    return { adminPool, pool, schemaName, drop };
+  } catch (error) {
+    try {
+      await drop();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Test schema setup and cleanup failed", {
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }
 
 export interface ResetDatabaseOptions {
