@@ -7,12 +7,11 @@ import {
   listMembersResponseSchema,
   sendMessageResponseSchema,
 } from "@hype-comms/contracts";
-import { escapeIdentifier, type Pool } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import type { Pool } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { BotService } from "../src/modules/bots/service.js";
 import type { EmailSender } from "../src/modules/identity/email.js";
 import { IdentityRepository } from "../src/modules/identity/repository.js";
@@ -22,8 +21,6 @@ import { RealtimeEventHub } from "../src/modules/realtime/hub.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { FixedWindowAttemptThrottle, SignInThrottle } from "../src/throttle.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-08-23T12:00:00.000Z";
 const publicApiUrl = "http://127.0.0.1:3000";
 const ownerId = "30000000-0000-4000-8000-000000000001";
@@ -42,12 +39,6 @@ class NoopEmailSender implements EmailSender {
   async sendMagicLink(): Promise<void> {}
 }
 
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
-
 function sessionCookie(token: string): { readonly cookie: string } {
   return { cookie: `hype_comms_session=${token}` };
 }
@@ -57,20 +48,16 @@ function webhookPath(webhookUrl: string): string {
 }
 
 describeWithPostgres("per-channel incoming webhooks", () => {
-  const schemaName = `channel_webhooks_${process.pid}_${randomUUID().replaceAll("-", "")}`;
   const openApps: Awaited<ReturnType<typeof buildApp>>[] = [];
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let identityService: IdentityService;
   let botService: BotService;
   let workspaceRepository: WorkspaceRepository;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 10 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "channel_webhooks", poolSize: 10 });
+    pool = schema.pool;
     identityService = new IdentityService(
       new IdentityRepository(pool),
       new NoopEmailSender(),
@@ -83,14 +70,32 @@ describeWithPostgres("per-channel incoming webhooks", () => {
   });
 
   beforeEach(async () => {
-    await pool.query(`
-      TRUNCATE channel_webhooks, bot_channel_grants, bot_credentials, agent_tokens, agents,
-               realtime_tickets, api_idempotency_records, sync_event_audiences, sync_events,
-               conversation_read_cursors, message_reactions, message_mentions, attachments,
-               messages, conversation_memberships, conversations, device_sessions,
-               magic_link_tokens, invitations, workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "channel_webhooks",
+        "bot_channel_grants",
+        "bot_credentials",
+        "agent_tokens",
+        "agents",
+        "realtime_tickets",
+        "api_idempotency_records",
+        "sync_event_audiences",
+        "sync_events",
+        "conversation_read_cursors",
+        "message_reactions",
+        "message_mentions",
+        "attachments",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     await pool.query(
       `INSERT INTO users (id, email, kind, username, display_name)
        VALUES ($1, 'owner@example.test', 'human', 'owner', 'Owner'),
@@ -142,10 +147,7 @@ describeWithPostgres("per-channel incoming webhooks", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
   });
 
   async function appWithWebhookThrottle(throttle?: FixedWindowAttemptThrottle) {

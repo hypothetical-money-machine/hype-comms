@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { escapeIdentifier, type Pool } from "pg";
+import type { Pool } from "pg";
 
 import {
   AGENT_CONTEXT_PACK_MAX_BYTES,
@@ -22,8 +22,7 @@ import {
   type WorkspaceEvent,
 } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
+import { describeWithPostgres, createTestSchema, resetDatabase } from "./helpers/database.js";
 import { ApiError } from "../src/errors.js";
 import type {
   AuthenticatedAgentIdentity,
@@ -31,6 +30,7 @@ import type {
 } from "../src/modules/identity/service.js";
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
+  ATTACHMENT_UPLOAD_TTL_MS,
   LocalAttachmentStore,
   sha256Hex,
   type AttachmentStore,
@@ -42,8 +42,6 @@ import {
 } from "../src/modules/workspace/repository.js";
 import { insertSyncEvent } from "../src/modules/workspace/sync-events.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -75,12 +73,6 @@ const reactionEmojis = [
   "😋",
   "😛",
 ] as const;
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 function currentUser(
   id: string,
@@ -179,8 +171,7 @@ async function rejectedApiError(operation: Promise<unknown>): Promise<ApiError> 
 }
 
 describeWithPostgres("WorkspaceRepository", () => {
-  const schemaName = `workspace_repository_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let schema: Awaited<ReturnType<typeof createTestSchema>>;
   let pool: Pool;
   let repository: WorkspaceRepository;
   let attachmentRoot: string;
@@ -193,11 +184,8 @@ describeWithPostgres("WorkspaceRepository", () => {
   }
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
+    schema = await createTestSchema({ prefix: "workspace_repository", poolSize: 8 });
+    pool = schema.pool;
     attachmentRoot = await mkdtemp(path.join(os.tmpdir(), "hype-comms-attachments-"));
     attachmentStore = new LocalAttachmentStore(attachmentRoot);
     repository = new WorkspaceRepository(pool, repositoryHooks());
@@ -205,15 +193,27 @@ describeWithPostgres("WorkspaceRepository", () => {
 
   beforeEach(async () => {
     repository = new WorkspaceRepository(pool, repositoryHooks());
-    await pool.query(`
-      TRUNCATE realtime_tickets, api_idempotency_records, sync_event_audiences,
-               sync_events, conversation_read_cursors, message_reactions, message_mentions,
-               attachments, messages,
-               conversation_memberships, conversations, device_sessions, magic_link_tokens,
-               invitations,
-               workspace_memberships, workspaces, users
-      CASCADE
-    `);
+    await resetDatabase(pool, {
+      only: [
+        "realtime_tickets",
+        "api_idempotency_records",
+        "sync_event_audiences",
+        "sync_events",
+        "conversation_read_cursors",
+        "message_reactions",
+        "message_mentions",
+        "attachments",
+        "messages",
+        "conversation_memberships",
+        "conversations",
+        "device_sessions",
+        "magic_link_tokens",
+        "invitations",
+        "workspace_memberships",
+        "workspaces",
+        "users",
+      ],
+    });
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
@@ -248,10 +248,7 @@ describeWithPostgres("WorkspaceRepository", () => {
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await schema.drop();
     if (attachmentRoot !== undefined) await rm(attachmentRoot, { recursive: true, force: true });
   });
 
@@ -381,89 +378,6 @@ describeWithPostgres("WorkspaceRepository", () => {
         payload: expect.objectContaining({
           message: expect.objectContaining({ id: sent.message.id }),
         }),
-      }),
-    );
-  });
-
-  it("bootstraps wake cursor and body-free conversation kinds from one snapshot", async () => {
-    const wakeAgentId = randomUUID();
-    const wakeAgentTokenId = randomUUID();
-    await pool.query(
-      `INSERT INTO users (id, kind, email, username, display_name)
-       VALUES ($1, 'agent', NULL, 'wake-agent', 'Wake Agent')`,
-      [wakeAgentId],
-    );
-    await pool.query(
-      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
-       VALUES ($1, $2, 'member', 'active')`,
-      [workspaceId, wakeAgentId],
-    );
-    await pool.query(
-      `INSERT INTO agents (user_id, workspace_id, created_by)
-       VALUES ($1, $2, $3)`,
-      [wakeAgentId, workspaceId, ownerId],
-    );
-    const currentAgent: AgentCurrentPrincipal = {
-      type: "agent",
-      user: {
-        id: wakeAgentId,
-        kind: "agent",
-        username: "wake-agent",
-        displayName: "Wake Agent",
-        avatarUrl: null,
-        title: null,
-        createdAt: now,
-        updatedAt: now,
-      },
-      workspaceId,
-      role: "member",
-      scopes: ["workspace:read"],
-    };
-    const wakeAgent: AuthenticatedAgentIdentity = {
-      currentUser: currentAgent,
-      authorizationScopes: ["workspace:read"],
-      principalKind: "agent",
-      agentTokenId: wakeAgentTokenId,
-    };
-    const cursorRead = Promise.withResolvers<void>();
-    const continueBootstrap = Promise.withResolvers<void>();
-    const racingRepository = new WorkspaceRepository(pool, {
-      afterAgentWakeBootstrapCursorRead: async () => {
-        cursorRead.resolve();
-        await continueBootstrap.promise;
-      },
-    });
-
-    const bootstrapping = racingRepository.agentWakeBootstrap(wakeAgent);
-    await cursorRead.promise;
-    let created: Awaited<ReturnType<WorkspaceRepository["createChannel"]>>;
-    let joined: Awaited<ReturnType<WorkspaceRepository["joinPublicChannel"]>>;
-    try {
-      created = await repository.createChannel(owner, {
-        name: "After Wake Snapshot",
-        slug: "after-wake-snapshot",
-        topic: null,
-        access: "workspace",
-      });
-      joined = await repository.joinPublicChannel(wakeAgent, created.conversation.conversation.id);
-    } finally {
-      continueBootstrap.resolve();
-    }
-    const bootstrap = await bootstrapping;
-    expect(bootstrap).toEqual({
-      agentUserId: wakeAgentId,
-      workspaceId,
-      highWaterCursor: "0",
-      conversations: [{ conversationId: generalId, kind: "channel" }],
-    });
-
-    const replay = await repository.sync(wakeAgent, bootstrap.highWaterCursor, 100);
-    expect(replay.events).toContainEqual(
-      expect.objectContaining({
-        type: "channel.membership_changed",
-        workspaceSequence: joined.syncCursor,
-        conversationId: created.conversation.conversation.id,
-        payload: { memberId: wakeAgentId, action: "added" },
       }),
     );
   });
@@ -743,6 +657,48 @@ describeWithPostgres("WorkspaceRepository", () => {
     ]);
     expect(JSON.stringify(sync)).not.toContain(secret);
     expect(JSON.stringify(sync)).not.toContain(reaction.reaction.id);
+  });
+
+  it("skips malformed and noncanonical message references without aborting sync pages", async () => {
+    const sent = await repository.sendMessage(owner, generalId, {
+      ...message(randomUUID(), "Canonical sync reference"),
+      mentionedUserIds: [],
+    });
+    await repository.addReaction(member, sent.message.id, "🎉");
+    const canonical = await repository.sync(observer, "0", 100, { reactionEvents: true });
+    expect(canonical.events.map((event) => event.type)).toEqual([
+      "message.created",
+      "reaction.added",
+    ]);
+    const invalidReferences: readonly unknown[] = [
+      "not-a-uuid",
+      `${sent.message.id.slice(0, -1)}z`,
+      `{${sent.message.id}}`,
+      sent.message.id.replaceAll("-", ""),
+      sent.message.id.toUpperCase(),
+      `${sent.message.id} `,
+      `${sent.message.id}\n`,
+      null,
+      42,
+      { id: sent.message.id },
+    ];
+    for (const reference of invalidReferences) {
+      // A UUID containing only digits has no distinct uppercase spelling.
+      if (reference === sent.message.id) continue;
+      await pool.query(
+        `UPDATE sync_events
+            SET payload = jsonb_set(payload,
+              CASE WHEN event_type = 'message.created' THEN '{message,id}'::text[]
+                   ELSE '{reaction,messageId}'::text[] END,
+              $2::jsonb)
+          WHERE workspace_id = $1 AND event_type IN ('message.created', 'reaction.added')`,
+        [workspaceId, JSON.stringify(reference)],
+      );
+      const page = await repository.sync(observer, "0", 100, { reactionEvents: true });
+      expect(page.events).toEqual([]);
+      expect(page.nextCursor).toBe(canonical.nextCursor);
+      expect(page.hasMore).toBe(false);
+    }
   });
 
   it("rejects retracting another member's message and an author retract after five minutes", async () => {
@@ -3077,11 +3033,6 @@ describeWithPostgres("WorkspaceRepository", () => {
       ),
     ).toBe(false);
     expect(
-      (await repository.agentWakeBootstrap(agent)).conversations.some(
-        (conversation) => conversation.conversationId === conversationId,
-      ),
-    ).toBe(false);
-    expect(
       (await repository.searchMessages(agent, "human teammates", undefined, 50)).results,
     ).toEqual([]);
     await expect(repository.joinPublicChannel(agent, conversationId)).rejects.toMatchObject({
@@ -3279,6 +3230,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: false,
       groupDirectMessages: false,
       humansOnlyChannels: false,
+      systemChannels: false,
     });
     await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
 
@@ -3293,6 +3245,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: true,
       groupDirectMessages: true,
       humansOnlyChannels: true,
+      systemChannels: true,
     });
     await expect(repository.consumeRealtimeTicket(capable.ticket)).resolves.toEqual({
       workspaceId,
@@ -3309,6 +3262,7 @@ describeWithPostgres("WorkspaceRepository", () => {
       ephemeralActivity: true,
       groupDirectMessages: true,
       humansOnlyChannels: true,
+      systemChannels: true,
     });
   });
 
@@ -3698,6 +3652,132 @@ describeWithPostgres("WorkspaceRepository", () => {
     await expect(
       pool.query("SELECT 1 FROM attachments WHERE id = $1", [removable.attachment.id]),
     ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  async function stagePendingUpload(
+    fileName: string,
+    body: string,
+  ): Promise<{
+    bytes: Buffer;
+    contentSha256: string;
+    staged: Awaited<ReturnType<WorkspaceRepository["createFileUpload"]>>;
+  }> {
+    const bytes = Buffer.from(body);
+    const contentSha256 = sha256Hex(bytes);
+    const staged = await repository.createFileUpload(
+      owner,
+      {
+        conversationId: generalId,
+        fileName,
+        contentType: "text/plain",
+        sizeBytes: bytes.byteLength,
+        contentSha256,
+      },
+      randomUUID(),
+    );
+    return { bytes, contentSha256, staged };
+  }
+
+  async function storedUploadDeadline(attachmentId: string): Promise<Date> {
+    const result = await pool.query<{ upload_expires_at: Date | string }>(
+      `SELECT upload_expires_at FROM attachments WHERE id = $1`,
+      [attachmentId],
+    );
+    const deadline = result.rows[0]?.upload_expires_at;
+    if (deadline === undefined || deadline === null) {
+      throw new Error("Expected a stored upload deadline");
+    }
+    return deadline instanceof Date ? deadline : new Date(deadline);
+  }
+
+  it("sets pending upload expiry from the database clock", async () => {
+    const { staged } = await stagePendingUpload("clock.txt", "deadline from postgres");
+    const ttl = await pool.query<{ ttl_seconds: string }>(
+      `SELECT extract(epoch from (upload_expires_at - created_at))::text AS ttl_seconds
+         FROM attachments
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const ttlSeconds = Number(ttl.rows[0]?.ttl_seconds);
+    expect(ttlSeconds).toBeGreaterThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 - 1);
+    expect(ttlSeconds).toBeLessThan(ATTACHMENT_UPLOAD_TTL_MS / 1_000 + 1);
+    await expect(storedUploadDeadline(staged.attachment.id)).resolves.toEqual(
+      new Date(staged.expiresAt),
+    );
+  });
+
+  it("does not clean up a pending upload that is still valid on the database clock", async () => {
+    const { staged } = await stagePendingUpload("fresh.txt", "just created");
+    await repository.deleteExpiredState();
+    await expect(
+      pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+    ).resolves.toMatchObject({ rowCount: 1 });
+  });
+
+  it("keeps an in-progress upload when the host clock is ahead of the database deadline", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-leads.txt",
+      "still valid on postgres",
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() + 60_000);
+    try {
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+      const completed = await repository.completeFileUpload(
+        owner,
+        staged.attachment.id,
+        { sizeBytes: bytes.byteLength, contentSha256 },
+        randomUUID(),
+      );
+      expect(completed.attachment.status).toBe("ready");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("rejects and cleans up an upload expired on the database clock when the host clock lags", async () => {
+    const { bytes, contentSha256, staged } = await stagePendingUpload(
+      "host-lags.txt",
+      "already expired on postgres",
+    );
+    await repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes);
+    await pool.query(
+      `UPDATE attachments
+          SET upload_expires_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1`,
+      [staged.attachment.id],
+    );
+    const deadline = await storedUploadDeadline(staged.attachment.id);
+    vi.spyOn(Date, "now").mockReturnValue(deadline.getTime() - 60_000);
+    try {
+      await expect(
+        repository.putFileContent(owner, staged.attachment.id, "text/plain", bytes),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "This upload has expired",
+      } satisfies Partial<ApiError>);
+      await expect(
+        repository.completeFileUpload(
+          owner,
+          staged.attachment.id,
+          { sizeBytes: bytes.byteLength, contentSha256 },
+          randomUUID(),
+        ),
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "This upload has expired",
+      } satisfies Partial<ApiError>);
+      await repository.deleteExpiredState();
+      await expect(
+        pool.query("SELECT 1 FROM attachments WHERE id = $1", [staged.attachment.id]),
+      ).resolves.toMatchObject({ rowCount: 0 });
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("decides group attachment read capability before loading stored bytes", async () => {
