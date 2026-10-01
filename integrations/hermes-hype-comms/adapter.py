@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import inspect
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import re
 import shutil
 import tempfile
 import time
+import types
 import unicodedata
 import weakref
 from dataclasses import dataclass, replace
@@ -33,6 +35,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    build_session_key,
 )
 
 if TYPE_CHECKING:
@@ -66,8 +69,9 @@ PRE_SPAWN_FAILURE_CODES = frozenset({"CLI_NOT_FOUND", "CLI_START_FAILED", "CONFI
 # this adapter mints it for an unreadable envelope, but a build that still
 # exits 2 for it must not be read as a refusal of the thread-root flag.
 PROTOCOL_FAILURE_CODES = frozenset({"ADAPTER_UPGRADE_REQUIRED"})
-CURSOR_FILE_VERSION = 3
+CURSOR_FILE_VERSION = 4
 LEGACY_CURSOR_FILE_VERSION = 1
+MAX_PENDING_AMBIENT_WAKES = 4_096
 DEFAULT_CONTEXT_LIMIT = 8
 MIN_CONTEXT_LIMIT = 1
 MAX_CONTEXT_LIMIT = 20
@@ -100,6 +104,13 @@ _ENTITY_ID = re.compile(
     r"[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}|"
     r"00000000-0000-0000-0000-000000000000|"
     r"ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+)
+_ISO_DATE_TIME = re.compile(
+    r"^(?:(?:[0-9]{2}[2468][048]|[0-9]{2}[13579][26]|[0-9]{2}0[48]|"
+    r"[02468][048]00|[13579][26]00)-02-29|[0-9]{4}-(?:(?:0[13578]|1[02])-"
+    r"(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|"
+    r"02-(?:0[1-9]|1[0-9]|2[0-8])))T(?:[01][0-9]|2[0-3]):[0-5][0-9]"
+    r"(?::[0-5][0-9](?:\.[0-9]+)?)?Z$"
 )
 _TOKEN_PATTERN = re.compile(r"\bhype_comms_agent_[A-Za-z0-9_-]+\b")
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+\b")
@@ -289,6 +300,10 @@ def _safe_username(value: object) -> Optional[str]:
 
 def _is_entity_id(value: object) -> bool:
     return isinstance(value, str) and _ENTITY_ID.fullmatch(value) is not None
+
+
+def _is_iso_datetime(value: object) -> bool:
+    return isinstance(value, str) and _ISO_DATE_TIME.fullmatch(value) is not None
 
 
 def _is_sequence(value: object) -> bool:
@@ -939,22 +954,20 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # per reply. A restart re-tries the flag.
         self._thread_root_supported = True
         # Threading is presentational and reversible, so it is a switch rather
-        # than a rebuild: turning it off restores the flat sends this adapter
-        # shipped with. Follow-ups default off because they widen what reaches
-        # Hermes past explicit mentions and cost one inference turn per ambient
-        # message; see this directory's README.
+        # than a rebuild: turning it off restores flat channel sends.
         self._thread_replies_enabled = _enabled("HYPE_COMMS_THREAD_REPLIES", default=True)
-        self._thread_followups_enabled = _enabled(
-            "HYPE_COMMS_THREAD_FOLLOWUPS", default=False
-        )
         self._context_limit = _configured_context_limit(config)
         self._channel_prompt_text: Optional[str] = None
+        self._ambient_handoff_failures: Dict[int, CliFailure] = {}
+        self._pending_ambient_wakes: Dict[str, Dict[str, Any]] = {}
+        self._admitted_ambient_wakes: set[str] = set()
+        self._ambient_replay_task: Optional[asyncio.Task[Any]] = None
         self._cursor: Optional[str] = None
         self._cursor_path: Optional[Path] = None
         self._agent_scopes: frozenset[str] = frozenset()
         self._pending_read_cursors: Dict[str, PendingReadCursor] = {}
         # Non-retryable failures are parked only for this connected adapter
-        # generation. The durable V2 target remains unchanged, so reconnect
+        # generation. The durable V4 target remains unchanged, so reconnect
         # gets one fresh attempt in case credentials or server policy changed.
         self._parked_read_cursors: Dict[str, PendingReadCursor] = {}
         # Flush callers retain a strong reference while holding or waiting on
@@ -1009,6 +1022,118 @@ class HypeCommsAdapter(BasePlatformAdapter):
                     False,
                     error_kind="bad_format",
                 )
+
+    @staticmethod
+    def _quiet_gateway_config(config: Mapping[str, Any]) -> Dict[str, Any]:
+        # Copy only the paths we change. Profile credentials, tool policy and
+        # every other platform's display settings keep their original values.
+        result = dict(config)
+        display = dict(config.get("display") or {})
+        platforms = dict(display.get("platforms") or {})
+        hype = dict(platforms.get(PLATFORM_NAME) or {})
+        hype.update(
+            {
+                "tool_progress": "off",
+                "interim_assistant_messages": False,
+                "thinking_progress": False,
+                "long_running_notifications": False,
+                "streaming": False,
+            }
+        )
+        platforms[PLATFORM_NAME] = hype
+        display["platforms"] = platforms
+        result["display"] = display
+        return result
+
+    def _install_gateway_turn_policy(self) -> None:
+        runner = getattr(self, "gateway_runner", None)
+        if runner is None or getattr(runner, "_hype_comms_turn_policy", False):
+            return
+        replacements: Dict[str, Any] = {}
+        for name in ("_run_agent_inner", "_run_agent_via_proxy"):
+            original = getattr(runner, name, None)
+            if (
+                not isinstance(original, types.MethodType)
+                or original.__self__ is not runner
+                or not callable(original.__func__.__globals__.get("_load_gateway_config"))
+                or (
+                    name == "_run_agent_inner"
+                    and not callable(
+                        original.__func__.__globals__.get(
+                            "_preserve_queued_followup_history_offset"
+                        )
+                    )
+                )
+            ):
+                raise CliFailure(
+                    2,
+                    "INCOMPATIBLE_HERMES_TURN_CONFIG",
+                    "Hype Comms requires the pinned Hermes turn configuration hooks",
+                    False,
+                    error_kind="bad_format",
+                )
+            replacements[name] = self._quiet_gateway_method(original)
+        # Only this runner's methods change. Each cloned function owns its
+        # globals mapping; the upstream module and concurrent other platforms
+        # retain the original configuration loader and display behavior.
+        for name, replacement in replacements.items():
+            setattr(runner, name, replacement)
+        setattr(runner, "_hype_comms_turn_policy", True)
+
+    def _quiet_gateway_method(self, original: Any) -> Any:
+        runner = original.__self__
+        function = original.__func__
+        load_config = function.__globals__["_load_gateway_config"]
+        signature = inspect.signature(original)
+
+        async def guarded_method(*args: Any, **kwargs: Any) -> Any:
+            arguments = signature.bind(*args, **kwargs).arguments
+            source = arguments.get("source")
+            adapter = runner._adapter_for_source(source) if source is not None else None
+            if not isinstance(adapter, HypeCommsAdapter):
+                return await original(*args, **kwargs)
+            scoped_globals = dict(function.__globals__)
+            scoped_globals["_load_gateway_config"] = lambda: self._quiet_gateway_config(load_config())
+            own_result: List[Any] = []
+            preserve = scoped_globals.get("_preserve_queued_followup_history_offset")
+            if callable(preserve):
+
+                def preserve_turn_result(result: Any, followup: Any) -> Any:
+                    own_result.append(result)
+                    return preserve(result, followup)
+
+                scoped_globals["_preserve_queued_followup_history_offset"] = preserve_turn_result
+            scoped_function = types.FunctionType(
+                function.__code__,
+                scoped_globals,
+                function.__name__,
+                function.__defaults__,
+                function.__closure__,
+            )
+            scoped_function.__kwdefaults__ = function.__kwdefaults__
+            quiet_method = types.MethodType(scoped_function, runner)
+            # Hermes recursively drains FIFO turns inside _run_agent_inner,
+            # bypassing Base's message-handler callback for those turns. Retire
+            # each durable anchor after its own model decision succeeds. The
+            # returned result may belong to the last queued turn, so the local
+            # preserve hook records this turn's result before it is replaced.
+            message_id = arguments.get("event_message_id")
+            try:
+                result = await quiet_method(*args, **kwargs)
+                decision = own_result[0] if own_result else result
+                if (
+                    isinstance(message_id, str)
+                    and isinstance(decision, dict)
+                    and not decision.get("failed")
+                    and not decision.get("interrupted")
+                ):
+                    adapter._complete_ambient_wake(message_id)
+                return result
+            finally:
+                if isinstance(message_id, str):
+                    adapter._admitted_ambient_wakes.discard(message_id)
+
+        return guarded_method
 
     async def _command(
         self,
@@ -1197,8 +1322,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
             ) from exc
         return state_dir / "cursor.json"
 
-    def _load_cursor(self) -> Optional[str]:
+    def _load_cursor(self, bootstrap_cursor: Optional[str] = None) -> Optional[str]:
         self._pending_read_cursors = {}
+        self._pending_ambient_wakes = {}
         self._parked_read_cursors = {}
         self._read_cursor_retry_not_before = None
         self._read_cursor_retry_wakeup.clear()
@@ -1209,45 +1335,56 @@ class HypeCommsAdapter(BasePlatformAdapter):
             payload = json.loads(self._cursor_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise CliFailure(
-                6,
-                "CURSOR_STATE_INVALID",
-                "Hype Comms cursor checkpoint is unreadable",
-                False,
-                error_kind="bad_format",
+                6, "CURSOR_STATE_INVALID", "Hype Comms cursor checkpoint is unreadable",
+                False, error_kind="bad_format",
             ) from exc
         unsupported = CliFailure(
-            6,
-            "CURSOR_STATE_INVALID",
-            "Hype Comms cursor checkpoint has an unsupported format",
-            False,
-            error_kind="bad_format",
+            6, "CURSOR_STATE_INVALID", "Hype Comms cursor checkpoint has an unsupported format",
+            False, error_kind="bad_format",
         )
 
-        def checked_state_cursor(value: object) -> str:
+        def checked_position(value: object) -> str:
             try:
                 return self._checked_cursor(value)
             except CliFailure as exc:
                 raise unsupported from exc
 
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or type(payload.get("version")) is not int:
             raise unsupported
-        version = payload.get("version")
-        if type(version) is not int:
-            raise unsupported
+        version = payload["version"]
+        base_keys = {"version", "cursor", "pendingReadCursors"}
+        scalar = False
+        legacy_ambient = False
         if version == LEGACY_CURSOR_FILE_VERSION:
-            if set(payload) != {"version", "cursor"}:
+            if set(payload) != {"version", "cursor"} or not _is_sequence(payload["cursor"]):
                 raise unsupported
             self._state_needs_migration = True
-            if not _is_sequence(payload.get("cursor")):
-                raise unsupported
             return None
-        if version not in {2, CURSOR_FILE_VERSION} or set(payload) != {
-            "version",
-            "cursor",
-            "pendingReadCursors",
-        }:
+        if version == 2:
+            scalar = True
+            expected_keys = base_keys
+        elif version == 3 and set(payload) == base_keys:
+            # Replay-epoch V3 stored a strict position and read targets.
+            expected_keys = base_keys
+        elif version == 3 and set(payload) == base_keys | {"pendingAmbientWakes"}:
+            # Ambient V3 predates epochs. Its scalar has no ordering relationship
+            # with a new epoch; migrate against this connection's fresh bootstrap.
+            scalar = True
+            legacy_ambient = True
+            expected_keys = base_keys | {"pendingAmbientWakes"}
+        elif version == CURSOR_FILE_VERSION:
+            expected_keys = base_keys | {"pendingAmbientWakes"}
+        else:
             raise unsupported
-        pending = payload.get("pendingReadCursors")
+        if set(payload) != expected_keys:
+            raise unsupported
+        if scalar:
+            if not _is_sequence(payload["cursor"]):
+                raise unsupported
+            cursor = None
+        else:
+            cursor = checked_position(payload["cursor"])
+        pending = payload["pendingReadCursors"]
         if not isinstance(pending, dict):
             raise unsupported
         next_pending: Dict[str, PendingReadCursor] = {}
@@ -1264,13 +1401,31 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 message_id=str(target["messageId"]),
                 conversation_sequence=str(target["conversationSequence"]),
             )
-        self._pending_read_cursors = next_pending
-        if version == 2:
-            if not _is_sequence(payload.get("cursor")):
+        wakes = payload.get("pendingAmbientWakes", {})
+        if not isinstance(wakes, dict) or len(wakes) > MAX_PENDING_AMBIENT_WAKES:
+            raise unsupported
+        next_wakes: Dict[str, Dict[str, Any]] = {}
+        for message_id, target in wakes.items():
+            if not self._valid_ambient_wake(message_id, target, legacy=legacy_ambient):
                 raise unsupported
-            self._state_needs_migration = True
-            return None
-        return checked_state_cursor(payload.get("cursor"))
+            if legacy_ambient:
+                if bootstrap_cursor is None:
+                    raise unsupported
+                rebound = dict(target)
+                rebound["legacyWorkspaceSequence"] = rebound.pop("workspaceSequence")
+                rebound["position"] = json.loads(checked_position(bootstrap_cursor))
+                next_wakes[message_id] = rebound
+            else:
+                next_wakes[message_id] = dict(target)
+        if cursor is not None and bootstrap_cursor is not None:
+            bootstrap = checked_position(bootstrap_cursor)
+            if json.loads(cursor)["epoch"] != json.loads(bootstrap)["epoch"]:
+                cursor = bootstrap
+                self._state_needs_migration = True
+        self._pending_read_cursors = next_pending
+        self._pending_ambient_wakes = next_wakes
+        self._state_needs_migration = self._state_needs_migration or version != CURSOR_FILE_VERSION
+        return cursor
 
     def _persist_cursor(self, cursor: str) -> None:
         cursor = self._checked_cursor(cursor)
@@ -1296,6 +1451,9 @@ class HypeCommsAdapter(BasePlatformAdapter):
                             self._pending_read_cursors.items()
                         )
                     },
+                    "pendingAmbientWakes": dict(
+                        sorted(self._pending_ambient_wakes.items())
+                    ),
                 },
                 separators=(",", ":"),
             )
@@ -1341,6 +1499,237 @@ class HypeCommsAdapter(BasePlatformAdapter):
             ) from exc
         self._cursor = cursor
         self._state_needs_migration = False
+
+    @staticmethod
+    def _valid_ambient_wake(message_id: object, target: object, *, legacy: bool = False) -> bool:
+        if not isinstance(target, dict):
+            return False
+        position_key = "workspaceSequence" if legacy else "position"
+        if legacy:
+            valid_position = _is_sequence(target.get(position_key))
+        else:
+            position = target.get(position_key)
+            valid_position = (
+                isinstance(position, dict)
+                and set(position) == {"epoch", "sequence"}
+                and _is_entity_id(position.get("epoch"))
+                and _is_sequence(position.get("sequence"))
+            )
+        expected_keys = {
+            position_key, "conversationId", "conversationSequence", "authorId",
+            "threadRootId", "createdAt",
+        }
+        if not legacy and "legacyWorkspaceSequence" in target:
+            expected_keys.add("legacyWorkspaceSequence")
+            if not _is_sequence(target["legacyWorkspaceSequence"]):
+                return False
+        return (
+            _is_entity_id(message_id)
+            and set(target) == expected_keys
+            and valid_position
+            and _is_entity_id(target.get("conversationId"))
+            and _is_sequence(target.get("conversationSequence"))
+            and _is_entity_id(target.get("authorId"))
+            and (target.get("threadRootId") is None or _is_entity_id(target.get("threadRootId")))
+            and _is_iso_datetime(target.get("createdAt"))
+        )
+
+    def _checkpoint_after_handoff(self, position: object) -> str:
+        incoming = self._checked_cursor(position)
+        if self._cursor is None:
+            return incoming
+        current = self._checked_cursor(self._cursor)
+        incoming_position = json.loads(incoming)
+        current_position = json.loads(current)
+        # Recovery can refetch an anchor from a retired epoch. Its event position
+        # remains provenance; it must not replace the current epoch checkpoint.
+        if incoming_position["epoch"] != current_position["epoch"]:
+            return current
+        return incoming if _compare_decimal_strings(
+            incoming_position["sequence"], current_position["sequence"]
+        ) > 0 else current
+
+    def _retain_ambient_wake(self, event: MessageEvent) -> None:
+        raw = event.raw_message
+        timestamp = event.timestamp
+        message_id = event.message_id
+        if not isinstance(raw, Mapping) or not isinstance(timestamp, datetime) or not isinstance(message_id, str) or self._cursor is None:
+            raise CliFailure(6, "AMBIENT_WAKE_STATE_INVALID", "Hype Comms ambient wake target is invalid", False, error_kind="bad_format")
+        target = {
+            "position": raw.get("position"),
+            "conversationId": event.source.chat_id,
+            "conversationSequence": event.metadata.get("hype_comms_conversation_sequence"),
+            "authorId": event.source.user_id,
+            "threadRootId": raw.get("threadRootId"),
+            "createdAt": (
+                timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            ),
+        }
+        previous = self._pending_ambient_wakes.get(message_id)
+        if previous is not None and "legacyWorkspaceSequence" in previous:
+            target["legacyWorkspaceSequence"] = previous["legacyWorkspaceSequence"]
+        if previous == target:
+            return
+        if not self._valid_ambient_wake(message_id, target) or previous is not None:
+            raise CliFailure(
+                6,
+                "AMBIENT_WAKE_STATE_INVALID",
+                "Hype Comms ambient wake target is invalid",
+                False,
+                error_kind="bad_format",
+            )
+        if len(self._pending_ambient_wakes) >= MAX_PENDING_AMBIENT_WAKES:
+            raise CliFailure(
+                5,
+                "AMBIENT_WAKE_STATE_FULL",
+                "Hype Comms ambient wake recovery queue is full",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        self._pending_ambient_wakes[message_id] = target
+        try:
+            self._persist_cursor(self._cursor)
+        except Exception:
+            self._pending_ambient_wakes.pop(message_id, None)
+            raise
+
+    def _complete_ambient_wake(self, message_id: str) -> None:
+        target = self._pending_ambient_wakes.pop(message_id, None)
+        if target is None:
+            self._admitted_ambient_wakes.discard(message_id)
+            return
+        try:
+            self._persist_cursor(self._checked_cursor(self._cursor))
+        except Exception:
+            self._pending_ambient_wakes[message_id] = target
+            raise
+        self._admitted_ambient_wakes.discard(message_id)
+
+    async def _replay_pending_ambient_wakes(
+        self,
+        remaining_ids: Optional[set[str]] = None,
+    ) -> Optional[CliFailure]:
+        if remaining_ids is None:
+            remaining_ids = set(self._pending_ambient_wakes)
+        ordered = sorted(
+            (
+                (message_id, target)
+                for message_id, target in self._pending_ambient_wakes.items()
+                if message_id in remaining_ids
+            ),
+            # Migrated scalar anchors precede live positions in their rebound
+            # epoch. Their old sequences order only that legacy group; they are
+            # never compared with a current-epoch sequence or checkpoint.
+            key=lambda item: (
+                item[1]["position"]["epoch"],
+                0 if "legacyWorkspaceSequence" in item[1] else 1,
+                int(item[1].get("legacyWorkspaceSequence", item[1]["position"]["sequence"])),
+                item[0],
+            ),
+        )
+        for message_id, target in ordered:
+            if (
+                message_id not in self._pending_ambient_wakes
+                or message_id in self._admitted_ambient_wakes
+            ):
+                remaining_ids.discard(message_id)
+                continue
+            replay = {
+                "type": "message.created",
+                "workspaceId": self._workspace_id,
+                "position": target["position"],
+                "payload": {
+                    "mentionedUserIds": [],
+                    "message": {
+                        "id": message_id,
+                        "conversationId": target["conversationId"],
+                        "conversationSequence": target["conversationSequence"],
+                        "authorId": target["authorId"],
+                        "threadRootId": target["threadRootId"],
+                        "createdAt": target["createdAt"],
+                        # Refetch the server-authoritative context instead of
+                        # retaining message text in the local recovery file.
+                        "body": "",
+                    },
+                },
+            }
+            try:
+                if not await self._dispatch_message(replay):
+                    self._complete_ambient_wake(message_id)
+            except CliFailure as failure:
+                if not failure.retryable:
+                    raise
+                logger.warning("Hype Comms ambient recovery is pending (%s)", failure.code)
+                return failure
+            # The batch tracks admission, not successful model completion.
+            # Failed model decisions stay durable for the next connection;
+            # this recovery loop must not infer on them repeatedly.
+            remaining_ids.discard(message_id)
+        remaining_ids.intersection_update(self._pending_ambient_wakes)
+        return None
+
+    def _schedule_ambient_replay(
+        self,
+        remaining_ids: set[str],
+        failure: Optional[CliFailure],
+    ) -> None:
+        if not remaining_ids or self._stop_event.is_set():
+            return
+        existing = self._ambient_replay_task
+        if existing is not None and not existing.done():
+            return
+        # Only the new task writes its batch. New live wakes and failed model
+        # decisions do not join it; their anchors remain available on restart.
+        self._ambient_replay_task = asyncio.create_task(
+            self._ambient_replay_loop(set(remaining_ids), failure),
+            name="hype-comms-ambient-recovery",
+        )
+
+    async def _ambient_replay_loop(
+        self,
+        remaining_ids: set[str],
+        failure: Optional[CliFailure],
+    ) -> None:
+        current = asyncio.current_task()
+        attempt = 0
+        try:
+            while remaining_ids and not self._stop_event.is_set():
+                attempt += 1
+                await self._backoff(attempt, failure.retry_after if failure else None)
+                if self._stop_event.is_set():
+                    return
+                failure = await self._replay_pending_ambient_wakes(remaining_ids)
+        except asyncio.CancelledError:
+            raise
+        except CliFailure as failure:
+            await self._supervisor_fatal(failure)
+        except Exception:
+            await self._supervisor_fatal(
+                CliFailure(
+                    5,
+                    "AMBIENT_RECOVERY_FAILED",
+                    "Hype Comms ambient recovery task failed",
+                    True,
+                    error_kind="transient",
+                )
+            )
+        finally:
+            if self._ambient_replay_task is current:
+                self._ambient_replay_task = None
+
+    async def _cancel_ambient_replay(self) -> None:
+        task = self._ambient_replay_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._ambient_replay_task is task:
+                self._ambient_replay_task = None
 
     def _queue_read_cursor(
         self,
@@ -1614,6 +2003,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         del is_reconnect
         if self._watch_task is not None and not self._watch_task.done():
             return True
+        await self._cancel_ambient_replay()
         self._stop_event.clear()
         try:
             if not _has_access_policy():
@@ -1627,6 +2017,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             self._api_origin = _configured_origin(self.config)
             _configured_credential()
             self._require_compatible_gateway_session_config()
+            self._install_gateway_turn_policy()
 
             principal = await self._command(["auth", "whoami", "--json"])
             (
@@ -1651,17 +2042,19 @@ class HypeCommsAdapter(BasePlatformAdapter):
             self._lock_held = True
 
             self._cursor_path = self._select_cursor_path()
-            self._cursor = self._load_cursor()
+            self._cursor = self._load_cursor(bootstrap_cursor)
             if self._cursor is None:
                 # First install starts at the bootstrap high-water cursor. It
                 # must never wake Hermes for pre-installation history.
                 self._persist_cursor(bootstrap_cursor)
             elif self._state_needs_migration:
-                # Rewrite a recognized checkpoint before watch starts. Protocol 2
-                # positions retain pending read targets while replacing the replay epoch.
+                # Rewrite each strictly recognized legacy shape before watch starts.
+                # V4 keeps epoch positions, read targets and unfinished ambient anchors.
                 self._persist_cursor(self._cursor)
 
             read_cursor_outcome = await self._flush_pending_read_cursors()
+            ambient_replay_ids = set(self._pending_ambient_wakes)
+            ambient_replay_failure = await self._replay_pending_ambient_wakes(ambient_replay_ids)
 
             process = await self._spawn_watch()
             self._watch_process = process
@@ -1673,6 +2066,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # A failed connect-time flush must keep making progress even if no
             # message arrives after the gateway becomes healthy.
             self._schedule_read_cursor_retry(read_cursor_outcome.retry_after)
+            self._schedule_ambient_replay(ambient_replay_ids, ambient_replay_failure)
             logger.info("Hype Comms adapter connected")
             return True
         except (CliFailure, ValueError) as exc:
@@ -2002,6 +2396,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # durable pending targets are intentionally left untouched.
         self._stop_event.set()
         await self._cancel_read_cursor_retry()
+        await self._cancel_ambient_replay()
         self._mark_disconnected()
         # Pinned Hermes awaits this notification from the failing watch task,
         # but handles it in a shielded detached task whose disconnect wrapper
@@ -2010,6 +2405,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
         current = asyncio.current_task()
         if self._watch_task is current:
             self._watch_task = None
+        if self._ambient_replay_task is current:
+            self._ambient_replay_task = None
         await self._notify_fatal_error()
 
     async def _terminate_process(self, process: Any) -> None:
@@ -2247,16 +2644,12 @@ class HypeCommsAdapter(BasePlatformAdapter):
         prompt, and ``platform_hint`` is captured once at plugin registration,
         so it cannot name this workspace's agent username.
 
-        Returned only while thread follow-ups are enabled, which keeps the
-        default configuration byte-identical to the mention-only behaviour
-        this adapter shipped with. The text is constant for the life of the
-        adapter on purpose: Hermes keys its agent cache on the merged
-        ephemeral prompt, so a prompt that varied per message would rebuild
-        the agent and miss the provider prompt cache on every turn.
+        The text is constant for the life of the adapter on purpose: Hermes
+        keys its agent cache on the merged ephemeral prompt, so a prompt that
+        varied per message would rebuild the agent and miss the provider prompt
+        cache on every turn.
         """
 
-        if not self._thread_followups_enabled:
-            return None
         if self._channel_prompt_text is not None:
             return self._channel_prompt_text
         username = _safe_username(self._agent_user.get("username"))
@@ -2265,14 +2658,14 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # rather than cache a placeholder; a later message rebuilds it.
             return None
         self._channel_prompt_text = (
-            f"You are @{username} on Hype Comms. Direct messages, and channel "
-            f"messages that mention @{username}, are addressed to you: answer "
-            "them. You are also woken by follow-ups inside threads you have "
-            "already replied in, and most of those are people talking to each "
-            "other rather than to you. When a message that woke you needs "
-            "nothing from you, reply with exactly NO_REPLY and nothing else; "
-            "that reply is delivered to nobody. Never put NO_REPLY in the same "
-            "message as other text -- it only counts as silence on its own."
+            f"You are @{username} on Hype Comms. You receive every message in joined "
+            "conversations so you can decide whether you need to reply. Do not "
+            "acknowledge a message merely to show you saw it. Reply only when you are "
+            "directly addressed, have substantive useful information, work has landed, "
+            "you are blocked, or a decision is needed. Otherwise reply with exactly "
+            "NO_REPLY and nothing else; that reply is delivered to nobody. Never put "
+            "NO_REPLY in the same message as other text -- it only counts as silence "
+            "on its own."
         )
         return self._channel_prompt_text
 
@@ -2485,6 +2878,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 "platform": PLATFORM_NAME,
                 "position": event.get("position"),
                 "mentionedUserIds": list(mentioned_user_ids),
+                "threadRootId": message["threadRootId"],
             },
             message_id=str(message["id"]),
             timestamp=self._event_timestamp(
@@ -2532,7 +2926,163 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 denied.append(author_id)
         return tuple(sorted(denied))
 
-    async def _dispatch_message(self, event: Mapping[str, Any]) -> None:
+    def _is_ambient_channel_wake(self, event: MessageEvent) -> bool:
+        raw = event.raw_message
+        mentions = raw.get("mentionedUserIds") if isinstance(raw, Mapping) else None
+        return (
+            event.source.chat_type == "channel"
+            and isinstance(raw, Mapping)
+            and raw.get("platform") == PLATFORM_NAME
+            and isinstance(mentions, list)
+            and self._agent_user_id not in mentions
+        )
+
+    def set_message_handler(self, handler: Callable[[MessageEvent], Awaitable[Any]]) -> None:
+        async def guarded_handler(event: MessageEvent) -> Any:
+            response = await handler(event)
+            # Keep the anchor durable until Hermes has completed its model
+            # decision. A crash or failed turn leaves it available to replay.
+            # Native recursive turns retire through the scoped turn wrapper,
+            # which can distinguish a successful decision from a failed or
+            # interrupted result. A simple custom handler has no such hook.
+            runner = getattr(self, "gateway_runner", None)
+            if not getattr(runner, "_hype_comms_turn_policy", False):
+                self._complete_ambient_wake(str(event.message_id))
+            return response
+
+        super().set_message_handler(guarded_handler)
+
+    def set_busy_session_handler(
+        self,
+        handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]],
+    ) -> None:
+        async def guarded_handler(event: MessageEvent, session_key: str) -> bool:
+            if not self._is_ambient_channel_wake(event):
+                return await handler(event, session_key) if handler is not None else False
+            try:
+                self._queue_ambient_wake(event, session_key)
+            except CliFailure as failure:
+                # Base catches callback exceptions and falls through to its
+                # merging queue. Return handled, then let the enclosing watch
+                # handoff raise this failure before advancing its checkpoint.
+                self._ambient_handoff_failures[id(event)] = failure
+            except Exception:
+                self._ambient_handoff_failures[id(event)] = CliFailure(
+                    5,
+                    "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                    "Hermes cannot safely queue an ambient channel wake",
+                    True,
+                    retry_after=1.0,
+                    error_kind="transient",
+                )
+            return True
+
+        super().set_busy_session_handler(guarded_handler)
+
+    async def _handoff_message(self, event: MessageEvent) -> None:
+        """Queue ambient channel wakes without interrupting an active answer."""
+
+        if not self._is_ambient_channel_wake(event):
+            await self.handle_message(event)
+            return
+
+        # Match Base.handle_message's key and stale-lock recovery. Its normal
+        # busy callback interrupts/steers the active turn and sends a status
+        # acknowledgement before the model can decide to remain silent.
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        runner = getattr(self, "gateway_runner", None)
+        if getattr(runner, "_draining", False):
+            raise CliFailure(
+                5,
+                "HERMES_GATEWAY_DRAINING",
+                "Hermes is draining; retry the ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        active_sessions = getattr(self, "_active_sessions", {})
+        if session_key in active_sessions:
+            heal = getattr(self, "_heal_stale_session_lock", None)
+            if callable(heal):
+                heal(session_key)
+        if session_key not in active_sessions:
+            try:
+                # Base may yield before checking its session guard. The
+                # installed busy wrapper protects an idle-to-busy race too.
+                await self.handle_message(event)
+                failure = self._ambient_handoff_failures.pop(id(event), None)
+                if failure is not None:
+                    raise failure
+            finally:
+                self._ambient_handoff_failures.pop(id(event), None)
+            return
+        self._queue_ambient_wake(event, session_key)
+
+    def _queue_ambient_wake(self, event: MessageEvent, session_key: str) -> None:
+        runner = getattr(self, "gateway_runner", None)
+        if getattr(runner, "_draining", False):
+            raise CliFailure(
+                5,
+                "HERMES_GATEWAY_DRAINING",
+                "Hermes is draining; retry the ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+
+        enqueue = getattr(runner, "_enqueue_fifo", None)
+        queue_depth = getattr(runner, "_queue_depth", None)
+        adapter_for_source = getattr(runner, "_adapter_for_source", None)
+        capacity = getattr(runner, "_BUSY_QUEUE_MAX_PENDING", 32)
+        if (
+            not callable(enqueue)
+            or not callable(queue_depth)
+            or not callable(adapter_for_source)
+            or adapter_for_source(event.source) is not self
+            or not isinstance(getattr(self, "_pending_messages", None), dict)
+            or not isinstance(capacity, int)
+            or capacity <= 0
+        ):
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                "Hermes cannot safely queue an ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        depth = queue_depth(session_key, adapter=self)
+        if not isinstance(depth, int) or depth < 0:
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                "Hermes cannot safely queue an ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        if depth >= capacity:
+            # Retry the uncheckpointed watch event once the bounded FIFO has
+            # room. Hermes's normal busy helper drops overflow, and falling
+            # back to the base pending slot merges distinct context packs.
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_FULL",
+                "Hermes ambient channel wake queue is full",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        # No await between the capacity check and enqueue: another event cannot
+        # fill the queue or finish the active session during this handoff.
+        # The pinned runner drains each FIFO entry as a separate model turn.
+        enqueue(session_key, event, self)
+
+    async def _dispatch_message(self, event: Mapping[str, Any]) -> bool:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             raise CliFailure(
@@ -2585,10 +3135,10 @@ class HypeCommsAdapter(BasePlatformAdapter):
 
         author_id = message.get("authorId")
         if author_id == self._agent_user_id:
-            return
+            return False
         if not isinstance(author_id, str):
             logger.warning("Ignoring Hype Comms message without an active author")
-            return
+            return False
 
         conversation_id = str(message["conversationId"])
         chat_info = self._chat_info(conversation_id)
@@ -2604,21 +3154,11 @@ class HypeCommsAdapter(BasePlatformAdapter):
             chat_info = self._chat_info(conversation_id)
         if chat_info is None:
             logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
-            return
-        if chat_info["type"] == "channel" and self._agent_user_id not in mentioned_user_ids:
-            # A participated-thread reply is a follow-up inside a thread this
-            # agent has already spoken in. The server annotates it per
-            # recipient and only for a client that negotiated
-            # participated-thread-notifications-v1, so the flag below is the
-            # only thing standing between "answer when named" and "listen to
-            # every thread you have ever touched". Waking here costs a full
-            # inference turn even when the model decides to stay quiet, so it
-            # stays opt-in.
-            if not (
-                self._thread_followups_enabled
-                and payload.get("recipientNotificationReason") == PARTICIPATED_THREAD_REPLY
-            ):
-                return
+            return False
+        # Every authorized message reaches Hermes. The model decides whether
+        # the event needs an outward reply, using NO_REPLY for intentional
+        # silence. Self-authored and unauthorized traffic is still filtered
+        # before context crosses into the model-facing process.
         # Ask the same profile-/pairing-/group-aware callback pinned Hermes
         # uses for normal inbound delivery. This must precede context history:
         # a sender who cannot wake Hermes must not make nearby conversation
@@ -2629,7 +3169,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             str(chat_info["type"]),
             conversation_id,
         ):
-            return
+            return False
         author = self._members.get(author_id)
         if author is None and not directory_refreshed:
             # Author display metadata is needed only after authorization. This
@@ -2641,7 +3181,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             author = self._members.get(author_id)
         if chat_info is None or author is None:
             logger.warning("Ignoring Hype Comms message with unresolved directory metadata")
-            return
+            return False
 
         anchor_message_id = str(message["id"])
         pack = await self._fetch_context_pack(
@@ -2655,7 +3195,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             anchor_thread_root_id=message["threadRootId"],
         )
         if pack is None:
-            return
+            return False
         denied_author_ids = self._denied_context_author_ids(
             pack,
             chat_type=str(chat_info["type"]),
@@ -2690,24 +3230,37 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # stable adapter instructions so untrusted history can never acquire
         # system-prompt authority or churn Hermes's prompt cache per wake.
         normalized.channel_prompt = self._channel_prompt()
-        await self.handle_message(normalized)
+        if self._is_ambient_channel_wake(normalized):
+            self._retain_ambient_wake(normalized)
+            if normalized.message_id not in self._admitted_ambient_wakes:
+                # A reconnect in this process may retain the same live FIFO.
+                # Reserve before yielding to avoid admitting a second copy.
+                self._admitted_ambient_wakes.add(str(normalized.message_id))
+                try:
+                    await self._handoff_message(normalized)
+                except BaseException:
+                    self._admitted_ambient_wakes.discard(normalized.message_id)
+                    raise
+        else:
+            await self._handoff_message(normalized)
 
         if READ_CURSOR_SCOPE not in self._agent_scopes:
             self._warn_missing_read_cursor_scope()
-            return
+            return True
         read_through_message_id = str(pack["readThroughMessageId"])
         anchor = pack["messages"][-1]
         self._queue_read_cursor(
-            workspace_cursor=self._checked_cursor(event.get("position")),
+            workspace_cursor=self._checkpoint_after_handoff(event.get("position")),
             conversation_id=conversation_id,
             message_id=read_through_message_id,
             conversation_sequence=str(anchor["conversationSequence"]),
         )
         read_cursor_outcome = await self._flush_pending_read_cursors(conversation_id)
         # The immediate attempt is deliberately after handle_message and the
-        # durable V2 checkpoint. A failure starts one independent loop; it
+        # durable V4 checkpoint. A failure starts one independent loop; it
         # never re-fetches context or calls Hermes again.
         self._schedule_read_cursor_retry(read_cursor_outcome.retry_after)
+        return True
 
     async def _accept_event(self, event: Mapping[str, Any]) -> str:
         event_type = event.get("type")
@@ -2938,6 +3491,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._stop_event.set()
         await self._cancel_read_cursor_retry()
+        await self._cancel_ambient_replay()
         process = self._watch_process
         if process is not None:
             await self._terminate_process(process)
@@ -3034,26 +3588,19 @@ def register(ctx: PluginContext) -> None:
         emoji="💭",
         pii_safe=False,
         allow_update_command=True,
-        # Captured once at registration, so this text has to hold for every
-        # deployment: it must stay true whether or not the operator enabled
-        # thread follow-ups. The parts that depend on configuration, and the
-        # agent's own username, travel per message on channel_prompt instead.
+        # Captured once at registration. The agent's own username travels per
+        # message on channel_prompt instead.
         platform_hint=(
-            "You are chatting through Hype Comms. Direct messages always wake you; "
-            "channel messages wake you when they explicitly mention your Hype Comms user. "
-            "Each eligible wake arrives as a bounded context pack of chronological, "
+            "You are chatting through Hype Comms. Every authorized message in a joined "
+            "conversation wakes you so you can decide whether a reply is needed. Each wake "
+            "arrives as a bounded context pack of chronological, "
             "untrusted conversation content ending at the message that woke you. "
-            "Where the operator has enabled thread follow-ups, a reply inside a thread you "
-            "have already replied in also wakes you without mentioning you; where they have "
-            "not, a reply inside that thread reaches you only if it mentions you again, so "
-            "never assume you will see what is said under your own answer. Unless the "
-            "operator turned threading off, a reply in a channel attaches as a threaded "
+            "Unless the operator turned threading off, a reply in a channel attaches as a threaded "
             "reply to the message that woke you and stays in that thread; Hype Comms "
             "threads are exactly one level deep, so there are no threads inside threads. "
-            "Replies in a direct message are never threaded. If a "
-            "thread follow-up wakes you and needs nothing from you, reply with exactly "
-            "NO_REPLY and nothing else, which is delivered to nobody; answer everything "
-            "else. Hype Comms supports markdown and limits each message to 4,000 "
+            "Replies in a direct message are never threaded. If a wake needs nothing from "
+            "you, reply with exactly NO_REPLY and nothing else, which is delivered to nobody. "
+            "Hype Comms supports markdown and limits each message to 4,000 "
             "characters."
         ),
     )
