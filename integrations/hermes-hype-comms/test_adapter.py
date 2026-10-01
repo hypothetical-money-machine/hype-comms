@@ -2166,6 +2166,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         ]
         for target_field, value in (
             ("position", {"epoch": PROTOCOL_EPOCH, "sequence": "-1"}),
+            ("position", {"epoch": "bad-id", "sequence": "101"}),
             ("conversationId", "bad-id"),
             ("conversationSequence", True),
             ("authorId", None),
@@ -2419,6 +2420,30 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(seed._cursor_path.read_text())["pendingAmbientWakes"], {})
         finally:
             await restarted.disconnect()
+
+    async def test_v3_epoch_cursor_migrates_to_v4_without_rewinding(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter._cursor_path.write_text(json.dumps({
+            "version": 3,
+            "cursor": position("101"),
+            "pendingReadCursors": {
+                DM_ID: {
+                    "messageId": message_id_for("101"),
+                    "conversationSequence": "101",
+                },
+            },
+        }), encoding="utf-8")
+
+        cursor = adapter._load_cursor()
+        self.assertEqual(cursor, cursor_text("101"))
+        self.assertTrue(adapter._state_needs_migration)
+        adapter._persist_cursor(cursor)
+        migrated = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["version"], 4)
+        self.assertEqual(migrated["cursor"], position("101"))
+        self.assertEqual(migrated["pendingReadCursors"][DM_ID]["messageId"], message_id_for("101"))
+        self.assertEqual(migrated["pendingAmbientWakes"], {})
 
     async def test_v4_restart_uses_new_epoch_without_rewinding_or_losing_recovery(self) -> None:
         seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")

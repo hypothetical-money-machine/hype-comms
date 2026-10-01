@@ -34,3 +34,71 @@ test("fails the server suite before any test runs when a required test database 
   assert.match(output, /HYPE_COMMS_REQUIRE_TEST_DATABASE/u);
   assert.match(output, /HYPE_COMMS_TEST_DATABASE_URL/u);
 });
+
+test("direct integration execution rejects a missing database without the opt-in flag", () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const vitestEntrypoint = fileURLToPath(
+    new URL("../node_modules/vitest/vitest.mjs", import.meta.url),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      vitestEntrypoint,
+      "run",
+      "--root",
+      "apps/server",
+      "--project",
+      "integration",
+      "test/database-fixture.integration.test.ts",
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        ...process.env,
+        CI: "",
+        HYPE_COMMS_REQUIRE_TEST_DATABASE: "",
+        HYPE_COMMS_TEST_DATABASE_URL: "",
+      },
+    },
+  );
+
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /HYPE_COMMS_TEST_DATABASE_URL is required/u);
+});
+
+test("direct integration execution rejects a non-test database before fixtures connect", () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const vitestEntrypoint = fileURLToPath(
+    new URL("../node_modules/vitest/vitest.mjs", import.meta.url),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [
+      vitestEntrypoint,
+      "run",
+      "--root",
+      "apps/server",
+      "--project",
+      "integration",
+      "test/database-fixture.integration.test.ts",
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        ...process.env,
+        CI: "",
+        HYPE_COMMS_REQUIRE_TEST_DATABASE: "",
+        HYPE_COMMS_TEST_DATABASE_URL: "postgresql://127.0.0.1/hype_comms",
+      },
+    },
+  );
+
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.notEqual(result.status, 0, output);
+  assert.match(output, /Refusing to run PostgreSQL tests against non-test database/u);
+});

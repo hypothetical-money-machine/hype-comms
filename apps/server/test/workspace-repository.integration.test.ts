@@ -3347,6 +3347,163 @@ describe("WorkspaceRepository", () => {
     expect(agentSync.events.some((event) => event.conversationId === conversationId)).toBe(false);
   });
 
+  it("normalizes retained pre-upgrade humans-only channel events without rewriting them", async () => {
+    repository = new WorkspaceRepository(
+      pool,
+      repositoryHooks({ humansOnlyChannelsEnabled: true }),
+    );
+    const beforeCreate = (await repository.bootstrap(owner)).syncCursor;
+    const created = await repository.createChannel(owner, {
+      name: "Retained people",
+      slug: "retained-people",
+      topic: null,
+      access: "humans",
+    });
+    const conversationId = created.conversation.conversation.id;
+    await repository.archiveChannel(owner, conversationId);
+
+    // The previous server used channel_access, and stripped channelMode before persisting events.
+    await pool.query(
+      `UPDATE sync_events
+          SET payload = jsonb_set(
+            payload #- '{conversation,channelMode}', '{conversation,access}', '"members"'
+          )
+        WHERE conversation_id = $1
+          AND event_type IN ('channel.created', 'channel.archived')`,
+      [conversationId],
+    );
+    const readStored = () =>
+      pool.query<{ payload: { conversation: { access: string; channelMode?: string } } }>(
+        `SELECT payload FROM sync_events WHERE conversation_id = $1
+         AND event_type IN ('channel.created', 'channel.archived')
+         ORDER BY workspace_sequence`,
+        [conversationId],
+      );
+    const storedBefore = await readStored();
+    expect(storedBefore.rows.map((row) => row.payload.conversation.access)).toEqual([
+      "members",
+      "members",
+    ]);
+    for (const row of storedBefore.rows) {
+      expect(row.payload.conversation).not.toHaveProperty("channelMode");
+    }
+
+    const snapshot = await repository.bootstrap(member);
+    expect(
+      snapshot.conversations.find((summary) => summary.conversation.id === conversationId)
+        ?.conversation.access,
+    ).toBe("humans");
+    for (const response of [
+      await repository.sync(member, beforeCreate, 100),
+      await repository.syncPrincipal({ workspaceId, userId: memberId }, beforeCreate, 100),
+    ]) {
+      const events = response.events.filter((event) => event.conversationId === conversationId);
+      expect(events.map((event) => event.type)).toEqual(["channel.created", "channel.archived"]);
+      for (const event of events) {
+        expect(event.payload).toMatchObject({ conversation: { access: "humans" } });
+      }
+      expect(response.nextCursor).toBe(snapshot.syncCursor);
+    }
+    expect((await readStored()).rows).toEqual(storedBefore.rows);
+  });
+
+  it("scopes membership-change event audiences to the prior audience plus the target", async () => {
+    const created = await repository.createChannel(owner, {
+      name: "Audience Derivation",
+      slug: "audience-derivation",
+      topic: null,
+      access: "members",
+    });
+    const conversationId = created.conversation.conversation.id;
+
+    // A granted bot is the one audience contributor without a conversation_memberships row, so
+    // it pins the derivation's grant-inclusive pre-upsert read: every membership event below
+    // must reach the bot too.
+    const botId = randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, username, display_name, kind)
+       VALUES ($1, 'audience-bot', 'Zeta Bot', 'bot')`,
+      [botId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [workspaceId, botId],
+    );
+    await pool.query(
+      `INSERT INTO bot_channel_grants (workspace_id, bot_user_id, conversation_id, granted_by)
+       VALUES ($1, $2, $3, $4)`,
+      [workspaceId, botId, conversationId, ownerId],
+    );
+
+    async function membershipEventAudience(action: string): Promise<string[]> {
+      const result = await pool.query<{ user_id: string }>(
+        `SELECT audience.user_id
+           FROM sync_event_audiences AS audience
+           JOIN sync_events AS event ON event.id = audience.event_id
+          WHERE event.conversation_id = $1
+            AND event.event_type = 'channel.membership_changed'
+            AND event.payload ->> 'action' = $2
+            AND event.workspace_sequence = (
+              SELECT max(inner_event.workspace_sequence)
+                FROM sync_events AS inner_event
+               WHERE inner_event.conversation_id = $1
+                 AND inner_event.event_type = 'channel.membership_changed'
+                 AND inner_event.payload ->> 'action' = $2
+            )
+          ORDER BY audience.user_id`,
+        [conversationId, action],
+      );
+      return result.rows.map((row) => row.user_id);
+    }
+
+    // First add: prior audience is the owner plus the granted bot, so the event reaches
+    // owner + bot + target only.
+    const added = await repository.upsertChannelMember(owner, conversationId, memberId, {
+      role: "member",
+    });
+    expect(await membershipEventAudience("added")).toEqual([ownerId, memberId, botId].sort());
+    expect(added.channelMembers.members.map(({ user: listed }) => listed.id)).toEqual([
+      memberId,
+      ownerId,
+      botId,
+    ]);
+
+    // Role-only change: the target is already in the audience, so the set is unchanged.
+    await repository.upsertChannelMember(owner, conversationId, memberId, { role: "owner" });
+    expect(await membershipEventAudience("updated")).toEqual([ownerId, memberId, botId].sort());
+
+    // Re-add after leave: the departed member is back in the audience, and nobody else is.
+    const removed = await repository.removeChannelMember(owner, conversationId, memberId);
+    expect(removed.channelMembers.members.map(({ user: listed }) => listed.id)).toEqual([
+      ownerId,
+      botId,
+    ]);
+    expect(await membershipEventAudience("removed")).toEqual([ownerId, memberId, botId].sort());
+    const readded = await repository.upsertChannelMember(owner, conversationId, memberId, {
+      role: "member",
+    });
+    expect(await membershipEventAudience("added")).toEqual([ownerId, memberId, botId].sort());
+    expect(readded.channelMembers.members.map(({ user: listed }) => listed.id)).toEqual([
+      memberId,
+      ownerId,
+      botId,
+    ]);
+
+    // The observer never appears in any membership event audience for this private channel.
+    const allAudiences = await pool.query<{ user_id: string }>(
+      `SELECT DISTINCT audience.user_id
+         FROM sync_event_audiences AS audience
+         JOIN sync_events AS event ON event.id = audience.event_id
+        WHERE event.conversation_id = $1
+          AND event.event_type = 'channel.membership_changed'`,
+      [conversationId],
+    );
+    expect(allAudiences.rows.map((row) => row.user_id).sort()).toEqual(
+      [ownerId, memberId, botId].sort(),
+    );
+  });
+
   it("always retains an owner for a member-only channel", async () => {
     const created = await repository.createChannel(owner, {
       name: "Steering",

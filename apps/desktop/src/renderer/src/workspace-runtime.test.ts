@@ -2165,6 +2165,7 @@ describe("WorkspaceRuntime", () => {
       expect(runtime.state.reactions).toEqual([secondReaction]);
       expect(load.mock.calls).toEqual([[{ conversationId: SECOND_CONVERSATION_ID }]]);
       if (offline) {
+        expect(runtime.hasOlder(SECOND_CONVERSATION_ID)).toBe(false);
         expect(api.historyRequests).toEqual([]);
         await runtime.sendMessage(SECOND_CONVERSATION_ID, "Queued from restored cache", []);
         expect((await cache.load()).outbox).toHaveLength(1);
@@ -2570,7 +2571,7 @@ describe("WorkspaceRuntime", () => {
     });
   });
 
-  it("marks an unselected conversation as read using its last message and clears unreads", async () => {
+  it("clears an unselected conversation's unreads only after its last-message cursor is accepted", async () => {
     const secondConversationId = "20000000-0000-4000-8000-000000000002";
     const secondMessageId = "20000000-0000-4000-8000-000000000003";
     const initialBootstrap = bootstrapAt("10");
@@ -2591,6 +2592,11 @@ describe("WorkspaceRuntime", () => {
       conversations: [...initialBootstrap.conversations, secondSummary],
     };
     const api = new FakeDesktopApi(bootstrapWithTwo);
+    const readResult = deferred<AdvanceReadCursorResponse>();
+    vi.spyOn(api, "advanceReadCursor").mockImplementation(async (conversationId, messageId) => {
+      api.readCursorRequests.push({ conversationId, lastReadMessageId: messageId });
+      return await readResult.promise;
+    });
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
 
@@ -2601,8 +2607,8 @@ describe("WorkspaceRuntime", () => {
     const updatedSummary = runtime.state.bootstrap?.conversations.find(
       (c) => c.conversation.id === secondConversationId,
     );
-    expect(updatedSummary?.unreadCount).toBe(0);
-    expect(updatedSummary?.mentionCount).toBe(0);
+    expect(updatedSummary?.unreadCount).toBe(3);
+    expect(updatedSummary?.mentionCount).toBe(1);
 
     await settle(
       () => api.readCursorRequests.length === 1,
@@ -2612,6 +2618,78 @@ describe("WorkspaceRuntime", () => {
       conversationId: secondConversationId,
       lastReadMessageId: secondMessageId,
     });
+    readResult.resolve({
+      readCursor: {
+        conversationId: secondConversationId,
+        userId: USER_ID,
+        lastReadMessageId: secondMessageId,
+        lastReadConversationSequence: "5",
+        lastReadAt: NOW,
+        updatedAt: NOW,
+      },
+      syncCursor: testPosition("11"),
+    });
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations.find(
+          (current) => current.conversation.id === secondConversationId,
+        )?.unreadCount === 0,
+      "accepted last-message read cursor",
+    );
+    expect(
+      runtime.state.bootstrap?.conversations.find(
+        (current) => current.conversation.id === secondConversationId,
+      ),
+    ).toMatchObject({ unreadCount: 0, mentionCount: 0 });
+    await runtime.stop();
+  });
+
+  it("keeps unread and mention counts until a retried mark-as-read request is accepted", async () => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const initialBootstrap = bootstrapAt("10");
+    const unreadSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      lastMessage: peerMessage,
+      readCursor: null,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const api = new FakeDesktopApi({
+      ...initialBootstrap,
+      conversations: [unreadSummary],
+    });
+    api.readCursorFailures = 2;
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    try {
+      await runtime.start(session);
+      runtime.markConversationAsRead(CONVERSATION_ID);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.readCursorRequests).toHaveLength(1);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 3,
+        mentionCount: 1,
+        readCursor: null,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(api.readCursorRequests).toHaveLength(2);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 3,
+        mentionCount: 1,
+        readCursor: null,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(api.readCursorRequests).toHaveLength(3);
+      expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
+        unreadCount: 0,
+        mentionCount: 0,
+        readCursor: { lastReadMessageId: PEER_MESSAGE_ID },
+      });
+    } finally {
+      await runtime.stop();
+      random.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("does nothing when marking a conversation as read that has 0 unreads", async () => {
@@ -5971,6 +6049,37 @@ describe("WorkspaceRuntime", () => {
     expect(ids).toContain(PEER_MESSAGE_ID);
     expect(ids).toContain(OWN_MESSAGE_ID);
     expect(runtime.state.bootstrap?.conversations[0]?.unreadCount).toBe(1);
+  });
+
+  it("issues distinct main-timeline jump requests for repeated task and attachment sources", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, new MemoryWorkspaceCache());
+    await runtime.start(session);
+    const sourceTask = { ...task, sourceMessageId: OWN_MESSAGE_ID };
+    runtime.openTaskSource(sourceTask);
+    const first = runtime.state.focusedMessageRequest;
+    runtime.openTaskSource(sourceTask);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(first);
+    const attachment: Attachment = {
+      id: "20000000-0000-4000-8000-0000000000aa",
+      messageId: OWN_MESSAGE_ID,
+      uploadedBy: USER_ID,
+      fileName: "launch-notes.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      downloadUrl: null,
+      createdAt: NOW,
+    };
+    runtime.openAttachmentSource(attachment);
+    const second = runtime.state.focusedMessageRequest;
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second);
+    expect(runtime.state.focusedMessageId).toBe(OWN_MESSAGE_ID);
+    await runtime.stop();
+    await runtime.start(session);
+    runtime.openAttachmentSource(attachment);
+    expect(runtime.state.focusedMessageRequest).toBeGreaterThan(second + 1);
   });
 
   it("sends attachment ids and hydrates files from history and live messages", async () => {

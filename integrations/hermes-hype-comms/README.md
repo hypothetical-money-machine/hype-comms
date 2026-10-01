@@ -22,7 +22,7 @@ The adapter:
 - sends replies with message text on private stdin, never in process arguments,
   and threads a channel reply by passing only the server-minted thread-root
   UUID as a flag;
-- atomically checkpoints the last accepted decimal workspace cursor together
+- atomically checkpoints the last accepted epoch-scoped workspace position together
   with pending read-cursor targets and unfinished ambient-turn anchors; and
 - supports `deliver=hype_comms` cron jobs in both live-gateway and standalone
   cron processes.
@@ -372,13 +372,12 @@ checkpoints restart from a fresh bootstrap position; validated read targets and
 ambient identities remain pending. The old scalar sequence is retained as
 `legacyWorkspaceSequence` provenance and orders only the initial migrated anchors
 when assigning their durable ordinals.
-Recovery uses `recoveryOrder` to preserve each channel's chronology across epochs;
-other channels can progress while it waits for a retry. Newly retained anchors
-follow the maximum pending ordinal. Epoch UUID spelling and legacy scalars are never
-compared with current checkpoint sequences. Epoch checkpoints retain their position
-when the bootstrap epoch matches, and use the fresh bootstrap position when it changes. Unknown, mixed or
-malformed state fails startup. Version 1 and 2 scalar formats also use a fresh
-bootstrap; version 2 read targets are retained.
+Recovery uses `recoveryOrder` to preserve each channel's chronology across epochs.
+Newly retained anchors follow the maximum pending ordinal. Epoch UUIDs and legacy
+scalars are never compared with current checkpoint sequences. Epoch checkpoints
+retain their position when the bootstrap epoch matches and use the fresh bootstrap
+position when it changes. Unknown, mixed, or malformed state fails startup. Version
+1 and 2 scalar formats also use a fresh bootstrap; version 2 read targets are retained.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
@@ -505,14 +504,14 @@ needed for these checks. The `typings/` stubs describe the consumed API at the p
 Hermes commit above; review them alongside any Hermes upgrade.
 
 Coverage includes startup/bootstrap, scoped locking, DM delivery, allowlist and
-mention gating before context retrieval, self-message suppression, exact
+authorization gating before context retrieval, self-message suppression, exact
 context argv and limits, strict malformed/mismatch rejection, untrusted-content
 rendering and injection-safe byte accounting, transient context replay,
 post-handoff ordering, failed handoff, retracted-anchor poison-event skipping,
 read-scope warning/no-mutation behavior, durable pending read retry across
 idle uptime and restart, Retry-After propagation, permanent-failure parking,
 retry-task and in-flight child cancellation, fatal-handler teardown ownership,
-v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
+v1/v2 bootstrap migration and v3-to-v4 epoch migration, anchor-only ambient recovery with fresh context and
 authorization, write/fsync failure rollback, reconnect admission deduplication,
 per-turn completion across mixed failed/successful FIFO decisions, isolated
 Hype display configuration, deferred recovery beyond live FIFO capacity,
