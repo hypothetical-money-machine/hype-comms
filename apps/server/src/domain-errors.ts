@@ -6,6 +6,8 @@ export type DomainErrorKind =
   | "access_denied"
   | "authentication_required"
   | "sync_position_expired"
+  | "sync_epoch_mismatch"
+  | "unavailable"
   | "integrity_failure";
 
 export class DomainError extends Error {

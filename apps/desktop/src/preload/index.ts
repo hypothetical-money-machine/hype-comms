@@ -1,3 +1,4 @@
+import type { SyncPosition } from "@hype-comms/contracts";
 import {
   AI_CHANNEL_STATE_IPC_MAX_BYTES,
   DEVICE_PREFERENCES_IPC_MAX_BYTES,
@@ -364,8 +365,8 @@ const desktopApi: DesktopApi & NotificationTransport & NotificationCaptureTransp
         lastReadMessageId,
       });
     },
-    syncWorkspace: async (after: string) => invokeDesktop("workspaceSync", after),
-    startWorkspaceRealtime: async (after: string): Promise<RealtimeSessionScope> =>
+    syncWorkspace: async (after: SyncPosition) => invokeDesktop("workspaceSync", after),
+    startWorkspaceRealtime: async (after: SyncPosition): Promise<RealtimeSessionScope> =>
       invokeDesktop("workspaceRealtimeStart", after),
     activateWorkspaceRealtime: async (scope: RealtimeSessionScope) => {
       await invokeDesktop("workspaceRealtimeActivate", scope);

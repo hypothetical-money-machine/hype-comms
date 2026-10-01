@@ -1490,6 +1490,43 @@ describe("ChatSession request lifetime", () => {
     await expect(response).rejects.toThrow("caller cancelled");
   });
 
+  it("checks a queued passive sign-out after a replacement login finishes", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const cookies = storedIdentityCookies();
+    const contexts = new MemoryAuthenticatedContexts();
+    let current = true;
+    const session = createSession(
+      async (url) => {
+        if (url === API_ORIGIN + "/v2/bootstrap") return emptyResponse(401);
+        if (url === CURRENT_USER_URL) return jsonResponse(CURRENT_USER);
+        entered.resolve();
+        await release.promise;
+        return jsonResponse(OTHER_USER);
+      },
+      cookies,
+      "production",
+      contexts,
+    );
+    try {
+      await session.restore();
+      const response = await session.fetch(API_ORIGIN + "/v2/bootstrap");
+      const exchange = session.exchangeMagicLink(TOKEN);
+      await entered.promise;
+      const oldRejection = session.markSignedOut(response, () => current);
+      current = false;
+      release.resolve();
+      await exchange;
+      await expect(oldRejection).resolves.toBe(false);
+      expect(session.state).toMatchObject({ status: "signed-in", userId: OTHER_USER.user.id });
+      expect(cookies.values.get("hype_comms_session")).toBe("identity-cookie");
+      expect(contexts.session?.userId).toBe(OTHER_USER.user.id);
+    } finally {
+      release.resolve();
+      session.stop();
+    }
+  });
+
   it("ignores a queued rejection after its lifetime retires without a credential rotation", async () => {
     const entered = deferred<void>();
     const release = deferred<void>();

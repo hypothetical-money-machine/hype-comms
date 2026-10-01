@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { workspaceEventSchema, type WorkspaceEvent } from "@hype-comms/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
+import { readWorkspaceProtocol } from "./protocol-epoch.js";
 
 /**
  * Everything needed to publish one entry onto the workspace sync-event pipeline
@@ -55,6 +56,7 @@ export async function insertSyncEventWithSequence(
   sequence: string,
   input: WorkspaceSyncEventInput,
 ): Promise<WorkspaceEvent> {
+  const protocol = await readWorkspaceProtocol(client, input.workspaceId);
   const occurredAt = new Date().toISOString();
   const event = workspaceEventSchema.parse({
     version: 1,
@@ -63,7 +65,7 @@ export async function insertSyncEventWithSequence(
     occurredAt,
     workspaceId: input.workspaceId,
     conversationId: input.conversationId,
-    workspaceSequence: sequence,
+    position: { epoch: protocol.epoch, sequence },
     conversationSequence: input.conversationSequence ?? null,
     entityVersion: input.entityVersion ?? 1,
     delivery: "at_least_once",
@@ -78,7 +80,7 @@ export async function insertSyncEventWithSequence(
     [
       event.id,
       event.workspaceId,
-      event.workspaceSequence,
+      event.position.sequence,
       event.conversationId,
       event.conversationSequence,
       event.type,
@@ -107,7 +109,7 @@ export async function insertSyncEventWithSequence(
     );
   }
   await client.query(`SELECT pg_notify('hype_comms_events', $1)`, [
-    `${event.workspaceId}:${event.workspaceSequence}`,
+    `${event.workspaceId}:${event.position.sequence}`,
   ]);
   return event;
 }

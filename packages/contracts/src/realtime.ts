@@ -1,3 +1,4 @@
+import { syncPositionSchema, syncPositionQuerySchema } from "./sync-position.js";
 import { z } from "zod";
 
 import {
@@ -16,7 +17,7 @@ export const realtimeTicketSchema = z
   .regex(/^[A-Za-z0-9._~-]+$/);
 
 export const realtimeConnectionQuerySchema = z
-  .object({ ticket: realtimeTicketSchema, after: sequenceSchema })
+  .object({ ticket: realtimeTicketSchema, after: syncPositionQuerySchema })
   .strict();
 
 /**
@@ -48,7 +49,7 @@ export const realtimeSessionScopeSchema = z
 export const realtimeAcknowledgementSchema = z
   .object({
     scope: realtimeSessionScopeSchema,
-    cursor: sequenceSchema,
+    cursor: syncPositionSchema,
   })
   .strict();
 
@@ -139,7 +140,7 @@ export const realtimeEventEnvelopeSchema = z
     occurredAt: isoDateTimeSchema,
     workspaceId: entityIdSchema.nullable(),
     conversationId: entityIdSchema.nullable(),
-    workspaceSequence: sequenceSchema,
+    position: syncPositionSchema,
     conversationSequence: sequenceSchema.nullable(),
     entityVersion: entityVersionSchema,
     delivery: realtimeDeliverySemanticsSchema,

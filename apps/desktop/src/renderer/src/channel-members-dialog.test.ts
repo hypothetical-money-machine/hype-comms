@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   ChannelMembershipMutationResponse,
   ChannelMembersResponse,
@@ -9,6 +9,7 @@ import type {
 import { createElement, createRef } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { testPosition } from "../../shared/test-support/sync-position";
 import { ChannelMembersDialog } from "./channel-members-dialog";
 
 const CONVERSATION_ID = "10000000-0000-4000-8000-000000000001";
@@ -91,6 +92,7 @@ function renderChannelDialog(overrides: {
   return render(
     createElement(ChannelMembersDialog, {
       source: "channel",
+      syncCursor: testPosition("0"),
       channelName: "leadership",
       conversationId: CONVERSATION_ID,
       currentUserId: OWNER_ID,
@@ -114,7 +116,7 @@ describe("ChannelMembersDialog", () => {
   it("adds checked workspace members and renders the returned membership", async () => {
     const upsert = vi.fn().mockResolvedValue({
       channelMembers: membersWith(member),
-      syncCursor: "4",
+      syncCursor: testPosition("4"),
     });
     renderChannelDialog({ upsert, load: vi.fn().mockResolvedValue(initial) });
 
@@ -150,8 +152,8 @@ describe("ChannelMembersDialog", () => {
   });
 
   it("fires one concurrent upsert per checked member from a single Add", async () => {
-    const first = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
-    const second = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
+    const first = deferred<ChannelMembershipMutationResponse>();
+    const second = deferred<ChannelMembershipMutationResponse>();
     const upsert = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     renderChannelDialog({ workspaceMembers: [owner, member, agent], upsert });
 
@@ -164,18 +166,15 @@ describe("ChannelMembersDialog", () => {
     expect(upsert).toHaveBeenCalledWith(CONVERSATION_ID, MEMBER_ID, "member");
     expect(upsert).toHaveBeenCalledWith(CONVERSATION_ID, AGENT_ID, "member");
 
-    first.resolve({ channelMembers: membersWith(member), syncCursor: "4" });
-    second.resolve({ channelMembers: membersWith(member, agent), syncCursor: "5" });
+    first.resolve({ channelMembers: membersWith(member), syncCursor: testPosition("4") });
+    second.resolve({ channelMembers: membersWith(member, agent), syncCursor: testPosition("5") });
     await waitFor(() => expect(screen.queryByText("Adding…")).toBeNull());
     expect(screen.getByText("Member")).toBeTruthy();
     expect(screen.getByText("Hermes Agent")).toBeTruthy();
   });
 
   it("shows pending rows during an add while the rest of the dialog stays interactive", async () => {
-    const pendingUpsert = deferred<{
-      channelMembers: ChannelMembersResponse;
-      syncCursor: string;
-    }>();
+    const pendingUpsert = deferred<ChannelMembershipMutationResponse>();
     const upsert = vi.fn().mockReturnValue(pendingUpsert.promise);
     const onClose = vi.fn();
     renderChannelDialog({ upsert, onClose });
@@ -207,14 +206,17 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(done);
     expect(onClose).toHaveBeenCalledTimes(2);
 
-    pendingUpsert.resolve({ channelMembers: membersWith(member), syncCursor: "4" });
+    pendingUpsert.resolve({ channelMembers: membersWith(member), syncCursor: testPosition("4") });
     await waitFor(() => expect(screen.queryByText("Adding…")).toBeNull());
   });
 
   it("rolls a failed add back out of the list and names the member in the error", async () => {
     const upsert = vi.fn().mockImplementation((_, userId: string) => {
       if (userId === AGENT_ID) return Promise.reject(new Error("Agent enrollment required"));
-      return Promise.resolve({ channelMembers: membersWith(member), syncCursor: "4" });
+      return Promise.resolve({
+        channelMembers: membersWith(member),
+        syncCursor: testPosition("4"),
+      });
     });
     // The post-batch reconciliation load fails, so the rollback filter is the only mechanism
     // that can take the failed member back out of the list.
@@ -237,8 +239,8 @@ describe("ChannelMembersDialog", () => {
   });
 
   it("does not let an earlier snapshot clobber a later one when responses arrive out of order", async () => {
-    const first = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
-    const second = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
+    const first = deferred<ChannelMembershipMutationResponse>();
+    const second = deferred<ChannelMembershipMutationResponse>();
     const upsert = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const load = vi
       .fn()
@@ -251,17 +253,17 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Hermes Agent" }));
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
-    second.resolve({ channelMembers: membersWith(member, agent), syncCursor: "5" });
+    second.resolve({ channelMembers: membersWith(member, agent), syncCursor: testPosition("5") });
     await waitFor(() => expect(screen.getByText("Hermes Agent")).toBeTruthy());
-    first.resolve({ channelMembers: membersWith(member), syncCursor: "4" });
+    first.resolve({ channelMembers: membersWith(member), syncCursor: testPosition("4") });
     await waitFor(() => expect(screen.queryByText("Adding…")).toBeNull());
     expect(screen.getByText("Member")).toBeTruthy();
     expect(screen.getByText("Hermes Agent")).toBeTruthy();
   });
 
   it("discards a stale mutation response that lands after a newer one", async () => {
-    const promote = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
-    const removal = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
+    const promote = deferred<ChannelMembershipMutationResponse>();
+    const removal = deferred<ChannelMembershipMutationResponse>();
     const upsert = vi.fn().mockReturnValue(promote.promise);
     const remove = vi.fn().mockReturnValue(removal.promise);
     // Reconciliation loads fail, so the rendered list depends on the server cursor guard alone.
@@ -284,7 +286,7 @@ describe("ChannelMembersDialog", () => {
     const promoted = { user: member, role: "owner" as const, joinedAt: NOW };
     removal.resolve({
       channelMembers: { ...initial, members: [...initial.members, promoted] },
-      syncCursor: "6",
+      syncCursor: testPosition("6"),
     });
     await waitFor(() => expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull());
 
@@ -294,7 +296,7 @@ describe("ChannelMembersDialog", () => {
         ...initial,
         members: [...initial.members, promoted, { user: agent, role: "member", joinedAt: NOW }],
       },
-      syncCursor: "5",
+      syncCursor: testPosition("5"),
     });
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull();
@@ -304,11 +306,11 @@ describe("ChannelMembersDialog", () => {
   });
 
   it("applies a later-committed remove after a concurrent batch add and then reconciles", async () => {
-    const removal = deferred<{ channelMembers: ChannelMembersResponse; syncCursor: string }>();
+    const removal = deferred<ChannelMembershipMutationResponse>();
     const remove = vi.fn().mockReturnValue(removal.promise);
     const upsert = vi.fn().mockResolvedValue({
       channelMembers: membersWith(member, agent),
-      syncCursor: "5",
+      syncCursor: testPosition("5"),
     });
     const withoutMember: ChannelMembersResponse = {
       ...initial,
@@ -330,7 +332,7 @@ describe("ChannelMembersDialog", () => {
     expect(load).toHaveBeenCalledTimes(1);
 
     // The removal commits last, so its higher server cursor applies even though it started first.
-    removal.resolve({ channelMembers: withoutMember, syncCursor: "7" });
+    removal.resolve({ channelMembers: withoutMember, syncCursor: testPosition("7") });
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /Member @member/ })).toBeNull(),
     );
@@ -340,10 +342,7 @@ describe("ChannelMembersDialog", () => {
   });
 
   it("locks only the mutated row during a role change and renders the returned role", async () => {
-    const pendingPromote = deferred<{
-      channelMembers: ChannelMembersResponse;
-      syncCursor: string;
-    }>();
+    const pendingPromote = deferred<ChannelMembershipMutationResponse>();
     const upsert = vi.fn().mockReturnValue(pendingPromote.promise);
     const promoted: ChannelMembersResponse = {
       ...initial,
@@ -368,7 +367,7 @@ describe("ChannelMembersDialog", () => {
     const candidate = screen.getByRole("checkbox", { name: "Hermes Agent" }) as HTMLInputElement;
     expect(candidate.disabled).toBe(false);
 
-    pendingPromote.resolve({ channelMembers: promoted, syncCursor: "5" });
+    pendingPromote.resolve({ channelMembers: promoted, syncCursor: testPosition("5") });
     await waitFor(() => expect(within(memberRow).getByText("owner")).toBeTruthy());
     expect(within(memberRow).getByRole("button", { name: "Make member" })).toBeTruthy();
   });
@@ -404,7 +403,7 @@ describe("ChannelMembersDialog", () => {
     expect(agentPromote.disabled).toBe(false);
     expect(memberPromote.disabled).toBe(true);
     expect(load).toHaveBeenCalledTimes(1);
-    first.resolve({ channelMembers: membersWith(member, agent), syncCursor: "5" });
+    first.resolve({ channelMembers: membersWith(member, agent), syncCursor: testPosition("5") });
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
     expect(memberPromote.disabled).toBe(false);
   });
@@ -429,14 +428,17 @@ describe("ChannelMembersDialog", () => {
     if (memberRow === null || agentRow === null) throw new Error("Rows missing");
     fireEvent.click(within(memberRow).getByRole("button", { name: "Make owner" }));
     fireEvent.click(within(agentRow).getByRole("button", { name: "Remove" }));
-    removal.resolve({ channelMembers: membersWith(member), syncCursor: "9007199254740995" });
+    removal.resolve({
+      channelMembers: membersWith(member),
+      syncCursor: testPosition("9007199254740995"),
+    });
     await waitFor(() => expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull());
     expect(load).toHaveBeenCalledTimes(1);
 
     const promoted = { user: member, role: "owner" as const, joinedAt: NOW };
     promote.resolve({
       channelMembers: { ...initial, members: [...initial.members, promoted] },
-      syncCursor: "9007199254740996",
+      syncCursor: testPosition("9007199254740996"),
     });
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
     expect(within(memberRow).getByText("owner")).toBeTruthy();
@@ -459,7 +461,9 @@ describe("ChannelMembersDialog", () => {
     renderChannelDialog({
       workspaceMembers: [owner, member, agent],
       load,
-      upsert: vi.fn().mockResolvedValue({ channelMembers: beforeRemoval, syncCursor: "5" }),
+      upsert: vi
+        .fn()
+        .mockResolvedValue({ channelMembers: beforeRemoval, syncCursor: testPosition("5") }),
       remove: vi.fn().mockReturnValue(removal.promise),
     });
 
@@ -472,12 +476,93 @@ describe("ChannelMembersDialog", () => {
     fireEvent.click(within(agentRow).getByRole("button", { name: "Remove" }));
     removal.resolve({
       channelMembers: { ...initial, members: [...initial.members, promoted] },
-      syncCursor: "6",
+      syncCursor: testPosition("6"),
     });
     await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
     oldReload.resolve(beforeRemoval);
     await waitFor(() => expect(screen.queryByRole("button", { name: /Hermes Agent/ })).toBeNull());
     expect(within(memberRow).getByText("owner")).toBeTruthy();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "ignores a retired add %s after the dialog moves to another replay epoch",
+    async (result) => {
+      const pending = deferred<ChannelMembershipMutationResponse>();
+      const load = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(membersWith(member));
+      const props = {
+        source: "channel" as const,
+        syncCursor: testPosition("0"),
+        channelName: "leadership",
+        conversationId: CONVERSATION_ID,
+        currentUserId: OWNER_ID,
+        workspaceMembers: [owner, member],
+        triggerRef: unusedTrigger,
+        onClose: vi.fn(),
+        onMessage: vi.fn(),
+        load,
+        upsert: vi.fn().mockReturnValue(pending.promise),
+        remove: vi.fn(),
+      };
+      const { rerender } = render(createElement(ChannelMembersDialog, props));
+      await screen.findByText("Owner (you)");
+      fireEvent.click(screen.getByRole("checkbox", { name: "Member" }));
+      fireEvent.click(screen.getByRole("button", { name: "Add" }));
+      expect(screen.getByText("Adding…")).toBeTruthy();
+
+      const nextEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+      rerender(
+        createElement(ChannelMembersDialog, {
+          ...props,
+          syncCursor: testPosition("0", nextEpoch),
+        }),
+      );
+      await screen.findByRole("button", { name: /Member @member/ });
+      expect(screen.queryByText("Adding…")).toBeNull();
+      await act(async () => {
+        if (result === "success") {
+          pending.resolve({ channelMembers: initial, syncCursor: testPosition("999") });
+        } else {
+          pending.reject(new Error("Retired add failed"));
+        }
+        await Promise.resolve();
+      });
+      expect(screen.getByRole("button", { name: /Member @member/ })).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(load).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("keeps mutation ordering in the active replay epoch after a foreign epoch response", async () => {
+    const promoted: ChannelMembersResponse = {
+      ...initial,
+      members: [...initial.members, { user: member, role: "owner", joinedAt: NOW }],
+    };
+    const foreignEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+    const upsert = vi
+      .fn()
+      .mockResolvedValueOnce({
+        channelMembers: promoted,
+        syncCursor: testPosition("999", foreignEpoch),
+      })
+      .mockResolvedValueOnce({ channelMembers: promoted, syncCursor: testPosition("5") });
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce(membersWith(member))
+      .mockRejectedValue(new Error("offline"));
+    renderChannelDialog({ upsert, load });
+    await screen.findByRole("button", { name: /Member @member/ });
+    const memberRow = screen.getByText("Member").closest("li");
+    if (memberRow === null) throw new Error("Member row was not rendered");
+    const promote = within(memberRow).getByRole("button", {
+      name: "Make owner",
+    }) as HTMLButtonElement;
+    fireEvent.click(promote);
+    await waitFor(() => expect(promote.disabled).toBe(false));
+    expect(within(memberRow).getByText("member")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(promote);
+    await waitFor(() => expect(within(memberRow).getByText("owner")).toBeTruthy());
+    expect(upsert).toHaveBeenCalledTimes(2);
   });
 
   it("clears a non-empty search query on Escape without closing the dialog", async () => {
@@ -514,7 +599,7 @@ describe("ChannelMembersDialog", () => {
   it("clears the checked set and keeps the search input focused after a batch add", async () => {
     const upsert = vi.fn().mockResolvedValue({
       channelMembers: membersWith(member),
-      syncCursor: "4",
+      syncCursor: testPosition("4"),
     });
     renderChannelDialog({ workspaceMembers: [owner, member, agent], upsert });
 
@@ -534,6 +619,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "leadership",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
@@ -559,6 +645,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "general",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
@@ -585,6 +672,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "people-planning",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
@@ -615,6 +703,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "people-updates",
         channelMode: "announcement",
         conversationId: CONVERSATION_ID,
@@ -645,6 +734,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "leadership",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
@@ -670,6 +760,7 @@ describe("ChannelMembersDialog", () => {
     render(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "general",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,
@@ -775,6 +866,7 @@ describe("ChannelMembersDialog", () => {
     rerender(
       createElement(ChannelMembersDialog, {
         source: "channel",
+        syncCursor: testPosition("0"),
         channelName: "leadership",
         conversationId: CONVERSATION_ID,
         currentUserId: OWNER_ID,

@@ -22,7 +22,7 @@ import {
   paginationCursorSchema,
   sendConversationMessageRequestSchema,
   sendMessageResponseSchema,
-  sequenceSchema,
+  syncPositionQuerySchema,
   syncResponseSchema,
   workspaceBootstrapResponseSchema,
 } from "@hype-comms/contracts";
@@ -437,8 +437,8 @@ export async function syncCommand(context: CommandContext, args: readonly string
   });
   requirePositionals(parsed, 0);
   const afterValue = stringOption(parsed, "after");
-  if (afterValue === undefined || !sequenceSchema.safeParse(afterValue).success) {
-    throw new UsageError("sync requires --after with a decimal cursor", "INVALID_CURSOR");
+  if (afterValue === undefined || !syncPositionQuerySchema.safeParse(afterValue).success) {
+    throw new UsageError("sync requires --after with a JSON epoch and sequence", "INVALID_CURSOR");
   }
   const response = await (
     await clientFromContext(context)

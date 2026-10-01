@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -16,6 +17,7 @@ import type {
   RealtimeSessionScope,
   SendMessageOperation,
   ScopedProductRealtimeEvent,
+  SyncPosition,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -106,7 +108,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -189,7 +191,7 @@ function membershipRemoval(conversationId: string): ProductRealtimeEvent {
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId,
-    workspaceSequence: "11",
+    position: testPosition("11"),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -322,7 +324,7 @@ function createHarness(): Harness {
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     advanceReadCursor: async () => undefined,
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },
@@ -393,7 +395,7 @@ function createHarness(): Harness {
         event.payload.memberId === USER_ID
       ) {
         revokedConversationIds.add(event.conversationId);
-        snapshotCursor = event.workspaceSequence;
+        snapshotCursor = event.position;
       }
       for (const listener of workspaceEventListeners) listener({ scope: realtimeScope, event });
     },

@@ -1,3 +1,4 @@
+import { compareSyncPositions, encodeSyncPosition, type SyncPosition } from "@hype-comms/contracts";
 import { randomUUID } from "node:crypto";
 import { WorkspaceProtocolError } from "./workspace-protocol";
 
@@ -75,7 +76,7 @@ export type RealtimeDropReason =
 export interface RealtimeSession {
   readonly activeScope: RealtimeSessionScope | null;
   prepare(input: {
-    readonly after: string;
+    readonly after: SyncPosition;
     readonly userId: string;
     readonly workspaceId: string;
   }): RealtimeSessionScope;
@@ -108,7 +109,7 @@ interface LocalTypingState {
 
 interface PendingAuthoritativeRecovery {
   readonly scope: WorkspaceRealtimeScope;
-  readonly cursor: string;
+  readonly cursor: SyncPosition;
   readonly event: Extract<ProductRealtimeEvent, { type: "system.resync_required" }>;
 }
 
@@ -135,7 +136,7 @@ export class WorkspaceRealtime {
   readonly #onState: (state: RealtimeConnectionState) => void;
   readonly #onDrop: (reason: RealtimeDropReason) => void;
   readonly #createSocket: SocketFactory;
-  #cursor = "0";
+  #cursor: SyncPosition | null = null;
   #scope: RealtimeSessionScope | null = null;
   readonly #nextSessionEpoch: () => number;
   #connection: ActiveConnection | null = null;
@@ -182,12 +183,17 @@ export class WorkspaceRealtime {
       options.createSocket ?? ((url, socketOptions) => new WebSocket(url, socketOptions));
   }
 
+  get #position(): SyncPosition {
+    if (this.#cursor === null) throw new Error("Realtime has no prepared sync position");
+    return this.#cursor;
+  }
+
   get activeScope(): RealtimeSessionScope | null {
     return this.#scope;
   }
 
   prepare(input: {
-    readonly after: string;
+    readonly after: SyncPosition;
     readonly userId: string;
     readonly workspaceId: string;
   }): RealtimeSessionScope {
@@ -196,7 +202,8 @@ export class WorkspaceRealtime {
       recovery !== null &&
       recovery.scope.userId === input.userId &&
       recovery.scope.workspaceId === input.workspaceId &&
-      BigInt(input.after) <= BigInt(recovery.cursor);
+      input.after.epoch === recovery.cursor.epoch &&
+      compareSyncPositions(input.after, recovery.cursor) <= 0;
     this.#retireTransport(!preserveRecovery, false);
     const scope = Object.freeze({
       userId: input.userId,
@@ -224,16 +231,19 @@ export class WorkspaceRealtime {
     if (this.#pendingAuthoritativeRecovery !== null) {
       return this.#deliverPendingAuthoritativeRecovery();
     }
-    this.#beginEpoch(this.#cursor, scope);
+    this.#beginEpoch(this.#position, scope);
     return true;
   }
 
   /** Compatibility entrypoint for the pre-epoch window lifecycle. */
-  start(after: string, expectedScope: WorkspaceRealtimeScope): boolean {
+  start(after: SyncPosition, expectedScope: WorkspaceRealtimeScope): boolean {
     const current = this.#scope;
     const recovery = this.#pendingAuthoritativeRecovery;
     if (recovery !== null && this.#sameScope(recovery.scope, expectedScope)) {
-      if (BigInt(after) > BigInt(recovery.cursor)) {
+      if (
+        after.epoch !== recovery.cursor.epoch ||
+        compareSyncPositions(after, recovery.cursor) > 0
+      ) {
         this.#pendingAuthoritativeRecovery = null;
       } else {
         const scope =
@@ -281,6 +291,8 @@ export class WorkspaceRealtime {
    * replica cursor from which this transport opens a fresh epoch.
    */
   enterWindowless(expectedScope: WorkspaceRealtimeScope): void {
+    // Closing a window before bootstrap cannot invent a replay epoch or acknowledge history.
+    if (this.#cursor === null) return;
     const recovery = this.#pendingAuthoritativeRecovery;
     if (recovery !== null) {
       if (this.#sameScope(recovery.scope, expectedScope)) {
@@ -299,24 +311,28 @@ export class WorkspaceRealtime {
     const scope =
       this.#scope ??
       this.prepare({
-        after: this.#cursor,
+        after: this.#position,
         userId: expectedScope.userId,
         workspaceId: expectedScope.workspaceId,
       });
     this.#rendererDeliveryReady = false;
     this.#windowless = true;
-    this.#beginEpoch(this.#cursor, scope);
+    this.#beginEpoch(this.#position, scope);
   }
 
-  acknowledge(input: RealtimeAcknowledgement | string): void {
-    if (typeof input !== "string") {
+  acknowledge(input: RealtimeAcknowledgement | SyncPosition): void {
+    if ("scope" in input) {
       if (this.#scope === null || !sameRealtimeScope(this.#scope, input.scope)) {
         this.#onDrop("stale-control");
         return;
       }
       input = input.cursor;
     }
-    if (BigInt(input) > BigInt(this.#cursor)) this.#cursor = input;
+    if (this.#cursor === null || input.epoch !== this.#cursor.epoch) {
+      this.#onDrop("stale-control");
+      return;
+    }
+    if (compareSyncPositions(input, this.#cursor) > 0) this.#cursor = input;
   }
 
   setPresence(state: Exclude<PresenceState, "offline">): void {
@@ -421,7 +437,7 @@ export class WorkspaceRealtime {
     if (announceOffline) this.#deliverState("offline");
   }
 
-  #beginEpoch(after: string, expectedScope: RealtimeSessionScope): void {
+  #beginEpoch(after: SyncPosition, expectedScope: RealtimeSessionScope): void {
     this.#epoch += 1;
     const epoch = this.#epoch;
     this.#stopped = false;
@@ -474,7 +490,7 @@ export class WorkspaceRealtime {
     const url = new URL("/v2/realtime", this.#apiOrigin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("ticket", ticket.ticket);
-    url.searchParams.set("after", this.#cursor);
+    url.searchParams.set("after", encodeSyncPosition(this.#position));
 
     let socket: WebSocket;
     try {
@@ -615,6 +631,10 @@ export class WorkspaceRealtime {
     }
 
     const event = parsed.data;
+    if (event.position.epoch !== this.#position.epoch) {
+      this.#rejectInvalidEvent(connection);
+      return;
+    }
     if (this.#windowless && event.type === "system.resync_required") {
       // A cursor-expired socket closes after this control. Observing it and reconnecting from the
       // same renderer-owned cursor would spin forever while no renderer exists to rebuild state.
@@ -725,7 +745,7 @@ export class WorkspaceRealtime {
   #requireAuthoritativeRecovery(connection: ActiveConnection, occurredAt: string): void {
     if (!this.#isActiveConnection(connection) || this.#scope === null) return;
     const scope = this.#scope;
-    const cursor = this.#cursor;
+    const cursor = this.#position;
 
     // Drop message-bearing replay data before crossing the renderer boundary or logging. A new
     // socket from the same durable cursor would receive the same replay and overflow forever, so
@@ -754,7 +774,7 @@ export class WorkspaceRealtime {
       occurredAt,
       workspaceId: scope.workspaceId,
       conversationId: null,
-      workspaceSequence: cursor,
+      position: cursor,
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",
@@ -776,7 +796,7 @@ export class WorkspaceRealtime {
   ): void {
     if (!this.#isActiveConnection(connection) || this.#scope === null) return;
     const scope = this.#scope;
-    const cursor = this.#cursor;
+    const cursor = this.#position;
 
     connection.pendingReplay.length = 0;
     connection.pendingReplayBytes = 0;

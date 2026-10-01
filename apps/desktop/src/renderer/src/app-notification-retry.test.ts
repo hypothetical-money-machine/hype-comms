@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import "fake-indexeddb/auto";
@@ -15,6 +16,7 @@ import type {
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
+  SyncPosition,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -72,7 +74,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   conversations: [],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -302,7 +304,7 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
     openConversationFile: async () => ({ opened: true }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: {

@@ -81,7 +81,7 @@ describe("scoped workspace networking", () => {
       },
       session,
     );
-    const operation = scoped.fetch("https://chat.example/v1/members", { signal: caller.signal });
+    const operation = scoped.fetch("https://chat.example/v2/members", { signal: caller.signal });
     const rejected = expect(operation).rejects.toMatchObject({ name: "AbortError" });
     await entered.promise;
     await session.dispose();

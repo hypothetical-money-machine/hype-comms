@@ -1,3 +1,4 @@
+import { syncPositionSchema, syncPositionQuerySchema } from "./sync-position.js";
 import { z } from "zod";
 
 import { channelSlugSchema } from "./channel-slug.js";
@@ -125,7 +126,7 @@ export const workspaceBootstrapResponseSchema = z
     conversations: z.array(conversationSummarySchema).max(CONVERSATION_PAGE_MAX_LIMIT),
     conversationsNextCursor: paginationCursorSchema.nullable(),
     conversationsHasMore: z.boolean(),
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
     featureFlags: z
       .object({
         channels: z.literal(true),
@@ -160,7 +161,7 @@ export const workspaceSnapshotSchema = z
     workspace: workspaceSchema,
     members: z.array(userSchema).max(25),
     conversations: z.array(conversationSummarySchema).max(5_000),
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
     featureFlags: workspaceBootstrapResponseSchema.shape.featureFlags,
   })
   .strict();
@@ -316,7 +317,7 @@ export const upsertChannelMemberOperationSchema = channelMemberTargetSchema
 export const channelMembershipMutationResponseSchema = z
   .object({
     channelMembers: channelMembersResponseSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -351,7 +352,7 @@ export const groupDirectConversationOperationSchema = groupDirectConversationReq
 export const conversationMutationResponseSchema = z
   .object({
     conversation: conversationSummarySchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -807,14 +808,14 @@ export const messageReactionTargetSchema = z
 export const addReactionResponseSchema = z
   .object({
     reaction: reactionSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
 export const removeReactionResponseSchema = z
   .object({
     removed: z.boolean(),
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -872,7 +873,7 @@ export const sendMessageResponseSchema = z
   .object({
     message: messageSchema,
     attachments: z.array(attachmentSchema).max(ATTACHMENTS_PER_MESSAGE_MAX).default([]),
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -889,7 +890,7 @@ export const sendMessageResponseSchema = z
 export const retractMessageResponseSchema = z
   .object({
     message: messageSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict()
   .superRefine((value, context) => {
@@ -911,7 +912,7 @@ export const advanceReadCursorRequestSchema = z
 export const advanceReadCursorResponseSchema = z
   .object({
     readCursor: readCursorSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -1174,7 +1175,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
 
 export const syncQuerySchema = z
   .object({
-    after: sequenceSchema,
+    after: syncPositionQuerySchema,
     limit: z.coerce.number().int().min(1).max(100).default(100),
   })
   .strict();
@@ -1182,15 +1183,43 @@ export const syncQuerySchema = z
 export const syncResponseSchema = z
   .object({
     events: z.array(workspaceEventSchema).max(100),
-    nextCursor: sequenceSchema,
-    highWaterCursor: sequenceSchema,
+    nextCursor: syncPositionSchema,
+    highWaterCursor: syncPositionSchema,
     hasMore: z.boolean(),
   })
-  .strict();
+  .strict()
+  .superRefine((response, context) => {
+    const { nextCursor, highWaterCursor } = response;
+    if (
+      nextCursor.epoch !== highWaterCursor.epoch ||
+      BigInt(nextCursor.sequence) > BigInt(highWaterCursor.sequence)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Sync positions must share an epoch and respect the high-water position",
+      });
+    }
+    let preceding: bigint | null = null;
+    for (const event of response.events) {
+      const sequence = BigInt(event.position.sequence);
+      if (
+        event.position.epoch !== nextCursor.epoch ||
+        sequence > BigInt(nextCursor.sequence) ||
+        (preceding !== null && sequence <= preceding)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Sync events must be ordered within the response epoch and position",
+        });
+      }
+      preceding = sequence;
+    }
+  });
 
 export const realtimeTicketResponseSchema = z
   .object({
     ticket: realtimeTicketSchema,
+    position: syncPositionSchema,
     expiresAt: isoDateTimeSchema,
   })
   .strict();
@@ -1204,7 +1233,12 @@ export const systemResyncRequiredEventSchema = workspaceEventBaseSchema.extend({
       // `client_replay_overflow` is synthesized only across the same Electron main-to-renderer
       // boundary. Servers never emit it, so this additive local recovery reason does not expose an
       // older strict desktop to a new server-emitted value during a rolling release.
-      reason: z.enum(["cursor_expired", "server_reset", "client_replay_overflow"]),
+      reason: z.enum([
+        "cursor_expired",
+        "epoch_mismatch",
+        "server_reset",
+        "client_replay_overflow",
+      ]),
     })
     .strict(),
 });

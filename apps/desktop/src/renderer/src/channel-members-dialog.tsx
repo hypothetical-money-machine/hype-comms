@@ -1,9 +1,11 @@
-import type {
-  ChannelMode,
-  ChannelMembershipMutationResponse,
-  ChannelMembersResponse,
-  PresenceState,
-  User,
+import {
+  compareSyncPositions,
+  type ChannelMode,
+  type ChannelMembershipMutationResponse,
+  type ChannelMembersResponse,
+  type PresenceState,
+  type SyncPosition,
+  type User,
 } from "@hype-comms/contracts";
 import {
   useEffect,
@@ -35,6 +37,7 @@ interface ChannelPeopleDialogProps extends PeopleDirectorySharedProps {
   readonly channelName: string;
   readonly channelMode?: ChannelMode | null;
   readonly conversationId: string;
+  readonly syncCursor: SyncPosition;
   readonly load: (conversationId: string) => Promise<ChannelMembersResponse>;
   readonly upsert: (
     conversationId: string,
@@ -122,6 +125,17 @@ function DirectoryIdentity({
 }
 
 export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
+  const conversationId = props.source === "channel" ? props.conversationId : "workspace";
+  const replayEpoch = props.source === "channel" ? props.syncCursor.epoch : "workspace";
+  return (
+    <ChannelMembersDialogContent
+      key={`${props.source}:${props.currentUserId}:${conversationId}:${replayEpoch}`}
+      {...props}
+    />
+  );
+}
+
+function ChannelMembersDialogContent(props: ChannelMembersDialogProps) {
   const {
     currentUserId,
     workspaceMembers,
@@ -145,7 +159,8 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const pendingAddIdsRef = useRef<ReadonlySet<string>>(new Set());
   const busyUserIdsRef = useRef<ReadonlySet<string>>(new Set());
   const mutationEpochRef = useRef(0);
-  const mutationCursorRef = useRef<bigint | null>(null);
+  const mutationCursorRef = useRef<SyncPosition | null>(null);
+  const requestOwnerRef = useRef<object | null>(null);
   const isChannel = source === "channel";
   const conversationId = source === "channel" ? props.conversationId : null;
   const isAnnouncementChannel = source === "channel" && props.channelMode === "announcement";
@@ -153,7 +168,18 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const upsert = source === "channel" ? props.upsert : null;
   const remove = source === "channel" ? props.remove : null;
 
+  useLayoutEffect(() => {
+    const owner = {};
+    requestOwnerRef.current = owner;
+    return () => {
+      if (requestOwnerRef.current === owner) requestOwnerRef.current = null;
+    };
+  }, []);
+
   useOpenChangeNotifier(true, onOpenChange);
+
+  const isRequestCurrent = (owner: object | null): boolean =>
+    owner !== null && requestOwnerRef.current === owner;
 
   const nextSnapshotSeq = (): number => {
     snapshotSeqRef.current += 1;
@@ -171,13 +197,18 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
   const applySnapshot = (
     seq: number,
     snapshot: ChannelMembersResponse,
-    syncCursor?: string,
+    syncCursor?: SyncPosition,
     mutationEpoch?: number,
   ): void => {
     if (syncCursor !== undefined) {
-      const cursor = BigInt(syncCursor);
-      if (mutationCursorRef.current !== null && cursor <= mutationCursorRef.current) return;
-      mutationCursorRef.current = cursor;
+      if (props.source !== "channel" || syncCursor.epoch !== props.syncCursor.epoch) return;
+      if (
+        mutationCursorRef.current !== null &&
+        compareSyncPositions(syncCursor, mutationCursorRef.current) <= 0
+      ) {
+        return;
+      }
+      mutationCursorRef.current = syncCursor;
     } else if (
       seq <= appliedSeqRef.current ||
       mutationEpoch !== mutationEpochRef.current ||
@@ -201,15 +232,18 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
 
   useEffect(() => {
     if (load === null || conversationId === null) return;
+    const owner = requestOwnerRef.current;
     let active = true;
     const seq = nextSnapshotSeq();
     const mutationEpoch = mutationEpochRef.current;
     void load(conversationId)
       .then((response) => {
-        if (active) applySnapshot(seq, response, undefined, mutationEpoch);
+        if (active && isRequestCurrent(owner)) {
+          applySnapshot(seq, response, undefined, mutationEpoch);
+        }
       })
       .catch((loadError: unknown) => {
-        if (active) setError(errorMessage(loadError));
+        if (active && isRequestCurrent(owner)) setError(errorMessage(loadError));
       });
     return () => {
       active = false;
@@ -298,10 +332,13 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
 
   const reconcileFromServer = async (): Promise<void> => {
     if (load === null || conversationId === null || hasPendingMutation()) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
     const seq = nextSnapshotSeq();
     const mutationEpoch = mutationEpochRef.current;
     try {
-      applySnapshot(seq, await load(conversationId), undefined, mutationEpoch);
+      const response = await load(conversationId);
+      if (isRequestCurrent(owner)) applySnapshot(seq, response, undefined, mutationEpoch);
     } catch {
       // Keep the reconciled local state when the refresh fails.
     }
@@ -309,13 +346,18 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
 
   const runBatchAdd = async (ids: readonly string[]): Promise<void> => {
     if (upsert === null || conversationId === null) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
     const results = await Promise.allSettled(
       ids.map(async (userId) => {
         const seq = nextSnapshotSeq();
         const response = await upsert(conversationId, userId, "member");
-        applySnapshot(seq, response.channelMembers, response.syncCursor);
+        if (isRequestCurrent(owner)) {
+          applySnapshot(seq, response.channelMembers, response.syncCursor);
+        }
       }),
     );
+    if (!isRequestCurrent(owner)) return;
     const failedIds = ids.filter((_, index) => results.at(index)?.status === "rejected");
     const nextPending = new Set(pendingAddIdsRef.current);
     for (const userId of ids) nextPending.delete(userId);
@@ -371,6 +413,8 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     operation: () => Promise<ChannelMembershipMutationResponse>,
   ): Promise<void> => {
     if (busyUserIdsRef.current.has(userId) || pendingAddIdsRef.current.has(userId)) return;
+    const owner = requestOwnerRef.current;
+    if (!isRequestCurrent(owner)) return;
     mutationEpochRef.current += 1;
     const busy = new Set(busyUserIdsRef.current);
     busy.add(userId);
@@ -380,15 +424,19 @@ export function ChannelMembersDialog(props: ChannelMembersDialogProps) {
     const seq = nextSnapshotSeq();
     try {
       const response = await operation();
+      if (!isRequestCurrent(owner)) return;
       applySnapshot(seq, response.channelMembers, response.syncCursor);
     } catch (mutationError) {
-      setError(errorMessage(mutationError));
+      if (isRequestCurrent(owner)) setError(errorMessage(mutationError));
     } finally {
-      const remaining = new Set(busyUserIdsRef.current);
-      remaining.delete(userId);
-      busyUserIdsRef.current = remaining;
-      setBusyUserIds(remaining);
+      if (isRequestCurrent(owner)) {
+        const remaining = new Set(busyUserIdsRef.current);
+        remaining.delete(userId);
+        busyUserIdsRef.current = remaining;
+        setBusyUserIds(remaining);
+      }
     }
+    if (!isRequestCurrent(owner)) return;
     // Only the last outstanding mutation reloads. A reload started before another action must
     // not replace that action's snapshot when it finishes.
     await reconcileFromServer();

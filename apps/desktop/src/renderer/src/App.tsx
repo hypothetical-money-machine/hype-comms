@@ -3340,6 +3340,7 @@ export function App({
           }
           channelMode={selectedSummary.conversation.channelMode}
           conversationId={selectedSummary.conversation.id}
+          syncCursor={bootstrap.syncCursor}
           currentUserId={currentUserId}
           workspaceMembers={bootstrap.members}
           presenceByUser={runtimeState.presenceByUser}

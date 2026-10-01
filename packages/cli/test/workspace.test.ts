@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,14 +38,24 @@ describe("workspace conversation commands", () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
       expect(url.pathname).toBe("/v2/sync");
-      expect(url.searchParams.get("after")).toBe("0");
+      expect(url.searchParams.get("after")).toBe(JSON.stringify(testPosition("0")));
       expect(new Headers(init?.headers).get("x-hype-comms-capabilities")).toBeNull();
-      return jsonResponse({ events: [], nextCursor: "0", highWaterCursor: "0", hasMore: false });
+      return jsonResponse({
+        events: [],
+        nextCursor: testPosition("0"),
+        highWaterCursor: testPosition("0"),
+        hasMore: false,
+      });
     });
     const runtime = authenticatedRuntime(fetch, await home());
 
-    expect(await executeCli(["sync", "--after", "0", "--json"], runtime)).toBe(0);
-    expect(JSON.parse(runtime.stdoutText())).toMatchObject({ events: [], nextCursor: "0" });
+    expect(
+      await executeCli(["sync", "--after", JSON.stringify(testPosition("0")), "--json"], runtime),
+    ).toBe(0);
+    expect(JSON.parse(runtime.stdoutText())).toMatchObject({
+      events: [],
+      nextCursor: testPosition("0"),
+    });
   });
 
   it("lists public channels an agent can discover", async () => {
@@ -69,7 +80,7 @@ describe("workspace conversation commands", () => {
 
   it("joins an unseated public channel by slug", async () => {
     const joinedSummary = { ...channelSummary(), membershipRole: "member" as const };
-    const result = { conversation: joinedSummary, syncCursor: "7" };
+    const result = { conversation: joinedSummary, syncCursor: testPosition("7") };
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));
       if (url.pathname === "/v2/channels") {
@@ -124,7 +135,7 @@ describe("workspace conversation commands", () => {
         mentionCount: 0,
         readCursor: null,
       },
-      syncCursor: "8",
+      syncCursor: testPosition("8"),
     };
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input));

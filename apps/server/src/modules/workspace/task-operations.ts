@@ -1,3 +1,4 @@
+import type { SyncPosition } from "@hype-comms/contracts";
 import {
   POSTGRES_BIGINT_MAX,
   TASK_PAGE_MAX_LIMIT,
@@ -292,6 +293,7 @@ export class WorkspaceTaskOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: `/v1/conversations/${conversationId}/tasks`,
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),
@@ -351,7 +353,7 @@ export class WorkspaceTaskOperations {
             payload: { task },
             audienceUserIds: await conversationAudience(client, conversation),
           });
-          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
+          return taskMutationResponseSchema.parse({ task, syncCursor: event.position });
         },
       );
     });
@@ -387,6 +389,7 @@ export class WorkspaceTaskOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: `/v1/tasks/${taskId}`,
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),
@@ -430,7 +433,7 @@ export class WorkspaceTaskOperations {
             payload: { task },
             audienceUserIds: await conversationAudience(client, conversation),
           });
-          return taskMutationResponseSchema.parse({ task, syncCursor: event.workspaceSequence });
+          return taskMutationResponseSchema.parse({ task, syncCursor: event.position });
         },
       );
     });
@@ -452,6 +455,7 @@ export class WorkspaceTaskOperations {
         client,
         {
           actorUserId: identity.currentUser.user.id,
+          workspaceId: identity.currentUser.workspaceId,
           route: `/v1/tasks/${taskId}/move`,
           idempotencyKey,
           requestFingerprint: fingerprintApiRequest(input),
@@ -539,7 +543,7 @@ export class WorkspaceTaskOperations {
           }
 
           const audienceUserIds = await conversationAudience(client, conversation);
-          let syncCursor = "0";
+          let syncCursor: SyncPosition | null = null;
           for (const row of changed) {
             const task = mapTask(row);
             const event = await this.events.insert(client, identity, {
@@ -549,10 +553,11 @@ export class WorkspaceTaskOperations {
               payload: { task },
               audienceUserIds,
             });
-            syncCursor = event.workspaceSequence;
+            syncCursor = event.position;
           }
           const moved = changed.find((row) => row.id === taskId);
-          if (moved === undefined) throw new Error("Moved task was not returned");
+          if (moved === undefined || syncCursor === null)
+            throw new Error("Moved task was not returned");
           return taskMutationResponseSchema.parse({ task: mapTask(moved), syncCursor });
         },
       );

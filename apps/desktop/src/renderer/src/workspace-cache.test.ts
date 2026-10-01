@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
@@ -84,7 +85,7 @@ const bootstrap: HumanWorkspaceBootstrapResponse = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "0",
+  syncCursor: testPosition("0"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -144,7 +145,7 @@ function groupCreatedEvent(
     occurredAt: NOW,
     workspaceId: WORKSPACE_ID,
     conversationId: id,
-    workspaceSequence: sequence,
+    position: testPosition(sequence),
     conversationSequence: null,
     entityVersion: 1,
     delivery: "at_least_once",
@@ -270,6 +271,7 @@ describe("PersistentWorkspaceCache", () => {
     expect(
       await cache.refreshMetadata({
         ...bootstrap,
+        syncCursor: { ...bootstrap.syncCursor },
         workspace: { ...bootstrap.workspace, name: "New name" },
       }),
     ).not.toBeNull();
@@ -291,7 +293,7 @@ describe("PersistentWorkspaceCache", () => {
     await cache.replaceSnapshot(bootstrap, [message]);
     const encrypt = crypto.encryptCacheRecords.bind(crypto);
     vi.spyOn(crypto, "encryptCacheRecords").mockImplementationOnce(async (input) => {
-      await cache.advanceCursor("1");
+      await cache.advanceCursor(testPosition("1"));
       return encrypt(input);
     });
     expect(
@@ -302,8 +304,78 @@ describe("PersistentWorkspaceCache", () => {
     ).toBeNull();
     const state = await cache.load();
     expect(state.bootstrap?.workspace.name).toBe(bootstrap.workspace.name);
-    expect(state.syncCursor).toBe("1");
+    expect(state.syncCursor).toEqual(testPosition("1"));
     expect(state.messages).toEqual([message]);
+  });
+
+  it("rejects a metadata refresh when its epoch changes during encryption", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message]);
+    await cache.enqueue(operation);
+    const nextEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+    const nextPosition = testPosition("0", nextEpoch);
+    const nextMessage = { ...message, body: "New epoch history" };
+    const encrypt = crypto.encryptCacheRecords.bind(crypto);
+    vi.spyOn(crypto, "encryptCacheRecords").mockImplementationOnce(async (input) => {
+      await cache.resetProtocolReplica();
+      await cache.replaceSnapshot(
+        {
+          ...bootstrap,
+          syncCursor: nextPosition,
+          workspace: { ...bootstrap.workspace, name: "New epoch" },
+        },
+        [nextMessage],
+      );
+      return encrypt(input);
+    });
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        syncCursor: { ...bootstrap.syncCursor },
+        workspace: { ...bootstrap.workspace, name: "Stale name" },
+      }),
+    ).toBeNull();
+    const state = await cache.load();
+    expect(state.bootstrap?.workspace.name).toBe("New epoch");
+    expect(state.syncCursor).toEqual(nextPosition);
+    expect(state.messages).toEqual([nextMessage]);
+    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox[0]?.operation).toEqual(operation);
+  });
+
+  it("refreshes metadata at equal position values and rejects another epoch in both caches", async () => {
+    const caches = [
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+      new MemoryWorkspaceCache(),
+    ];
+    for (const cache of caches) {
+      await cache.replaceSnapshot(bootstrap, [message], [reaction]);
+      const equalPosition = { ...bootstrap.syncCursor };
+      expect(equalPosition).not.toBe(bootstrap.syncCursor);
+      await expect(
+        cache.refreshMetadata({
+          ...bootstrap,
+          syncCursor: equalPosition,
+          workspace: { ...bootstrap.workspace, name: "Refreshed name" },
+        }),
+      ).resolves.toMatchObject({
+        syncCursor: bootstrap.syncCursor,
+        workspace: { name: "Refreshed name" },
+      });
+      await expect(
+        cache.refreshMetadata({
+          ...bootstrap,
+          syncCursor: testPosition("0", "eeeeeeee-0000-4000-8000-000000000002"),
+          workspace: { ...bootstrap.workspace, name: "Wrong epoch" },
+        }),
+      ).resolves.toBeNull();
+      const state = await cache.load();
+      expect(state.bootstrap?.workspace.name).toBe("Refreshed name");
+      expect(state.syncCursor).toEqual(bootstrap.syncCursor);
+      expect(state.messages).toEqual([message]);
+      expect(state.reactions).toEqual([reaction]);
+    }
   });
 
   it("reads committed sync progress without decrypting history", async () => {
@@ -312,11 +384,11 @@ describe("PersistentWorkspaceCache", () => {
     const cache = new PersistentWorkspaceCache({ crypto, scope });
     expect(await cache.loadSyncCursor()).toBeNull();
     await cache.replaceSnapshot(bootstrap, []);
-    expect(await cache.loadSyncCursor()).toBe(bootstrap.syncCursor);
-    await cache.advanceCursor("100");
-    expect(await cache.loadSyncCursor()).toBe("100");
+    expect(await cache.loadSyncCursor()).toEqual(bootstrap.syncCursor);
+    await cache.advanceCursor(testPosition("100"));
+    expect(await cache.loadSyncCursor()).toEqual(testPosition("100"));
     expect(decrypt).not.toHaveBeenCalled();
-    expect((await cache.load()).syncCursor).toBe("100");
+    expect((await cache.load()).syncCursor).toEqual(testPosition("100"));
   });
 
   it("derives personalized roles for group creation events in both cache implementations", async () => {
@@ -351,12 +423,12 @@ describe("PersistentWorkspaceCache", () => {
 
     const restarted = new PersistentWorkspaceCache({ crypto, scope });
     expect((await restarted.load()).outbox).toHaveLength(1);
-    await restarted.upsertAcknowledgedMessage(message, CLIENT_MESSAGE_ID, "1");
+    await restarted.upsertAcknowledgedMessage(message, CLIENT_MESSAGE_ID, testPosition("1"));
 
     const recovered = await restarted.load();
     expect(recovered.outbox).toEqual([]);
     expect(recovered.messages).toEqual([message]);
-    expect(recovered.syncCursor).toBe("1");
+    expect(recovered.syncCursor).toEqual(testPosition("1"));
   });
 
   it("rejects aborted or stale outbox status transitions atomically", async () => {
@@ -446,7 +518,7 @@ describe("PersistentWorkspaceCache", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "1",
+      position: testPosition("1"),
       conversationSequence: "1",
       entityVersion: 1,
       delivery: "at_least_once",
@@ -513,7 +585,7 @@ describe("PersistentWorkspaceCache", () => {
 
     const cache = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope: upgradeScope });
     const state = await cache.load();
-    expect(state.syncCursor).toBe("12");
+    expect(state.syncCursor).toBeNull();
 
     const upgraded = new Dexie(name);
     await upgraded.open();
@@ -524,7 +596,7 @@ describe("PersistentWorkspaceCache", () => {
     expect(reactionIndexes).toContain("messageId");
   });
 
-  it("upgrades version 4 reactions with ownership without losing related cached data", async () => {
+  it("invalidates version 4 replicated records while retaining the cache database", async () => {
     const upgradeScope = {
       userId: "10000000-0000-4000-8000-000000000011",
       workspaceId: WORKSPACE_ID,
@@ -605,22 +677,16 @@ describe("PersistentWorkspaceCache", () => {
 
     const upgradedCache = new PersistentWorkspaceCache({ crypto, scope: upgradeScope });
     const state = await upgradedCache.load();
-    expect(state.messages).toEqual([message]);
-    expect(state.reactions).toEqual([reaction, orphanedReaction]);
+    expect(state.messages).toEqual([]);
+    expect(state.reactions).toEqual([]);
+    expect(state.syncCursor).toBeNull();
 
     const upgraded = new Dexie(name);
     await upgraded.open();
     expect(upgraded.table("reactions").schema.indexes.map((index) => index.name)).toContain(
       "conversationId",
     );
-    expect(await upgraded.table("reactions").get(reaction.id)).toMatchObject({
-      id: reaction.id,
-      conversationId: CONVERSATION_ID,
-    });
-    expect(await upgraded.table("reactions").get(orphanedReaction.id)).toMatchObject({
-      id: orphanedReaction.id,
-      conversationId: "__unknown__",
-    });
+    expect(await upgraded.table("reactions").count()).toBe(0);
     upgraded.close();
 
     const selfRemovedEvent: WorkspaceEvent = {
@@ -630,7 +696,7 @@ describe("PersistentWorkspaceCache", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: CONVERSATION_ID,
-      workspaceSequence: "13",
+      position: testPosition("13"),
       conversationSequence: null,
       entityVersion: 1,
       delivery: "at_least_once",

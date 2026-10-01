@@ -215,6 +215,7 @@ export class WorkspaceAuthorization {
           WHERE ticket.token_hash = $1
             AND ticket.consumed_at IS NULL
             AND ticket.expires_at > clock_timestamp()
+            AND ticket.protocol_epoch = (SELECT protocol_epoch FROM workspaces WHERE id = ticket.workspace_id)
          RETURNING ticket.workspace_id,
                    ticket.user_id,
                    ticket.device_session_id,

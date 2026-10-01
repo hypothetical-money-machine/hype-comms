@@ -1,12 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { escapeIdentifier, type Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
-import type { AgentCurrentPrincipal, CurrentUser } from "@hype-comms/contracts";
+import type { AgentCurrentPrincipal, CurrentUser, SyncPosition } from "@hype-comms/contracts";
 
-import { runMigrations } from "../src/db/migrate.js";
-import { createPool } from "../src/db/pool.js";
 import { DomainError } from "../src/domain-errors.js";
 import type {
   AuthenticatedAgentIdentity,
@@ -15,10 +13,14 @@ import type {
 import type { RealtimePrincipal } from "../src/modules/realtime/auth.js";
 import {
   type ConversationRow,
+  requireActivePrincipal,
+  requireVisibleChannelBySlug,
+  requireVisibleConversation,
   WorkspaceAuthorization,
 } from "../src/modules/workspace/authorization.js";
 
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
+import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import { createTestDatabase, type TestDatabase } from "./support/database.js";
 const now = "2026-07-24T12:00:00.000Z";
 const ownerId = "10000000-0000-4000-8000-000000000001";
 const memberId = "10000000-0000-4000-8000-000000000002";
@@ -31,12 +33,6 @@ const agentTokenId = "10000000-0000-4000-8000-000000000008";
 const botId = "10000000-0000-4000-8000-000000000009";
 const outsiderId = "10000000-0000-4000-8000-00000000000a";
 const invitedId = "10000000-0000-4000-8000-00000000000b";
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
 
 function currentUser(
   id: string,
@@ -118,23 +114,21 @@ async function rejectedDomainError(operation: Promise<unknown>): Promise<DomainE
 }
 
 describe("WorkspaceAuthorization", () => {
-  const schemaName = `workspace_authorization_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-  let adminPool: Pool;
+  let database: TestDatabase | undefined;
   let pool: Pool;
   let authorization: WorkspaceAuthorization;
+  let repository: WorkspaceRepository;
+  let protocolEpoch: string;
 
   beforeAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    adminPool = createPool({ url: testDatabaseUrl, poolSize: 2 });
-    await adminPool.query(`CREATE SCHEMA ${escapeIdentifier(schemaName)}`);
-    pool = createPool({ url: schemaScopedUrl(testDatabaseUrl, schemaName), poolSize: 8 });
-    await runMigrations(pool);
-    authorization = new WorkspaceAuthorization(pool);
+    database = await createTestDatabase();
+    pool = database.pool;
   });
 
   beforeEach(async () => {
+    await database!.reset();
     authorization = new WorkspaceAuthorization(pool);
-    await pool.query("TRUNCATE users CASCADE");
+    repository = new WorkspaceRepository(pool);
     await pool.query(
       `INSERT INTO users (id, email, username, display_name)
        VALUES ($1, 'owner@example.com', 'owner', 'Owner'),
@@ -166,13 +160,16 @@ describe("WorkspaceAuthorization", () => {
        VALUES ($1, $2, $3, $4, $4, clock_timestamp() + interval '1 day')`,
       [ownerSessionId, ownerId, Buffer.alloc(32, 7), now],
     );
+    protocolEpoch = (
+      await pool.query<{ protocol_epoch: string }>(
+        "SELECT protocol_epoch FROM workspaces WHERE id = $1",
+        [workspaceId],
+      )
+    ).rows[0]!.protocol_epoch;
   });
 
   afterAll(async () => {
-    if (testDatabaseUrl === undefined) return;
-    await pool.end();
-    await adminPool.query(`DROP SCHEMA ${escapeIdentifier(schemaName)} CASCADE`);
-    await adminPool.end();
+    await database?.dispose();
   });
 
   async function withClient<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -329,6 +326,7 @@ describe("WorkspaceAuthorization", () => {
       readonly agentTokenId?: string | null;
       readonly expiresAtSql?: string;
       readonly createdAtSql?: string;
+      readonly epoch?: string | null;
       readonly capabilities?: {
         readonly reactionEvents?: boolean;
         readonly readStateEvents?: boolean;
@@ -353,12 +351,12 @@ describe("WorkspaceAuthorization", () => {
           created_at, expires_at, reaction_events, read_state_events, task_events,
           announcement_channels, participated_thread_notifications, message_retract_events,
           member_profiles, ephemeral_activity, group_direct_messages, humans_only_channels,
-          system_channels)
+          system_channels, protocol_epoch)
        VALUES (
          $1, $2, $3, $4, $5, $6,
          ${options.createdAtSql ?? "clock_timestamp()"},
          ${options.expiresAtSql ?? "clock_timestamp() + interval '1 minute'"},
-         $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+         $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
        )`,
       [
         randomUUID(),
@@ -378,6 +376,7 @@ describe("WorkspaceAuthorization", () => {
         capabilities.groupDirectMessages === true,
         capabilities.humansOnlyChannels === true,
         capabilities.systemChannels === true,
+        options.epoch === undefined ? protocolEpoch : options.epoch,
       ],
     );
     return token;
@@ -494,6 +493,22 @@ describe("WorkspaceAuthorization", () => {
   });
 
   describe("consumeRealtimeTicket", () => {
+    it("rejects tickets without the current protocol epoch", async () => {
+      const missingEpoch = await insertRealtimeTicket({ epoch: null });
+      const oldEpoch = await insertRealtimeTicket({ epoch: randomUUID() });
+      for (const issued of [missingEpoch, oldEpoch]) {
+        await expect(authorization.consumeRealtimeTicket(issued)).resolves.toBeNull();
+        const state = await pool.query<{ consumed_at: Date | null }>(
+          "SELECT consumed_at FROM realtime_tickets WHERE token_hash = $1",
+          [createHash("sha256").update(issued).digest()],
+        );
+        expect(state.rows[0]?.consumed_at).toBeNull();
+      }
+      await expect(
+        authorization.consumeRealtimeTicket(await insertRealtimeTicket()),
+      ).resolves.toEqual(ownerPrincipal);
+    });
+
     it("consumes tickets once and omits retained protocol-1 capability flags", async () => {
       const issued = await insertRealtimeTicket();
       await expect(authorization.consumeRealtimeTicket(issued)).resolves.toEqual({
@@ -612,9 +627,17 @@ describe("WorkspaceAuthorization", () => {
       await expect(
         pool.query(
           `INSERT INTO realtime_tickets
-             (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp() + interval '1 minute')`,
-          [randomUUID(), workspaceId, ownerId, ownerSessionId, agentTokenId, Buffer.alloc(32, 11)],
+             (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at, protocol_epoch)
+           VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp() + interval '1 minute', $7)`,
+          [
+            randomUUID(),
+            workspaceId,
+            ownerId,
+            ownerSessionId,
+            agentTokenId,
+            Buffer.alloc(32, 11),
+            protocolEpoch,
+          ],
         ),
       ).rejects.toMatchObject({ code: "23514" });
     });
@@ -972,6 +995,644 @@ describe("WorkspaceAuthorization", () => {
         await expect(authorization.membershipRole(client, member, managed)).resolves.toBe("member");
         await expect(authorization.membershipRole(client, observer, managed)).resolves.toBeNull();
         await expect(authorization.membershipRole(client, owner, direct)).resolves.toBeNull();
+      });
+    });
+  });
+
+  describe("WorkspaceRepository facade", () => {
+    describe("issueRealtimeTicket", () => {
+      it("issues current-epoch human and agent tickets with a sync position", async () => {
+        await insertAgent();
+        const position: SyncPosition = { epoch: protocolEpoch, sequence: "0" };
+        for (const [caller, principal] of [
+          [owner, ownerPrincipal],
+          [agent, agentPrincipal],
+        ] as const) {
+          const issued = await repository.issueRealtimeTicket(caller);
+          expect(issued.position).toEqual(position);
+          const stored = await pool.query<{ protocol_epoch: string }>(
+            "SELECT protocol_epoch FROM realtime_tickets WHERE token_hash = $1",
+            [createHash("sha256").update(issued.ticket).digest()],
+          );
+          expect(stored.rows[0]?.protocol_epoch).toBe(protocolEpoch);
+          await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toEqual(principal);
+          await expect(repository.consumeRealtimeTicket(issued.ticket)).resolves.toBeNull();
+        }
+      });
+    });
+
+    describe("canViewConversation", () => {
+      it("allows humans to view a public workspace channel without a seat", async () => {
+        await expect(repository.canViewConversation(workspaceId, ownerId, generalId)).resolves.toBe(
+          true,
+        );
+        await expect(
+          repository.canViewConversation(workspaceId, memberId, generalId),
+        ).resolves.toBe(true);
+      });
+
+      it("hides a public workspace channel from an agent without a seat", async () => {
+        await insertAgent();
+        await expect(repository.canViewConversation(workspaceId, agentId, generalId)).resolves.toBe(
+          false,
+        );
+        await pool.query(
+          `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+          [generalId, workspaceId, agentId],
+        );
+        await expect(repository.canViewConversation(workspaceId, agentId, generalId)).resolves.toBe(
+          true,
+        );
+      });
+
+      it("requires an active conversation seat for a members-only channel", async () => {
+        const privateId = randomUUID();
+        await insertMembersChannel(privateId, "private");
+        await expect(repository.canViewConversation(workspaceId, ownerId, privateId)).resolves.toBe(
+          true,
+        );
+        await expect(
+          repository.canViewConversation(workspaceId, memberId, privateId),
+        ).resolves.toBe(false);
+        await pool.query(
+          `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+          [privateId, workspaceId, memberId],
+        );
+        await expect(
+          repository.canViewConversation(workspaceId, memberId, privateId),
+        ).resolves.toBe(true);
+      });
+
+      it("lets humans view a humans-only channel and hides it from agents", async () => {
+        const humansId = randomUUID();
+        await insertAgent();
+        await insertMembersChannel(humansId, "humans", { humanOnly: true });
+        await expect(repository.canViewConversation(workspaceId, ownerId, humansId)).resolves.toBe(
+          true,
+        );
+        await expect(repository.canViewConversation(workspaceId, memberId, humansId)).resolves.toBe(
+          true,
+        );
+        await expect(repository.canViewConversation(workspaceId, agentId, humansId)).resolves.toBe(
+          false,
+        );
+      });
+
+      it("lets both 1:1 participants view a direct message", async () => {
+        const dmId = randomUUID();
+        await insertDirectMessage(dmId, ownerId, memberId);
+        await expect(repository.canViewConversation(workspaceId, ownerId, dmId)).resolves.toBe(
+          true,
+        );
+        await expect(repository.canViewConversation(workspaceId, memberId, dmId)).resolves.toBe(
+          true,
+        );
+        await expect(repository.canViewConversation(workspaceId, observerId, dmId)).resolves.toBe(
+          false,
+        );
+      });
+
+      it("lets protocol v2 participants view group direct messages and hides them from nonmembers", async () => {
+        const groupId = randomUUID();
+        await insertGroupDirect(groupId, [ownerId, memberId, observerId]);
+        await expect(repository.canViewConversation(workspaceId, ownerId, groupId)).resolves.toBe(
+          true,
+        );
+        await expect(repository.canViewConversation(workspaceId, memberId, groupId)).resolves.toBe(
+          true,
+        );
+        await insertOutsider();
+        await pool.query(
+          `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
+         VALUES ($1, $2, 'member', 'active')`,
+          [workspaceId, outsiderId],
+        );
+        await expect(
+          repository.canViewConversation(workspaceId, outsiderId, groupId),
+        ).resolves.toBe(false);
+      });
+
+      it("returns false when the caller has no active workspace membership", async () => {
+        await insertOutsider();
+        await expect(
+          repository.canViewConversation(workspaceId, outsiderId, generalId),
+        ).resolves.toBe(false);
+      });
+    });
+
+    describe("consumeRealtimeTicket", () => {
+      it("consumes a current-epoch human device ticket exactly once", async () => {
+        const issued = await insertRealtimeTicket();
+        await expect(repository.consumeRealtimeTicket(issued)).resolves.toEqual(ownerPrincipal);
+        await expect(repository.consumeRealtimeTicket(issued)).resolves.toBeNull();
+      });
+
+      it("rejects tickets without the current protocol epoch", async () => {
+        const missingEpoch = await insertRealtimeTicket({ epoch: null });
+        const oldEpoch = await insertRealtimeTicket({ epoch: randomUUID() });
+        for (const issued of [missingEpoch, oldEpoch]) {
+          await expect(repository.consumeRealtimeTicket(issued)).resolves.toBeNull();
+          const state = await pool.query<{ consumed_at: Date | null }>(
+            "SELECT consumed_at FROM realtime_tickets WHERE token_hash = $1",
+            [createHash("sha256").update(issued).digest()],
+          );
+          expect(state.rows[0]?.consumed_at).toBeNull();
+        }
+        await expect(
+          repository.consumeRealtimeTicket(await insertRealtimeTicket()),
+        ).resolves.toEqual(ownerPrincipal);
+      });
+
+      it("returns null for a revoked or expired device session after consuming the ticket", async () => {
+        const revoked = await insertRealtimeTicket();
+        await pool.query(
+          `UPDATE device_sessions SET revoked_at = clock_timestamp() WHERE id = $1`,
+          [ownerSessionId],
+        );
+        await expect(repository.consumeRealtimeTicket(revoked)).resolves.toBeNull();
+        const revokedState = await pool.query<{ consumed_at: Date | string | null }>(
+          `SELECT consumed_at FROM realtime_tickets WHERE token_hash = $1`,
+          [createHash("sha256").update(revoked).digest()],
+        );
+        expect(revokedState.rows[0]?.consumed_at).not.toBeNull();
+
+        await pool.query(`UPDATE device_sessions SET revoked_at = NULL WHERE id = $1`, [
+          ownerSessionId,
+        ]);
+        const expired = await insertRealtimeTicket();
+        await pool.query(
+          `UPDATE device_sessions
+            SET expires_at = clock_timestamp() - interval '1 second'
+          WHERE id = $1`,
+          [ownerSessionId],
+        );
+        await expect(repository.consumeRealtimeTicket(expired)).resolves.toBeNull();
+      });
+
+      it("returns null when workspace membership is inactive and still consumes the ticket", async () => {
+        const issued = await insertRealtimeTicket();
+        await pool.query(
+          `UPDATE workspace_memberships
+            SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, ownerId],
+        );
+        await expect(repository.consumeRealtimeTicket(issued)).resolves.toBeNull();
+        await pool.query(
+          `UPDATE workspace_memberships
+            SET status = 'active'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, ownerId],
+        );
+        await expect(repository.consumeRealtimeTicket(issued)).resolves.toBeNull();
+      });
+
+      it("accepts a valid agent token and rejects revoked tokens and disabled agents", async () => {
+        await insertAgent();
+        const issued = await insertRealtimeTicket({
+          userId: agentId,
+          sessionId: null,
+          agentTokenId,
+        });
+        await expect(repository.consumeRealtimeTicket(issued)).resolves.toMatchObject({
+          workspaceId,
+          userId: agentId,
+          deviceSessionId: null,
+          agentTokenId,
+        });
+
+        const revoked = await insertRealtimeTicket({
+          userId: agentId,
+          sessionId: null,
+          agentTokenId,
+        });
+        await pool.query(`UPDATE agent_tokens SET revoked_at = clock_timestamp() WHERE id = $1`, [
+          agentTokenId,
+        ]);
+        await expect(repository.consumeRealtimeTicket(revoked)).resolves.toBeNull();
+
+        await pool.query(`UPDATE agent_tokens SET revoked_at = NULL WHERE id = $1`, [agentTokenId]);
+        const disabled = await insertRealtimeTicket({
+          userId: agentId,
+          sessionId: null,
+          agentTokenId,
+        });
+        await pool.query(`UPDATE agents SET disabled_at = clock_timestamp() WHERE user_id = $1`, [
+          agentId,
+        ]);
+        await expect(repository.consumeRealtimeTicket(disabled)).resolves.toBeNull();
+      });
+
+      it("cannot construct a ticket with both credentials because the table check forbids it", async () => {
+        await insertAgent();
+        await expect(
+          pool.query(
+            `INSERT INTO realtime_tickets
+             (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash, expires_at, protocol_epoch)
+           VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp() + interval '1 minute', $7)`,
+            [
+              randomUUID(),
+              workspaceId,
+              ownerId,
+              ownerSessionId,
+              agentTokenId,
+              Buffer.alloc(32, 11),
+              protocolEpoch,
+            ],
+          ),
+        ).rejects.toMatchObject({ code: "23514" });
+      });
+    });
+
+    describe("revalidateRealtimePrincipal", () => {
+      it("accepts a live device session and rejects unknown, revoked, and expired ones", async () => {
+        await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+          status: "valid",
+        });
+        await expect(
+          repository.revalidateRealtimePrincipal({
+            ...ownerPrincipal,
+            deviceSessionId: randomUUID(),
+          }),
+        ).resolves.toEqual({ status: "invalid", reason: "unknown_session" });
+
+        await pool.query(
+          `UPDATE device_sessions SET revoked_at = clock_timestamp() WHERE id = $1`,
+          [ownerSessionId],
+        );
+        await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "session_revoked",
+        });
+        await pool.query(`UPDATE device_sessions SET revoked_at = NULL WHERE id = $1`, [
+          ownerSessionId,
+        ]);
+        await pool.query(
+          `UPDATE device_sessions
+            SET expires_at = clock_timestamp() - interval '1 second'
+          WHERE id = $1`,
+          [ownerSessionId],
+        );
+        await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "session_expired",
+        });
+      });
+
+      it("rejects a human principal whose membership is no longer active", async () => {
+        await pool.query(
+          `UPDATE workspace_memberships
+            SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, ownerId],
+        );
+        await expect(repository.revalidateRealtimePrincipal(ownerPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "membership_inactive",
+        });
+      });
+
+      it("revalidates agent tokens including revoked, disabled, and inactive cases", async () => {
+        await insertAgent();
+        await expect(repository.revalidateRealtimePrincipal(agentPrincipal)).resolves.toEqual({
+          status: "valid",
+        });
+        await expect(
+          repository.revalidateRealtimePrincipal({
+            ...agentPrincipal,
+            agentTokenId: randomUUID(),
+          }),
+        ).resolves.toEqual({ status: "invalid", reason: "unknown_agent_token" });
+
+        await pool.query(`UPDATE agent_tokens SET revoked_at = clock_timestamp() WHERE id = $1`, [
+          agentTokenId,
+        ]);
+        await expect(repository.revalidateRealtimePrincipal(agentPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "agent_token_revoked",
+        });
+        await pool.query(`UPDATE agent_tokens SET revoked_at = NULL WHERE id = $1`, [agentTokenId]);
+        await pool.query(`UPDATE agents SET disabled_at = clock_timestamp() WHERE user_id = $1`, [
+          agentId,
+        ]);
+        await expect(repository.revalidateRealtimePrincipal(agentPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "agent_disabled",
+        });
+        await pool.query(`UPDATE agents SET disabled_at = NULL WHERE user_id = $1`, [agentId]);
+        await pool.query(
+          `UPDATE workspace_memberships
+            SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, agentId],
+        );
+        await expect(repository.revalidateRealtimePrincipal(agentPrincipal)).resolves.toEqual({
+          status: "invalid",
+          reason: "membership_inactive",
+        });
+      });
+    });
+
+    describe("transactional helpers", () => {
+      it("requireVisibleConversation returns a visible row and rejects hidden or archived writes", async () => {
+        const archivedId = randomUUID();
+        await insertMembersChannel(archivedId, "archived", { archived: true });
+        await withClient(async (client) => {
+          const visible = await requireVisibleConversation(client, owner, generalId, false);
+          expect(visible.id).toBe(generalId);
+          await expect(
+            requireVisibleConversation(client, owner, generalId, true, true),
+          ).resolves.toMatchObject({ id: generalId, is_archived: false });
+          await expect(
+            requireVisibleConversation(client, owner, archivedId, false),
+          ).resolves.toMatchObject({ id: archivedId, is_archived: true });
+          await expect(
+            requireVisibleConversation(client, member, archivedId, false),
+          ).rejects.toMatchObject({
+            kind: "not_found",
+            message: "Conversation not found",
+          } satisfies Partial<DomainError>);
+          const writableArchived = await rejectedDomainError(
+            requireVisibleConversation(client, owner, archivedId, true),
+          );
+          expect(writableArchived).toMatchObject({
+            kind: "not_found",
+            message: "Conversation not found",
+          } satisfies Partial<DomainError>);
+        });
+      });
+
+      it("requireActivePrincipal returns the locked principal and rejects inactive memberships", async () => {
+        await insertAgent();
+        await withClient(async (client) => {
+          await expect(requireActivePrincipal(client, owner)).resolves.toEqual({
+            role: "owner",
+            kind: "human",
+          });
+          await expect(requireActivePrincipal(client, agent)).resolves.toEqual({
+            role: "member",
+            kind: "agent",
+          });
+        });
+        await pool.query(
+          `UPDATE workspace_memberships
+            SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, memberId],
+        );
+        await withClient(async (client) => {
+          const revoked = await rejectedDomainError(requireActivePrincipal(client, member));
+          expect(revoked).toMatchObject({
+            kind: "access_denied",
+            message: "Workspace unavailable",
+          } satisfies Partial<DomainError>);
+          const missing = await rejectedDomainError(requireActivePrincipal(client, outsider));
+          expect(missing).toMatchObject({
+            kind: "access_denied",
+            message: "Workspace unavailable",
+          } satisfies Partial<DomainError>);
+        });
+      });
+
+      it("requireVisibleChannelBySlug resolves live channels and rejects archived writes", async () => {
+        const archivedId = randomUUID();
+        await insertMembersChannel(archivedId, "archived-ops", { archived: true });
+        await withClient(async (client) => {
+          await expect(
+            requireVisibleChannelBySlug(client, owner, "general", false),
+          ).resolves.toMatchObject({ id: generalId, slug: "general" });
+          await expect(
+            requireVisibleChannelBySlug(client, owner, "missing", false),
+          ).rejects.toMatchObject({
+            kind: "not_found",
+            message: "Channel not found",
+          } satisfies Partial<DomainError>);
+          await expect(
+            requireVisibleChannelBySlug(client, owner, "archived-ops", true),
+          ).rejects.toMatchObject({
+            kind: "not_found",
+            message: "Channel not found",
+          } satisfies Partial<DomainError>);
+          await expect(
+            requireVisibleChannelBySlug(client, owner, "archived-ops", false),
+          ).resolves.toMatchObject({ id: archivedId });
+        });
+      });
+    });
+
+    describe("authorization through workspace operations", () => {
+      it("allows an active human to create a humans-only channel and rejects agents and invited humans", async () => {
+        await insertAgent();
+        await insertInvitedHuman();
+        repository = new WorkspaceRepository(pool, { humansOnlyChannelsEnabled: true });
+        await expect(
+          repository.createChannel(owner, {
+            name: "Humans",
+            slug: "humans-created",
+            topic: null,
+            access: "humans",
+          }),
+        ).resolves.toMatchObject({ conversation: { conversation: { access: "humans" } } });
+        for (const caller of [agent, invited]) {
+          const denied = await rejectedDomainError(
+            repository.createChannel(caller, {
+              name: "Denied humans",
+              slug: `humans-denied-${caller.currentUser.user.id}`,
+              topic: null,
+              access: "humans",
+            }),
+          );
+          expect(denied).toMatchObject({
+            kind: "access_denied",
+            message: "Only humans can create humans-only channels",
+          } satisfies Partial<DomainError>);
+        }
+      });
+
+      it("checks the actor and every requested conversation participant", async () => {
+        await insertAgent();
+        await insertBot();
+        await insertInvitedHuman();
+        await expect(
+          repository.createGroupDirectConversation(
+            owner,
+            { memberIds: [memberId, agentId] },
+            randomUUID(),
+          ),
+        ).resolves.toMatchObject({
+          conversation: {
+            conversation: { kind: "group_direct_message" },
+            participantIds: [ownerId, memberId, agentId].sort(),
+          },
+        });
+        for (const targetId of [randomUUID(), botId, invitedId]) {
+          const denied = await rejectedDomainError(
+            repository.createDirectConversation(owner, { memberId: targetId }),
+          );
+          expect(denied).toMatchObject({
+            kind: "not_found",
+            message: "One or more members were not found",
+          } satisfies Partial<DomainError>);
+        }
+        await pool.query(
+          `UPDATE workspace_memberships SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, ownerId],
+        );
+        const actorGone = await rejectedDomainError(
+          repository.createDirectConversation(owner, { memberId }),
+        );
+        expect(actorGone).toMatchObject({
+          kind: "access_denied",
+          message: "Workspace unavailable",
+        } satisfies Partial<DomainError>);
+      });
+
+      it("resolves a live writable channel slug before creating a task", async () => {
+        const created = await repository.createChannelTask(
+          owner,
+          "general",
+          {
+            title: "Authorization task",
+            description: null,
+            priority: "none",
+            assigneeId: null,
+            dueOn: null,
+            sourceMessageId: null,
+          },
+          randomUUID(),
+        );
+        expect(created.task.conversationId).toBe(generalId);
+      });
+
+      it("allows only an owner to manage members in an unarchived members channel", async () => {
+        const managedId = randomUUID();
+        const humansId = randomUUID();
+        const archivedId = randomUUID();
+        await insertMembersChannel(managedId, "managed");
+        await insertMembersChannel(humansId, "humans-managed", { humanOnly: true });
+        await insertMembersChannel(archivedId, "archived-managed", { archived: true });
+        await pool.query(
+          `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+          [managedId, workspaceId, memberId],
+        );
+        await expect(
+          repository.upsertChannelMember(owner, managedId, memberId, { role: "member" }),
+        ).resolves.toMatchObject({
+          channelMembers: { conversationId: managedId, canManage: true },
+        });
+        const memberDenied = await rejectedDomainError(
+          repository.upsertChannelMember(member, managedId, observerId, { role: "member" }),
+        );
+        expect(memberDenied).toMatchObject({
+          kind: "access_denied",
+          message: "Only a channel owner can manage members",
+        } satisfies Partial<DomainError>);
+        for (const conversationId of [generalId, humansId]) {
+          const denied = await rejectedDomainError(
+            repository.upsertChannelMember(owner, conversationId, observerId, { role: "member" }),
+          );
+          expect(denied).toMatchObject({
+            kind: "not_found",
+            message: "Managed channel not found",
+          } satisfies Partial<DomainError>);
+        }
+        await expect(
+          repository.upsertChannelMember(owner, archivedId, observerId, { role: "member" }),
+        ).rejects.toMatchObject({ kind: "not_found", message: "Conversation not found" });
+      });
+
+      it("keeps at least one active channel owner when demoting another owner", async () => {
+        const managedId = randomUUID();
+        await insertMembersChannel(managedId, "owners");
+        const onlyOwner = await rejectedDomainError(
+          repository.upsertChannelMember(owner, managedId, ownerId, { role: "member" }),
+        );
+        expect(onlyOwner).toMatchObject({
+          kind: "conflict",
+          message: "A channel must retain at least one owner",
+        } satisfies Partial<DomainError>);
+        await pool.query(
+          `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'owner')`,
+          [managedId, workspaceId, memberId],
+        );
+        const demoted = await repository.upsertChannelMember(owner, managedId, ownerId, {
+          role: "member",
+        });
+        expect(demoted.channelMembers.members).toContainEqual(
+          expect.objectContaining({
+            user: expect.objectContaining({ id: ownerId }),
+            role: "member",
+          }),
+        );
+        await pool.query(
+          `UPDATE conversation_memberships SET role = 'owner'
+          WHERE conversation_id = $1 AND user_id = $2`,
+          [managedId, ownerId],
+        );
+        await pool.query(
+          `UPDATE workspace_memberships SET status = 'revoked'
+          WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, memberId],
+        );
+        const revokedOwner = await rejectedDomainError(
+          repository.upsertChannelMember(owner, managedId, ownerId, { role: "member" }),
+        );
+        expect(revokedOwner).toMatchObject({
+          kind: "conflict",
+          message: "A channel must retain at least one owner",
+        } satisfies Partial<DomainError>);
+      });
+
+      it("reports live channel roles, hides unseated members channels, and leaves direct roles null", async () => {
+        const managedId = randomUUID();
+        const dmId = randomUUID();
+        await insertMembersChannel(managedId, "roles");
+        await insertDirectMessage(dmId, ownerId, memberId);
+        await pool.query(
+          `INSERT INTO conversation_memberships (conversation_id, workspace_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+          [managedId, workspaceId, memberId],
+        );
+        const ownerPage = await repository.listConversations(owner, undefined, 50);
+        expect(
+          ownerPage.conversations.find(({ conversation }) => conversation.id === managedId),
+        ).toMatchObject({
+          membershipRole: "owner",
+        });
+        expect(
+          ownerPage.conversations.find(({ conversation }) => conversation.id === dmId),
+        ).toMatchObject({
+          membershipRole: null,
+        });
+        const memberPage = await repository.listConversations(member, undefined, 50);
+        expect(
+          memberPage.conversations.find(({ conversation }) => conversation.id === managedId),
+        ).toMatchObject({
+          membershipRole: "member",
+        });
+        const observerPage = await repository.listConversations(observer, undefined, 50);
+        expect(
+          observerPage.conversations.some(({ conversation }) => conversation.id === managedId),
+        ).toBe(false);
+        expect(
+          observerPage.conversations.find(({ conversation }) => conversation.id === generalId),
+        ).toMatchObject({
+          membershipRole: null,
+        });
+        await pool.query(
+          `UPDATE conversation_memberships SET left_at = clock_timestamp()
+          WHERE conversation_id = $1 AND user_id = $2`,
+          [managedId, memberId],
+        );
+        const departedPage = await repository.listConversations(member, undefined, 50);
+        expect(
+          departedPage.conversations.some(({ conversation }) => conversation.id === managedId),
+        ).toBe(false);
       });
     });
   });

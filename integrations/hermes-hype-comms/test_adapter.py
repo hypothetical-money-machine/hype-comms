@@ -22,6 +22,117 @@ from typing import Any, Optional
 from unittest.mock import patch
 
 
+PROTOCOL_EPOCH = "eeeeeeee-0000-4000-8000-000000000001"
+
+
+def position(sequence: str) -> dict[str, str]:
+    return {"epoch": PROTOCOL_EPOCH, "sequence": sequence}
+
+
+def cursor_text(sequence: str) -> str:
+    return json.dumps(position(sequence), separators=(",", ":"))
+
+_CURSOR_STATE_FIXTURES = {
+    "cursor-v3-ambient.json": """
+{
+  "version": 3,
+  "cursor": "9999",
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  },
+  "pendingAmbientWakes": {
+    "00000000-0000-4000-8000-000000000101": {
+      "workspaceSequence": "101",
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "101",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z"
+    }
+  }
+}
+""",
+    "cursor-v3-ambient-ordered.json": """
+{
+  "version": 3,
+  "cursor": "9999",
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  },
+  "pendingAmbientWakes": {
+    "00000000-0000-4000-8000-000000000500": {
+      "workspaceSequence": "601",
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "500",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z"
+    },
+    "00000000-0000-4000-8000-000000000100": {
+      "workspaceSequence": "602",
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "100",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z"
+    }
+  }
+}
+""",
+    "cursor-v3-epoch.json": """
+{
+  "version": 3,
+  "cursor": {
+    "epoch": "eeeeeeee-0000-4000-8000-000000000001",
+    "sequence": "77"
+  },
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  }
+}
+""",
+    "cursor-v4-ambient.json": """
+{
+  "version": 4,
+  "cursor": {
+    "epoch": "eeeeeeee-0000-4000-8000-000000000001",
+    "sequence": "77"
+  },
+  "pendingReadCursors": {
+    "00000000-0000-4000-8000-000000000020": {
+      "messageId": "00000000-0000-4000-8000-000000000102",
+      "conversationSequence": "102"
+    }
+  },
+  "pendingAmbientWakes": {
+    "00000000-0000-4000-8000-000000000101": {
+      "position": {
+        "epoch": "eeeeeeee-0000-4000-8000-000000000001",
+        "sequence": "101"
+      },
+      "conversationId": "00000000-0000-4000-8000-000000000021",
+      "conversationSequence": "101",
+      "authorId": "00000000-0000-4000-8000-000000000002",
+      "threadRootId": null,
+      "createdAt": "2026-07-26T12:00:00Z",
+      "recoveryOrder": "1"
+    }
+  }
+}
+""",
+}
+
+
+
 class FakePlatform:
     _instances: dict[str, "FakePlatform"] = {}
 
@@ -387,7 +498,7 @@ def bootstrap(
     return {
         "currentUser": principal(),
         "workspace": {"id": WORKSPACE_ID, "name": "Hype Comms"},
-        "syncCursor": cursor,
+        "syncCursor": position(cursor),
         # bootstrap.members is already active-only server-side, so a disabled
         # agent simply stops appearing here.
         "members": [AGENT_USER, HUMAN_USER] if members is None else list(members),
@@ -404,7 +515,7 @@ def event(
     result: dict[str, Any] = {
         "type": event_type,
         "workspaceId": WORKSPACE_ID,
-        "workspaceSequence": cursor,
+        "position": position(cursor),
         "occurredAt": "2026-07-26T12:00:00.000Z",
         "payload": payload,
     }
@@ -775,7 +886,7 @@ def send_spec(
         args += ("--thread-root-id", thread_root_id)
     return ProcessSpec(
         args,
-        json_process({"message": {"id": message_id}, "syncCursor": cursor}),
+        json_process({"message": {"id": message_id}, "syncCursor": position(cursor)}),
     )
 
 
@@ -897,12 +1008,12 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             },
         }
         adapter._cursor_path = adapter._select_cursor_path()
-        adapter._persist_cursor(cursor)
+        adapter._persist_cursor(cursor_text(cursor))
 
     async def test_connect_bootstraps_at_current_cursor_and_keeps_token_off_argv(self) -> None:
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs() + [ProcessSpec(("watch", "--json", "--after", "100"), watch)]
+            startup_specs() + [ProcessSpec(("watch", "--json", "--after", cursor_text("100")), watch)]
         )
         adapter = self.new_adapter(factory)
 
@@ -913,7 +1024,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 ("auth", "whoami", "--json"),
                 ("workspace", "bootstrap", "--json"),
                 ("conversations", "list", "--all", "--json"),
-                ("watch", "--json", "--after", "100"),
+                ("watch", "--json", "--after", cursor_text("100")),
             ],
         )
         for call in factory.calls:
@@ -932,7 +1043,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_connect_can_use_private_cli_profile_without_token_environment(self) -> None:
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs() + [ProcessSpec(("watch", "--json", "--after", "100"), watch)]
+            startup_specs() + [ProcessSpec(("watch", "--json", "--after", cursor_text("100")), watch)]
         )
         with patch.dict(
             os.environ,
@@ -983,7 +1094,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.handled_events[1].source.user_id, USER_ID)
         self.assertEqual(adapter.handled_events[1].source.user_name, "morgan")
         self.assertEqual(len(context_calls(factory)), 3)
-        self.assertEqual(adapter._cursor, "104")
+        self.assertEqual(adapter._cursor, cursor_text("104"))
 
     async def test_context_is_fetched_once_only_after_every_wake_gate(self) -> None:
         factory = FakeProcessFactory([])
@@ -1067,7 +1178,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ],
             [],
         )
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_busy_ambient_channel_wakes_queue_separate_turns_without_interrupt_or_ack(
         self,
@@ -1105,7 +1216,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"body":"ambient second"', queued[1].text)
         self.assertNotIn('"body":"ambient first"', queued[1].text)
         self.assertTrue(all("NO_REPLY" in event.channel_prompt for event in queued))
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
 
         # Once the active response is delivered, each queued pack gets its own
         # model turn. A silent decision still produces no network message.
@@ -1144,8 +1255,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_FULL")
         self.assertTrue(raised.exception.retryable)
         self.assertEqual(raised.exception.retry_after, 1.0)
-        self.assertEqual(adapter._cursor, "102")
-        self.assertEqual(adapter._load_cursor(), "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
+        self.assertEqual(adapter._load_cursor(), cursor_text("102"))
         self.assertEqual(gateway._queue_depth(session_key, adapter=adapter), 2)
         self.assertEqual(adapter.handled_events, [])
         self.assertEqual(send_calls(factory), [])
@@ -1153,7 +1264,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # A freed slot admits the same uncheckpointed event exactly once.
         adapter._pending_messages.pop(session_key)
         await adapter._accept_event(trigger)
-        self.assertEqual(adapter._cursor, "103")
+        self.assertEqual(adapter._cursor, cursor_text("103"))
         queued = [adapter._pending_messages[session_key], *gateway._queued_events[session_key]]
         self.assertEqual(sum(event.message_id == message_id_for("103") for event in queued), 1)
 
@@ -1175,7 +1286,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                     await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
                 self.assertEqual(raised.exception.code, "HERMES_GATEWAY_DRAINING")
                 self.assertTrue(raised.exception.retryable)
-                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter._cursor, cursor_text("100"))
                 self.assertEqual(adapter.handled_events, [])
                 self.assertEqual(adapter._pending_messages, {})
                 self.assertEqual(gateway._queued_events, {})
@@ -1195,7 +1306,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                     await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
                 self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
                 self.assertTrue(raised.exception.retryable)
-                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter._cursor, cursor_text("100"))
                 self.assertEqual(adapter.handled_events, [])
                 self.assertEqual(send_calls(factory), [])
 
@@ -1210,7 +1321,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
 
         self.assertEqual(len(adapter.handled_events), 1)
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_busy_mentions_and_dms_keep_normal_gateway_handoff(self) -> None:
         factory = FakeProcessFactory([])
@@ -1228,7 +1339,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             [message_id_for("101"), message_id_for("102")],
         )
         self.assertEqual(adapter._pending_messages, {})
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
 
     async def test_idle_to_busy_race_queues_ambient_wake_without_calling_busy_policy(self) -> None:
         factory = FakeProcessFactory([])
@@ -1256,7 +1367,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interruptions, [])
         self.assertEqual(send_calls(factory), [])
         self.assertEqual(adapter._pending_messages[session_key].message_id, message_id_for("101"))
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_idle_to_busy_queue_failure_propagates_without_fallback_or_checkpoint(
         self,
@@ -1281,7 +1392,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(adapter_module.CliFailure) as raised:
             await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
         self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         self.assertEqual(adapter._pending_messages, {})
         self.assertEqual(adapter._ambient_handoff_failures, {})
         self.assertEqual(send_calls(factory), [])
@@ -1297,7 +1408,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 message_event(cursor, CHANNEL_ID, USER_ID, body=f"server-only body {cursor}")
             )
         persisted = json.loads(first._cursor_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["cursor"], "102")
+        self.assertEqual(persisted["cursor"], position("102"))
         self.assertEqual(
             set(persisted["pendingAmbientWakes"]),
             {message_id_for("101"), message_id_for("102")},
@@ -1309,7 +1420,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # from durable anchors before it resumes watch after cursor 102.
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "102"), watch)]
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("102")), watch)]
         )
         restarted = self.new_adapter(factory)
         decisions: list[tuple[str, str]] = []
@@ -1328,7 +1439,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("server-only body 102", decisions[1][1])
         self.assertEqual(len(context_calls(factory)), 2)
         self.assertEqual(restarted._pending_ambient_wakes, {})
-        self.assertEqual(restarted._cursor, "102")
+        self.assertEqual(restarted._cursor, cursor_text("102"))
         self.assertEqual(json.loads(first._cursor_path.read_text())["pendingAmbientWakes"], {})
         await restarted.disconnect()
 
@@ -1340,7 +1451,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         await first._accept_event(message_event("101", CHANNEL_ID, USER_ID))
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "101"), watch)]
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("101")), watch)]
         )
         restarted = self.new_adapter(factory)
         restarted.set_authorization_check(lambda *args: False)
@@ -1349,7 +1460,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context_calls(factory), [])
         self.assertEqual(restarted.handled_events, [])
         self.assertEqual(restarted._pending_ambient_wakes, {})
-        self.assertEqual(restarted._cursor, "101")
+        self.assertEqual(restarted._cursor, cursor_text("101"))
         await restarted.disconnect()
 
     async def deferred_recovery_fixture(
@@ -1369,7 +1480,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
             startup_specs("500")
-            + [ProcessSpec(("watch", "--json", "--after", last_cursor), watch)]
+            + [ProcessSpec(("watch", "--json", "--after", cursor_text(last_cursor)), watch)]
         )
         adapter = self.new_adapter(factory)
         gateway = FakeTurnGateway(adapter)
@@ -1439,11 +1550,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gateway.turns, [message_id_for(str(i)) for i in range(101, 105)])
             self.assertEqual(adapter._pending_ambient_wakes, {})
             self.assertIsNone(adapter._ambient_replay_task)
-            self.assertEqual(adapter._cursor, "200")
+            self.assertEqual(adapter._cursor, cursor_text("200"))
             persisted = json.loads(adapter._cursor_path.read_text())
-            self.assertEqual(persisted["cursor"], "200")
+            self.assertEqual(persisted["cursor"], position("200"))
             self.assertEqual(persisted["pendingAmbientWakes"], {})
-            self.assertEqual(factory.calls[6]["args"], ("watch", "--json", "--after", "104"))
+            self.assertEqual(factory.calls[6]["args"], ("watch", "--json", "--after", cursor_text("104")))
         finally:
             await adapter.disconnect()
 
@@ -1523,11 +1634,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(gateway._queue_depth(key, adapter=adapter), 0)
             self.assertEqual(len(context_calls(factory)), before_context)
             self.assertEqual(adapter._pending_read_cursors, {})
-            self.assertEqual(adapter._cursor, "201")
+            self.assertEqual(adapter._cursor, cursor_text("201"))
             self.assertIn(message_id_for("201"), adapter._pending_ambient_wakes)
             self.assertIs(adapter._ambient_replay_task, task)
             persisted = json.loads(adapter._cursor_path.read_text())
-            self.assertEqual(persisted["cursor"], "201")
+            self.assertEqual(persisted["cursor"], position("201"))
             self.assertIn(message_id_for("201"), persisted["pendingAmbientWakes"])
 
             # A deferred turn must use a new server pack after its predecessors
@@ -1553,7 +1664,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(adapter._pending_ambient_admissions, set())
             self.assertEqual(adapter._pending_ambient_wakes, {})
-            self.assertEqual(adapter._cursor, "201")
+            self.assertEqual(adapter._cursor, cursor_text("201"))
         finally:
             await adapter.disconnect()
 
@@ -1586,7 +1697,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertIn(message_id_for("201"), adapter._pending_ambient_admissions)
             await adapter._accept_event(message_event("202", DM_ID, USER_ID))
             self.assertEqual(adapter.handled_events[-1].message_id, message_id_for("202"))
-            self.assertEqual(adapter._cursor, "202")
+            self.assertEqual(adapter._cursor, cursor_text("202"))
         finally:
             child.release.set()
             await adapter.disconnect()
@@ -1680,7 +1791,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(adapter._pending_ambient_wakes, {})
             self.assertEqual(adapter._pending_ambient_admissions, set())
             self.assertEqual(adapter._pending_read_cursors, {})
-            self.assertEqual(adapter._cursor, "201")
+            self.assertEqual(adapter._cursor, cursor_text("201"))
         finally:
             await adapter.disconnect()
 
@@ -1788,7 +1899,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(adapter._ambient_replay_retries, {})
                 self.assertEqual(adapter._pending_ambient_admissions, set())
                 self.assertEqual(adapter._pending_ambient_wakes, {})
-                self.assertEqual(adapter._cursor, "104")
+                self.assertEqual(adapter._cursor, cursor_text("104"))
             finally:
                 await adapter.disconnect()
 
@@ -1914,7 +2025,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter.set_message_handler(quiet)
         watch = FakeWatchProcess(blocking=True)
         adapter._process_factory = FakeProcessFactory(
-            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "104"), watch)]
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("104")), watch)]
         )
         # A stale volatile deadline must not suppress the reconnect's immediate
         # fresh-context admission, even if a previous generation left one.
@@ -2016,10 +2127,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter.set_message_handler(fail)
         with self.assertRaisesRegex(RuntimeError, "inference did not finish"):
             await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         persisted = json.loads(adapter._cursor_path.read_text())
         self.assertIn(message_id_for("101"), persisted["pendingAmbientWakes"])
-        self.assertEqual(persisted["cursor"], "100")
+        self.assertEqual(persisted["cursor"], position("100"))
 
     async def test_ambient_recovery_write_failure_prevents_volatile_handoff(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -2031,7 +2142,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         with patch.object(adapter, "_persist_cursor", side_effect=failure):
             with self.assertRaises(adapter_module.CliFailure):
                 await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         self.assertEqual(adapter._pending_ambient_wakes, {})
         self.assertEqual(adapter._pending_messages, {})
         self.assertEqual(adapter.handled_events, [])
@@ -2082,7 +2193,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.gateway_runner._queue_depth(key, adapter=adapter), 1)
         self.assertEqual(adapter._admitted_ambient_wakes, {message_id_for("101")})
 
-    async def test_malformed_v3_ambient_anchor_is_rejected_before_recovery(self) -> None:
+    async def test_malformed_v4_ambient_anchor_is_rejected_before_recovery(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)
         adapter.gateway_runner = FakeBusyGateway(adapter)
@@ -2094,17 +2205,29 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         malformed = [
             {**valid, "pendingAmbientWakes": []},
             {**valid, "pendingAmbientWakes": {"bad-id": valid["pendingAmbientWakes"][anchor_id]}},
+            {**valid, "pendingAmbientWakes": {
+                anchor_id: valid["pendingAmbientWakes"][anchor_id],
+                message_id_for("102"): valid["pendingAmbientWakes"][anchor_id],
+            }},
+            {**valid, "pendingAmbientWakes": {anchor_id: {
+                key: value for key, value in valid["pendingAmbientWakes"][anchor_id].items()
+                if key != "recoveryOrder"
+            }}},
         ]
-        for field, value in (
-            ("workspaceSequence", "-1"),
+        for target_field, value in (
+            ("position", {"epoch": PROTOCOL_EPOCH, "sequence": "-1"}),
+            ("position", {"epoch": "bad-id", "sequence": "101"}),
             ("conversationId", "bad-id"),
             ("conversationSequence", True),
             ("authorId", None),
             ("threadRootId", "bad-id"),
             ("createdAt", "yesterday"),
+            ("recoveryOrder", "0"),
+            ("recoveryOrder", "01"),
+            ("recoveryOrder", True),
             ("body", "must not persist message text"),
         ):
-            target = {**valid["pendingAmbientWakes"][anchor_id], field: value}
+            target = {**valid["pendingAmbientWakes"][anchor_id], target_field: value}
             malformed.append({**valid, "pendingAmbientWakes": {anchor_id: target}})
         for payload in malformed:
             with self.subTest(payload=payload):
@@ -2126,7 +2249,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 await adapter._accept_event(message_event("102", CHANNEL_ID, USER_ID))
             self.assertEqual(raised.exception.code, "AMBIENT_WAKE_STATE_FULL")
             self.assertTrue(raised.exception.retryable)
-            self.assertEqual(adapter._cursor, "101")
+            self.assertEqual(adapter._cursor, cursor_text("101"))
             self.assertEqual(adapter._cursor_path.read_bytes(), before)
             self.assertEqual(adapter.gateway_runner._queue_depth(key, adapter=adapter), 1)
 
@@ -2231,9 +2354,297 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(message_id_for("101"), adapter._pending_ambient_wakes)
         self.assertEqual(adapter._admitted_ambient_wakes, set())
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
-    async def test_v2_cursor_migrates_to_v3_without_losing_read_targets(self) -> None:
+    def write_cursor_fixture(self, filename: str) -> tuple[Any, dict[str, Any]]:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed)
+        source = json.loads(_CURSOR_STATE_FIXTURES[filename])
+        seed._cursor_path.write_text(json.dumps(source), encoding="utf-8")
+        return seed, source
+
+    async def test_both_v3_disk_formats_migrate_strictly_to_v4_before_watch(self) -> None:
+        for filename, sequence, wakes in (
+            ("cursor-v3-ambient.json", "500", 1),
+            ("cursor-v3-epoch.json", "77", 0),
+        ):
+            with self.subTest(filename=filename):
+                seed, source = self.write_cursor_fixture(filename)
+                message_event("101", CHANNEL_ID, USER_ID, body="fresh authorized server context")
+                watch = FakeWatchProcess(blocking=True)
+                scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+                factory = FakeProcessFactory(startup_specs("500", scopes) + [
+                    read_cursor_spec(DM_ID, message_id_for("102")),
+                    *([read_cursor_spec(CHANNEL_ID, message_id_for("101"))] if wakes else []),
+                    ProcessSpec(("watch", "--json", "--after", cursor_text(sequence)), watch),
+                ])
+                restarted = self.new_adapter(factory)
+                writes: list[dict[str, Any]] = []
+                real_replace = adapter_module.os.replace
+
+                def capture(source_path: Any, destination: Any) -> None:
+                    if Path(destination) == seed._cursor_path:
+                        writes.append(json.loads(Path(source_path).read_text()))
+                    real_replace(source_path, destination)
+
+                async def decide(_event: Any) -> str:
+                    return "NO_REPLY"
+
+                restarted.set_message_handler(decide)
+                try:
+                    with patch.object(adapter_module.os, "replace", side_effect=capture):
+                        self.assertTrue(await restarted.connect())
+                    self.assertEqual(writes[0]["version"], 4)
+                    self.assertEqual(writes[0]["cursor"], position(sequence))
+                    self.assertEqual(writes[0]["pendingReadCursors"], source["pendingReadCursors"])
+                    self.assertEqual(len(writes[0]["pendingAmbientWakes"]), wakes)
+                    if wakes:
+                        target = writes[0]["pendingAmbientWakes"][message_id_for("101")]
+                        self.assertEqual(target["position"], position("500"))
+                        self.assertEqual(target["recoveryOrder"], "1")
+                        self.assertNotIn("workspaceSequence", target)
+                        self.assertEqual(target["authorId"], USER_ID)
+                        self.assertIn("fresh authorized server context", restarted.handled_events[0].text)
+                    self.assertEqual(len(context_calls(factory)), wakes)
+                    self.assertEqual(restarted._cursor, cursor_text(sequence))
+                    persisted = json.loads(seed._cursor_path.read_text())
+                    self.assertEqual(persisted["pendingAmbientWakes"], {})
+                    self.assertEqual(persisted["pendingReadCursors"], {})
+                    self.assertEqual(stat.S_IMODE(seed._cursor_path.stat().st_mode), 0o600)
+                finally:
+                    await restarted.disconnect()
+
+
+    async def test_legacy_ambient_order_survives_migration_and_v4_restart(self) -> None:
+        seed, source = self.write_cursor_fixture("cursor-v3-ambient-ordered.json")
+        message_event("500", CHANNEL_ID, USER_ID, body="first original queued wake")
+        message_event("100", CHANNEL_ID, USER_ID, body="second original queued wake")
+        # Migrate and persist the real V4 file, then reconstruct another adapter
+        # from it. Message ID order is the reverse of the original scalar order.
+        self.assertIsNone(seed._load_cursor(cursor_text("500")))
+        seed._persist_cursor(cursor_text("500"))
+        migrated = json.loads(seed._cursor_path.read_text())
+        self.assertEqual(migrated["version"], 4)
+        self.assertEqual(migrated["pendingReadCursors"], source["pendingReadCursors"])
+        for target in migrated["pendingAmbientWakes"].values():
+            self.assertEqual(target["position"], position("500"))
+            self.assertIn(target["legacyWorkspaceSequence"], {"601", "602"})
+        self.assertEqual(migrated["pendingAmbientWakes"][message_id_for("500")]["recoveryOrder"], "1")
+        self.assertEqual(migrated["pendingAmbientWakes"][message_id_for("100")]["recoveryOrder"], "2")
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(startup_specs("500") + [
+            ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch),
+        ])
+        restarted = self.new_adapter(factory)
+        decisions: list[str] = []
+
+        async def decide(event: Any) -> str:
+            decisions.append(event.message_id)
+            return "NO_REPLY"
+
+        restarted.set_message_handler(decide)
+        try:
+            self.assertTrue(await restarted.connect())
+            self.assertEqual(decisions, [message_id_for("500"), message_id_for("100")])
+            self.assertEqual(restarted._cursor, cursor_text("500"))
+            self.assertEqual(restarted._pending_ambient_wakes, {})
+            self.assertEqual(json.loads(seed._cursor_path.read_text())["pendingReadCursors"], source["pendingReadCursors"])
+        finally:
+            await restarted.disconnect()
+
+
+    async def test_v3_ambient_migration_rechecks_authorization_before_refetch(self) -> None:
+        seed, _source = self.write_cursor_fixture("cursor-v3-ambient.json")
+        watch = FakeWatchProcess(blocking=True)
+        scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+        factory = FakeProcessFactory(startup_specs("500", scopes) + [
+            read_cursor_spec(DM_ID, message_id_for("102")),
+            ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch),
+        ])
+        restarted = self.new_adapter(factory)
+        restarted.set_authorization_check(lambda *args: False)
+        try:
+            self.assertTrue(await restarted.connect())
+            self.assertEqual(context_calls(factory), [])
+            self.assertEqual(restarted.handled_events, [])
+            self.assertEqual(restarted._cursor, cursor_text("500"))
+            self.assertEqual(json.loads(seed._cursor_path.read_text())["pendingAmbientWakes"], {})
+        finally:
+            await restarted.disconnect()
+
+
+    async def test_v4_restart_uses_new_epoch_without_rewinding_or_losing_recovery(self) -> None:
+        seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")
+        message_event("101", CHANNEL_ID, USER_ID, body="current authorized context after epoch change")
+        new_position = {"epoch": "eeeeeeee-0000-4000-8000-000000000002", "sequence": "5"}
+        fresh = bootstrap("5")
+        fresh["syncCursor"] = new_position
+        scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+        startup = startup_specs("5", scopes)
+        startup[1] = ProcessSpec(("workspace", "bootstrap", "--json"), json_process(fresh))
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(startup + [
+            read_cursor_spec(DM_ID, message_id_for("102")),
+            read_cursor_spec(CHANNEL_ID, message_id_for("101")),
+            ProcessSpec(("watch", "--json", "--after", json.dumps(new_position, separators=(",", ":"))), watch),
+        ])
+        restarted = self.new_adapter(factory)
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
+
+        def capture(source_path: Any, destination: Any) -> None:
+            if Path(destination) == seed._cursor_path:
+                writes.append(json.loads(Path(source_path).read_text()))
+            real_replace(source_path, destination)
+
+        async def decide(_event: Any) -> str:
+            return "NO_REPLY"
+
+        restarted.set_message_handler(decide)
+        try:
+            with patch.object(adapter_module.os, "replace", side_effect=capture):
+                self.assertTrue(await restarted.connect())
+            self.assertEqual(writes[0]["pendingReadCursors"], source["pendingReadCursors"])
+            self.assertEqual(writes[0]["pendingAmbientWakes"], source["pendingAmbientWakes"])
+            self.assertTrue(all(state["cursor"] == new_position for state in writes))
+            self.assertEqual(len(restarted.handled_events), 1)
+            self.assertIn("current authorized context after epoch change", restarted.handled_events[0].text)
+            self.assertEqual(restarted._pending_ambient_wakes, {})
+            self.assertEqual(restarted._pending_read_cursors, {})
+            self.assertEqual(json.loads(restarted._cursor), new_position)
+        finally:
+            await restarted.disconnect()
+
+
+    async def test_mixed_epoch_failed_wakes_recover_in_original_order_after_restart(self) -> None:
+        seed, source = self.write_cursor_fixture("cursor-v4-ambient.json")
+        old_epoch = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        new_epoch = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        old_id, new_id = message_id_for("101"), message_id_for("6")
+        source["cursor"]["epoch"] = old_epoch
+        source["pendingAmbientWakes"][old_id]["position"]["epoch"] = old_epoch
+        seed._cursor_path.write_text(json.dumps(source))
+        message_event("101", CHANNEL_ID, USER_ID, body="older authorized recovery context")
+        live = message_event("6", CHANNEL_ID, USER_ID, body="newer authorized live context")
+        live["position"]["epoch"] = new_epoch
+        fresh_position = {"epoch": new_epoch, "sequence": "5"}
+        checkpoint = {"epoch": new_epoch, "sequence": "6"}
+        fresh = bootstrap("5")
+        fresh["syncCursor"] = fresh_position
+
+        def factory_after(after: dict[str, str]) -> FakeProcessFactory:
+            startup = startup_specs("5")
+            startup[1] = ProcessSpec(("workspace", "bootstrap", "--json"), json_process(fresh))
+            return FakeProcessFactory(startup + [ProcessSpec(
+                ("watch", "--json", "--after", json.dumps(after, separators=(",", ":"))),
+                FakeWatchProcess(blocking=True),
+            )])
+
+        first_factory = factory_after(fresh_position)
+        first = self.new_adapter(first_factory)
+        gateway = FakeTurnGateway(first)
+        gateway.results = {old_id: {"failed": True}, new_id: {"failed": True}}
+        first.gateway_runner = gateway
+
+        async def fail_decision(event: Any) -> dict[str, Any]:
+            return await gateway._run_agent_inner(
+                source=event.source, event_message_id=event.message_id
+            )
+
+        first.set_message_handler(fail_decision)
+        try:
+            self.assertTrue(await first.connect())
+            await first._accept_event(live)
+            self.assertEqual(gateway.turns, [old_id, new_id])
+            persisted = json.loads(seed._cursor_path.read_text())
+            self.assertEqual(persisted["cursor"], checkpoint)
+            self.assertEqual(persisted["pendingReadCursors"], source["pendingReadCursors"])
+            wakes = persisted["pendingAmbientWakes"]
+            self.assertEqual(set(wakes), {old_id, new_id})
+            self.assertEqual(wakes[old_id]["position"], {"epoch": old_epoch, "sequence": "101"})
+            self.assertEqual(wakes[new_id]["position"], checkpoint)
+            self.assertEqual(wakes[old_id]["recoveryOrder"], "1")
+            self.assertEqual(wakes[new_id]["recoveryOrder"], "2")
+            self.assertEqual(first._admitted_ambient_wakes, set())
+        finally:
+            await first.disconnect()
+
+        # Restart from the persisted file after both turns were admitted and
+        # failed. UUID sort order and per-epoch sequence order both put the newer
+        # wake first; the durable recovery ordinal must preserve chronology.
+        second_factory = factory_after(checkpoint)
+        second = self.new_adapter(second_factory)
+        decisions: list[str] = []
+        authorization_calls: list[tuple[str, Optional[str], Optional[str]]] = []
+
+        async def decide(event: Any) -> str:
+            decisions.append(event.message_id)
+            return "NO_REPLY"
+
+        def authorize(user_id: str, chat_type: Optional[str], chat_id: Optional[str]) -> bool:
+            authorization_calls.append((user_id, chat_type, chat_id))
+            return True
+
+        second.set_message_handler(decide)
+        second.set_authorization_check(authorize)
+        writes: list[dict[str, Any]] = []
+        real_replace = adapter_module.os.replace
+
+        def capture(source_path: Any, destination: Any) -> None:
+            if Path(destination) == seed._cursor_path:
+                writes.append(json.loads(Path(source_path).read_text()))
+            real_replace(source_path, destination)
+
+        try:
+            with patch.object(adapter_module.os, "replace", side_effect=capture):
+                self.assertTrue(await second.connect())
+            self.assertEqual(decisions, [old_id, new_id])
+            self.assertEqual([call["args"][5] for call in context_calls(second_factory)], decisions)
+            self.assertEqual(authorization_calls, [(USER_ID, "channel", CHANNEL_ID)] * 4)
+            self.assertIn("older authorized recovery context", second.handled_events[0].text)
+            self.assertIn("newer authorized live context", second.handled_events[1].text)
+            self.assertTrue(writes)
+            self.assertTrue(all(state["cursor"] == checkpoint for state in writes))
+            final = json.loads(seed._cursor_path.read_text())
+            self.assertEqual(final["pendingAmbientWakes"], {})
+            self.assertEqual(final["pendingReadCursors"], source["pendingReadCursors"])
+            self.assertEqual(json.loads(second._cursor), checkpoint)
+        finally:
+            await second.disconnect()
+
+
+    async def test_ambiguous_and_malformed_v3_shapes_fail_without_state_rewrite(self) -> None:
+        seed, ambient = self.write_cursor_fixture("cursor-v3-ambient.json")
+        epoch = json.loads(_CURSOR_STATE_FIXTURES["cursor-v3-epoch.json"])
+        bad_anchor = dict(ambient["pendingAmbientWakes"][message_id_for("101")])
+        malformed = [
+            {**ambient, "cursor": position("77")},
+            {**epoch, "cursor": "77"},
+            {**epoch, "pendingAmbientWakes": {}},
+            {**ambient, "unexpected": True},
+            {**ambient, "version": True},
+            {**ambient, "pendingAmbientWakes": {message_id_for("101"): {**bad_anchor, "body": "untrusted stored content"}}},
+            {**ambient, "pendingAmbientWakes": {message_id_for("101"): {**bad_anchor, "createdAt": "2026-02-30T00:00:00Z"}}},
+            {**ambient, "pendingReadCursors": {DM_ID: {"messageId": "invalid", "conversationSequence": "102"}}},
+        ]
+        for invalid in malformed:
+            with self.subTest(state=invalid):
+                original = json.dumps(invalid)
+                seed._cursor_path.write_text(original)
+                factory = FakeProcessFactory(startup_specs("500"))
+                restarted = self.new_adapter(factory)
+                try:
+                    self.assertFalse(await restarted.connect())
+                    self.assertEqual(restarted.fatal_error[0], "CURSOR_STATE_INVALID")
+                    self.assertEqual(context_calls(factory), [])
+                    self.assertEqual(restarted.handled_events, [])
+                    self.assertEqual(seed._cursor_path.read_text(), original)
+                    self.assertFalse(any(call["args"][0] == "watch" for call in factory.calls))
+                finally:
+                    await restarted.disconnect()
+
+
+    async def test_v2_cursor_migrates_to_v4_with_bootstrap_and_read_targets(self) -> None:
         seed = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(seed, cursor="77")
         seed._cursor_path.write_text(
@@ -2256,14 +2667,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             startup_specs("500", scopes)
             + [
                 read_cursor_spec(DM_ID, message_id_for("101")),
-                ProcessSpec(("watch", "--json", "--after", "77"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch),
             ]
         )
         restarted = self.new_adapter(factory)
         self.assertTrue(await restarted.connect())
         persisted = json.loads(seed._cursor_path.read_text())
-        self.assertEqual(persisted["version"], 3)
-        self.assertEqual(persisted["cursor"], "77")
+        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["cursor"], position("500"))
         self.assertEqual(persisted["pendingReadCursors"], {})
         self.assertEqual(persisted["pendingAmbientWakes"], {})
         await restarted.disconnect()
@@ -2302,7 +2713,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.pre_gateway_dispatch_events, [])
         self.assertEqual(adapter.pairing_events, [])
         self.assertEqual(adapter._pending_read_cursors, {})
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
 
     async def test_profile_authorization_allow_overrides_legacy_environment_gate(
         self,
@@ -2727,7 +3138,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             await adapter._accept_event(trigger)
 
         self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_watch_rejects_oversized_sequence_as_invalid_cursor(self) -> None:
         oversized = "1" + "0" * 4_300
@@ -2740,7 +3151,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(caught.exception.code, "INVALID_CURSOR")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_watch_sequence_boundary_matches_postgres_bigint_contract(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -2864,7 +3275,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
         self.assertEqual(rejected.handled_events, [])
-        self.assertEqual(rejected._cursor, "100")
+        self.assertEqual(rejected._cursor, cursor_text("100"))
 
     async def test_malformed_or_mismatched_context_never_falls_back_to_trigger_only(self) -> None:
         anchor_id = message_id_for("101")
@@ -2904,7 +3315,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(caught.exception.code, "INVALID_CONTEXT_PACK")
                 self.assertEqual(adapter.handled_events, [])
-                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter._cursor, cursor_text("100"))
                 self.assertEqual(len(context_calls(factory)), 1)
 
     async def test_transient_context_fetch_replays_without_inference_or_fallback(self) -> None:
@@ -2933,7 +3344,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(caught.exception.retryable)
         self.assertEqual(adapter.handled_events, [])
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         self.assertEqual(adapter._pending_read_cursors, {})
 
     async def test_retracted_context_anchor_is_checkpointed_without_poisoning_watch(self) -> None:
@@ -2966,7 +3377,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual((first, second), ("accepted", "accepted"))
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
         self.assertEqual(len(adapter.handled_events), 1)
         self.assertIn('"body":"next message"', adapter.handled_events[0].text)
         self.assertEqual(adapter._pending_read_cursors, {})
@@ -3076,7 +3487,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((await adapter.get_chat_info(DM_ID))["name"], "Morgan Renamed")
         self.assertEqual((await adapter.get_chat_info(new_channel_id))["topic"], "Ship room")
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
 
     def add_peer_agent(self, adapter: Any) -> None:
         adapter._members[PEER_AGENT_ID] = dict(PEER_AGENT_USER)
@@ -3117,10 +3528,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             (await adapter.get_chat_info(PEER_AGENT_DM_ID))["name"], "Direct message"
         )
-        # The watch cursor advances from the event's own workspaceSequence;
+        # The watch cursor advances from the event's own position;
         # the reload's bootstrap cursor ("150") is discarded, not assigned.
-        self.assertEqual(adapter._cursor, "101")
-        self.assertEqual(adapter._load_cursor(), "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
+        self.assertEqual(adapter._load_cursor(), cursor_text("101"))
 
     async def test_member_updated_payload_never_patches_the_directory(self) -> None:
         # The payload is advisory. Even a payload that disagrees with the
@@ -3163,7 +3574,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome, "accepted")
         self.assertEqual(len(factory.calls), 4)
         self.assertEqual(adapter.handled_events, [])
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
 
     async def test_member_updated_with_invalid_payload_is_fatal_without_reload(self) -> None:
         factory = FakeProcessFactory([])
@@ -3176,7 +3587,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(caught.exception.code, "INVALID_MEMBER_EVENT")
         self.assertEqual(factory.calls, [])
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_membership_changed_directory_refresh_failure_is_retryable_and_skips_checkpoint(
         self,
@@ -3187,7 +3598,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # refresh failure escaping here would stop the supervisor for good.
         malformed_bootstrap = {
             "currentUser": principal(),
-            "syncCursor": "150",
+            "syncCursor": position("150"),
             "members": [AGENT_USER, HUMAN_USER],
             # "workspace" is missing on purpose.
         }
@@ -3220,8 +3631,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # Exit code 5 specifically: _watch_supervisor re-derives retryability
         # from the exit code, and only 5 survives that second pass.
         self.assertEqual(caught.exception.exit_code, 5)
-        self.assertEqual(adapter._cursor, "100")
-        self.assertEqual(adapter._load_cursor(), "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
+        self.assertEqual(adapter._load_cursor(), cursor_text("100"))
 
     async def test_member_updated_directory_refresh_failure_is_retryable_and_skips_checkpoint(
         self,
@@ -3236,7 +3647,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # next time. _accept_event must re-raise it as retryable instead.
         malformed_bootstrap = {
             "currentUser": principal(),
-            "syncCursor": "150",
+            "syncCursor": position("150"),
             "members": [AGENT_USER, HUMAN_USER],
             # "workspace" is missing on purpose.
         }
@@ -3269,8 +3680,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(factory.calls), 2)
         # The event's own cursor must not be persisted -- an unrefreshed
         # directory has to be retried, not silently skipped.
-        self.assertEqual(adapter._cursor, "100")
-        self.assertEqual(adapter._load_cursor(), "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
+        self.assertEqual(adapter._load_cursor(), cursor_text("100"))
 
     async def test_membership_added_for_known_conversation_updates_cache_without_reload(
         self,
@@ -3283,7 +3694,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(
             adapter._conversations[CHANNEL_ID]["participantIds"],
             [SECOND_USER_ID],
@@ -3300,7 +3711,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(adapter._conversations[DM_ID]["participantIds"], [AGENT_ID])
 
     async def test_membership_updated_action_is_a_no_op_but_still_persists_cursor(
@@ -3315,7 +3726,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(
             adapter._conversations[DM_ID]["participantIds"], original_participant_ids
         )
@@ -3354,7 +3765,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome, "accepted")
         # The persisted cursor is the membership event's own workspace
         # sequence, not the bootstrap response's syncCursor.
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(len(factory.calls), 2)
         self.assertEqual(
             (await adapter.get_chat_info(NEW_CHANNEL_ID))["name"], "Incident Response"
@@ -3371,7 +3782,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertNotIn(DM_ID, adapter._conversations)
         fallback_info = await adapter.get_chat_info(DM_ID)
         self.assertEqual(fallback_info, {"id": DM_ID, "name": DM_ID, "type": "channel"})
@@ -3400,7 +3811,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(len(factory.calls), 2)
 
     async def test_membership_removed_for_unknown_conversation_is_a_no_op(self) -> None:
@@ -3412,7 +3823,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(outcome, "accepted")
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertNotIn(UNKNOWN_CHANNEL_ID, adapter._conversations)
 
     async def test_membership_changed_with_invalid_payload_is_fatal(self) -> None:
@@ -3428,7 +3839,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(adapter_module.CliFailure) as caught:
             await adapter._accept_event(malformed)
         self.assertEqual(caught.exception.code, "INVALID_MEMBERSHIP_EVENT")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_unrecognized_event_type_is_ignored_without_advancing_cursor(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -3438,7 +3849,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         outcome = await adapter._accept_event(unknown)
 
         self.assertEqual(outcome, "ignored")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_unrecognized_event_with_null_workspace_id_is_ignored_not_fatal(self) -> None:
         # system.error has a nullable workspaceId in the contract. Unknown
@@ -3452,7 +3863,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         outcome = await adapter._accept_event(unknown)
 
         self.assertEqual(outcome, "ignored")
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_watch_consumer_stays_connected_across_unrecognized_event(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -3473,7 +3884,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(return_code, 0)
         self.assertFalse(needs_resync)
         self.assertTrue(saw_event)
-        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._cursor, cursor_text("102"))
 
     async def test_persisted_cursor_is_used_after_restart(self) -> None:
         first = self.new_adapter(FakeProcessFactory([]))
@@ -3482,11 +3893,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "101"), watch)]
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("101")), watch)]
         )
         restarted = self.new_adapter(factory)
         self.assertTrue(await restarted.connect())
-        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", "101"))
+        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", cursor_text("101")))
         await restarted.disconnect()
 
     async def test_read_cursor_is_queued_only_after_successful_hermes_handoff(self) -> None:
@@ -3517,12 +3928,12 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         adapter.handle_message = capture
         await adapter._accept_event(message_event("101", DM_ID, USER_ID, body="handoff first"))
 
-        self.assertEqual(state_during_handoff, [("100", {}, 0)])
+        self.assertEqual(state_during_handoff, [(cursor_text("100"), {}, 0)])
         self.assertEqual(
             [call["args"][:2] for call in factory.calls],
             [("messages", "history"), ("read-cursors", "advance")],
         )
-        self.assertEqual(adapter._cursor, "101")
+        self.assertEqual(adapter._cursor, cursor_text("101"))
         self.assertEqual(adapter._pending_read_cursors, {})
 
     async def test_successful_read_cursor_handoff_persists_each_transition_once(self) -> None:
@@ -3555,8 +3966,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             await adapter._accept_event(message_event("101", DM_ID, USER_ID))
 
         pending = {
-            "version": 3,
-            "cursor": "101",
+            "version": 4,
+            "cursor": position("101"),
             "pendingAmbientWakes": {},
             "pendingReadCursors": {
                 DM_ID: {
@@ -3565,7 +3976,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 }
             },
         }
-        cleared = {"version": 3, "cursor": "101", "pendingReadCursors": {}, "pendingAmbientWakes": {}}
+        cleared = {"version": 4, "cursor": position("101"), "pendingReadCursors": {}, "pendingAmbientWakes": {}}
         self.assertEqual(writes, [pending, cleared])
         self.assertEqual(durable_state_seen_by_server, [pending])
 
@@ -3604,8 +4015,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 await adapter._accept_event(message_event("101", DM_ID, USER_ID))
 
             pending = {
-                "version": 3,
-                "cursor": "101",
+                "version": 4,
+                "cursor": position("101"),
                 "pendingAmbientWakes": {},
                 "pendingReadCursors": {
                     DM_ID: {
@@ -3639,13 +4050,13 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ["workspace:read", "messages:write", "read-cursors:write"]
         )
         adapter._queue_read_cursor(
-            workspace_cursor="101",
+            workspace_cursor=cursor_text("101"),
             conversation_id=DM_ID,
             message_id=first_message_id,
             conversation_sequence="101",
         )
         adapter._queue_read_cursor(
-            workspace_cursor="102",
+            workspace_cursor=cursor_text("102"),
             conversation_id=PEER_AGENT_DM_ID,
             message_id=second_message_id,
             conversation_sequence="102",
@@ -3701,7 +4112,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             start=1,
         ):
             adapter._queue_read_cursor(
-                workspace_cursor=str(100 + index),
+                workspace_cursor=cursor_text(str(100 + index)),
                 conversation_id=conversation_id,
                 message_id=message_id,
                 conversation_sequence=str(index),
@@ -3745,7 +4156,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ["workspace:read", "messages:write", "read-cursors:write"]
         )
         adapter._queue_read_cursor(
-            workspace_cursor="101",
+            workspace_cursor=cursor_text("101"),
             conversation_id=DM_ID,
             message_id=first_message_id,
             conversation_sequence="101",
@@ -3756,7 +4167,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.wait_for(first.started.wait(), timeout=0.5)
             adapter._queue_read_cursor(
-                workspace_cursor="102",
+                workspace_cursor=cursor_text("102"),
                 conversation_id=DM_ID,
                 message_id=second_message_id,
                 conversation_sequence="102",
@@ -3802,7 +4213,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ["workspace:read", "messages:write", "read-cursors:write"]
         )
         adapter._queue_read_cursor(
-            workspace_cursor="101",
+            workspace_cursor=cursor_text("101"),
             conversation_id=DM_ID,
             message_id=anchor_id,
             conversation_sequence="101",
@@ -3838,7 +4249,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "handoff failed"):
             await adapter._accept_event(message_event("101", DM_ID, USER_ID))
 
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         self.assertEqual(adapter._pending_read_cursors, {})
         self.assertEqual(len(context_calls(factory)), 1)
         self.assertEqual(
@@ -3882,11 +4293,11 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate, "duplicate")
         self.assertEqual(len(first.handled_events), 1)
         self.assertEqual(len(context_calls(first_factory)), 1)
-        self.assertEqual(first._cursor, "101")
+        self.assertEqual(first._cursor, cursor_text("101"))
         self.assertEqual(first._pending_read_cursors[DM_ID].message_id, anchor_id)
         persisted = json.loads(first._cursor_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 3)
-        self.assertEqual(persisted["cursor"], "101")
+        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["cursor"], position("101"))
         self.assertEqual(
             persisted["pendingReadCursors"][DM_ID]["messageId"],
             anchor_id,
@@ -3903,7 +4314,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             startup_specs("500", scopes)
             + [
                 read_cursor_spec(DM_ID, anchor_id),
-                ProcessSpec(("watch", "--json", "--after", "101"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("101")), watch),
             ]
         )
         restarted = self.new_adapter(restart_factory)
@@ -3924,7 +4335,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         seed = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(seed, cursor="101")
         seed._queue_read_cursor(
-            workspace_cursor="101",
+            workspace_cursor=cursor_text("101"),
             conversation_id=DM_ID,
             message_id=anchor_id,
             conversation_sequence="101",
@@ -3947,7 +4358,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             startup_specs("500", scopes)
             + [
                 read_cursor_spec(DM_ID, anchor_id, transient),
-                ProcessSpec(("watch", "--json", "--after", "101"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("101")), watch),
                 read_cursor_spec(DM_ID, anchor_id),
             ]
         )
@@ -3997,7 +4408,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory = FakeProcessFactory(
             startup_specs("100", scopes)
             + [
-                ProcessSpec(("watch", "--json", "--after", "100"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("100")), watch),
                 read_cursor_spec(DM_ID, anchor_id, transient),
                 read_cursor_spec(DM_ID, anchor_id),
             ]
@@ -4243,7 +4654,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             startup_specs("500", scopes)
             + [
                 read_cursor_spec(DM_ID, anchor_id, forbidden_process()),
-                ProcessSpec(("watch", "--json", "--after", "101"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("101")), watch),
             ]
         )
         restarted = self.new_adapter(restart_factory)
@@ -4288,7 +4699,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory = FakeProcessFactory(
             startup_specs("100", scopes)
             + [
-                ProcessSpec(("watch", "--json", "--after", "100"), watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("100")), watch),
                 read_cursor_spec(DM_ID, anchor_id, transient),
             ]
         )
@@ -4470,7 +4881,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ["workspace:read", "messages:write", "read-cursors:write"]
         )
         adapter._queue_read_cursor(
-            workspace_cursor="101",
+            workspace_cursor=cursor_text("101"),
             conversation_id=DM_ID,
             message_id=anchor_id,
             conversation_sequence="101",
@@ -4515,7 +4926,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(adapter._pending_read_cursors[DM_ID].message_id, anchor_id)
         persisted = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["cursor"], "101")
+        self.assertEqual(persisted["cursor"], position("101"))
         self.assertEqual(
             persisted["pendingReadCursors"][DM_ID]["messageId"],
             anchor_id,
@@ -4528,9 +4939,9 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         replacement_watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
             startup_specs("100")
-            + [ProcessSpec(("watch", "--json", "--after", "100"), first_watch)]
+            + [ProcessSpec(("watch", "--json", "--after", cursor_text("100")), first_watch)]
             + startup_specs("500")
-            + [ProcessSpec(("watch", "--json", "--after", "100"), replacement_watch)]
+            + [ProcessSpec(("watch", "--json", "--after", cursor_text("100")), replacement_watch)]
         )
         adapter = self.new_adapter(factory)
         ordinary_consume = adapter._consume_watch
@@ -4604,8 +5015,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             writes,
             [
-                {"version": 3, "cursor": "101", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
-                {"version": 3, "cursor": "102", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
+                {"version": 4, "cursor": position("101"), "pendingReadCursors": {}, "pendingAmbientWakes": {}},
+                {"version": 4, "cursor": position("102"), "pendingReadCursors": {}, "pendingAmbientWakes": {}},
             ],
         )
         self.assertEqual(
@@ -4613,7 +5024,64 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             [],
         )
 
-    async def test_v1_cursor_state_migrates_to_v3_before_watch(self) -> None:
+    async def test_v2_cursor_rebootstraps_and_preserves_pending_read_targets(self) -> None:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed)
+        anchor_id = message_id_for("101")
+        seed._cursor_path.write_text(json.dumps({
+            "version": 2, "cursor": "101", "pendingReadCursors": {
+                DM_ID: {"messageId": anchor_id, "conversationSequence": "101"},
+            },
+        }), encoding="utf-8")
+        scopes = ["workspace:read", "messages:write", "read-cursors:write"]
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(startup_specs("500", scopes) + [
+            read_cursor_spec(DM_ID, anchor_id),
+            ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch),
+        ])
+        restarted = self.new_adapter(factory)
+        self.assertTrue(await restarted.connect())
+        self.assertEqual(restarted.handled_events, [])
+        self.assertEqual(json.loads(seed._cursor_path.read_text(encoding="utf-8")), {
+            "version": 4, "cursor": position("500"), "pendingReadCursors": {}, "pendingAmbientWakes": {},
+        })
+        await restarted.disconnect()
+
+    async def test_v3_epoch_cursor_migrates_to_v4_without_rewinding(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        adapter._cursor_path.write_text(json.dumps({
+            "version": 3,
+            "cursor": position("101"),
+            "pendingReadCursors": {
+                DM_ID: {
+                    "messageId": message_id_for("101"),
+                    "conversationSequence": "101",
+                },
+            },
+        }), encoding="utf-8")
+
+        cursor = adapter._load_cursor()
+        self.assertEqual(cursor, cursor_text("101"))
+        self.assertTrue(adapter._state_needs_migration)
+        adapter._persist_cursor(cursor)
+        migrated = json.loads(adapter._cursor_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["version"], 4)
+        self.assertEqual(migrated["cursor"], position("101"))
+        self.assertEqual(migrated["pendingReadCursors"][DM_ID]["messageId"], message_id_for("101"))
+        self.assertEqual(migrated["pendingAmbientWakes"], {})
+
+    async def test_changed_event_epoch_requires_bootstrap_without_checkpointing_or_handoff(self) -> None:
+        adapter = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(adapter)
+        changed = message_event("101", DM_ID, USER_ID)
+        changed["position"]["epoch"] = "eeeeeeee-0000-4000-8000-000000000002"
+        self.assertEqual(await adapter._accept_event(changed), "resync")
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(adapter._cursor, cursor_text("100"))
+        self.assertEqual(adapter._load_cursor(), cursor_text("100"))
+
+    async def test_v1_cursor_state_rebootstraps_before_protocol_2_watch(self) -> None:
         seed = self.new_adapter(FakeProcessFactory([]))
         seed._api_origin = ORIGIN
         seed._agent_user_id = AGENT_ID
@@ -4623,7 +5091,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         watch = FakeWatchProcess(blocking=True)
         factory = FakeProcessFactory(
-            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", "77"), watch)]
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("500")), watch)]
         )
         restarted = self.new_adapter(factory)
 
@@ -4631,7 +5099,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         migrated = json.loads(cursor_path.read_text(encoding="utf-8"))
         self.assertEqual(
             migrated,
-            {"version": 3, "cursor": "77", "pendingReadCursors": {}, "pendingAmbientWakes": {}},
+            {"version": 4, "cursor": position("500"), "pendingReadCursors": {}, "pendingAmbientWakes": {}},
         )
         await restarted.disconnect()
 
@@ -4647,7 +5115,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(adapter._consume_watch(process), timeout=0.5)
         self.assertTrue(result[1])
         self.assertTrue(process.terminated)
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_invalid_ndjson_terminates_before_stderr_drain(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
@@ -4677,7 +5145,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
             ),
-            ProcessSpec(("watch", "--json", "--after", "200"), second_watch),
+            ProcessSpec(("watch", "--json", "--after", cursor_text("200")), second_watch),
         ]
         factory = FakeProcessFactory(refresh_specs)
         adapter = self.new_adapter(factory)
@@ -4691,12 +5159,12 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 "watch",
                 "--json",
                 "--after",
-                "200",
+                cursor_text("200"),
             ):
                 break
             await asyncio.sleep(0)
-        self.assertEqual(adapter._cursor, "200")
-        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", "200"))
+        self.assertEqual(adapter._cursor, cursor_text("200"))
+        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", cursor_text("200")))
         adapter._stop_event.set()
         await adapter._terminate_process(second_watch)
         await asyncio.wait_for(task, timeout=0.5)
@@ -4707,10 +5175,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory = FakeProcessFactory(
             [
                 ProcessSpec(
-                    ("watch", "--json", "--after", "100"),
+                    ("watch", "--json", "--after", cursor_text("100")),
                     OSError("transient spawn failure"),
                 ),
-                ProcessSpec(("watch", "--json", "--after", "100"), recovered_watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("100")), recovered_watch),
             ]
         )
         adapter = self.new_adapter(factory)
@@ -4755,7 +5223,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         factory = FakeProcessFactory(
             [
                 ProcessSpec(context_args(DM_ID, anchor_id), rate_limited),
-                ProcessSpec(("watch", "--json", "--after", "100"), recovered_watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("100")), recovered_watch),
             ],
             auto_context=False,
         )
@@ -4778,10 +5246,10 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         self.assertEqual(observed_backoffs[0], (1, 2.5))
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
         self.assertEqual(adapter.handled_events, [])
         self.assertEqual(len(context_calls(factory)), 1)
-        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", "100"))
+        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", cursor_text("100")))
         self.assertFalse(task.done())
 
         adapter._stop_event.set()
@@ -4799,7 +5267,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         # and retry -- and must not have checkpointed the failed event.
         malformed_bootstrap = {
             "currentUser": principal(),
-            "syncCursor": "150",
+            "syncCursor": position("150"),
             "members": [AGENT_USER, HUMAN_USER],
             # "workspace" is missing on purpose.
         }
@@ -4824,7 +5292,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                         }
                     ),
                 ),
-                ProcessSpec(("watch", "--json", "--after", "100"), second_watch),
+                ProcessSpec(("watch", "--json", "--after", cursor_text("100")), second_watch),
             ]
         )
         adapter = self.new_adapter(factory)
@@ -4838,14 +5306,14 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0)
         self.assertEqual(len(factory.calls), 3)
-        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", "100"))
+        self.assertEqual(factory.calls[-1]["args"], ("watch", "--json", "--after", cursor_text("100")))
         # The supervisor reconnected instead of calling _supervisor_fatal.
         self.assertIsNone(adapter.fatal_error)
         self.assertFalse(task.done())
         # The failed refresh must not have advanced the checkpoint: the CLI
         # replays from "100" on reconnect, so the same member.updated event
         # is redelivered and the refresh is retried, not silently skipped.
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
         adapter._stop_event.set()
         await adapter._terminate_process(second_watch)
@@ -4921,7 +5389,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(captured["timeout"], 30.0)
 
     async def test_send_uses_private_stdin_and_classifies_retryable_failure(self) -> None:
-        success_process = json_process({"message": {"id": MESSAGE_ID}, "syncCursor": "101"})
+        success_process = json_process({"message": {"id": MESSAGE_ID}, "syncCursor": position("101")})
         rate_error = {
             "error": {
                 "code": "RATE_LIMITED",
@@ -5372,7 +5840,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(adapter.handled_events, [])
         self.assertEqual(adapter._thread_roots, {})
-        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._cursor, cursor_text("100"))
 
     async def test_cli_without_the_flag_retries_flat_and_stops_threading(self) -> None:
         # The adapter is copied out of this repo and runs against whatever
@@ -5918,7 +6386,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             **kwargs: Any,
         ) -> dict[str, Any]:
             captured.update({"cli": cli, "args": args, **kwargs})
-            return {"message": {"id": MESSAGE_ID}, "syncCursor": "101"}
+            return {"message": {"id": MESSAGE_ID}, "syncCursor": position("101")}
 
         with patch.object(adapter_module, "_run_cli_json", side_effect=fake_run):
             result = await adapter_module._standalone_send(

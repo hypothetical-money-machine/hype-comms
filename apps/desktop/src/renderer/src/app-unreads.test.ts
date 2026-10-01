@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -11,6 +12,7 @@ import type {
   ProductRealtimeEvent,
   RealtimeSessionScope,
   ScopedProductRealtimeEvent,
+  SyncPosition,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -213,7 +215,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -348,10 +350,10 @@ function createClient(
           lastReadAt: NOW,
           updatedAt: NOW,
         },
-        syncCursor: "1",
+        syncCursor: testPosition("1"),
       };
     },
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },
@@ -556,7 +558,7 @@ describe("in-app Unreads destination", () => {
       occurredAt: NOW,
       workspaceId: WORKSPACE_ID,
       conversationId: LAUNCH_ID,
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: horseMessage.conversationSequence,
       entityVersion: 2,
       delivery: "at_least_once",

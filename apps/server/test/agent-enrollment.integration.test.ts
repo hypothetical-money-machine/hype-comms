@@ -1,3 +1,10 @@
+import type { SyncPosition } from "@hype-comms/contracts";
+
+let protocolEpoch: string;
+function testPosition(sequence: string): SyncPosition {
+  return { epoch: protocolEpoch, sequence };
+}
+
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -140,6 +147,12 @@ describe("AgentEnrollmentModule", () => {
        VALUES ($1, 'Primary', 'primary', $2)`,
       [workspaceId, ownerId],
     );
+    protocolEpoch = (
+      await pool.query<{ protocol_epoch: string }>(
+        "SELECT protocol_epoch FROM workspaces WHERE id = $1",
+        [workspaceId],
+      )
+    ).rows[0]!.protocol_epoch;
     await pool.query(
       `INSERT INTO workspace_memberships (workspace_id, user_id, role, status)
        VALUES ($1, $2, 'owner', 'active'), ($1, $3, 'member', 'active')`,
@@ -2028,7 +2041,7 @@ describe("AgentEnrollmentModule", () => {
       const mentionedMessage = sendMessageResponseSchema.parse(ownerMention.json()).message;
       const sync = await app.inject({
         method: "GET",
-        url: "/v2/sync?after=0&limit=100",
+        url: `/v2/sync?after=${encodeURIComponent(JSON.stringify(testPosition("0")))}&limit=100`,
         headers: capableAuthorization,
       });
       expect(sync.statusCode).toBe(200);

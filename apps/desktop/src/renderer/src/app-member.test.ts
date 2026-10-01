@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 // @vitest-environment happy-dom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -9,6 +10,7 @@ import type {
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
+  SyncPosition,
   ThemeState,
   UpdateState,
   User,
@@ -108,7 +110,7 @@ const bootstrap = {
   ],
   conversationsNextCursor: null,
   conversationsHasMore: false,
-  syncCursor: "10",
+  syncCursor: testPosition("10"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -209,7 +211,7 @@ function createClient(
       mentionCount: 0,
       readCursor: null,
     },
-    syncCursor: "11",
+    syncCursor: testPosition("11"),
   }));
 
   const client = {
@@ -280,7 +282,7 @@ function createClient(
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     listMyTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
     advanceReadCursor: async () => undefined,
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: { events: [], nextCursor: after, highWaterCursor: after, hasMore: false },

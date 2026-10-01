@@ -26,7 +26,7 @@ The adapter:
 - sends replies with message text on private stdin, never in process arguments,
   and threads a channel reply by passing only the server-minted thread-root
   UUID as a flag;
-- atomically checkpoints the last accepted decimal workspace cursor together
+- atomically checkpoints the last accepted epoch-scoped workspace position together
   with pending read-cursor targets and unfinished ambient-turn anchors; and
 - supports `deliver=hype_comms` cron jobs in both live-gateway and standalone
   cron processes.
@@ -363,17 +363,30 @@ never used for authorization.
 
 State is scoped by SHA-256 of the credential-free API origin plus agent user
 ID. The directory is mode `0700`; `cursor.json` is atomically replaced with
-mode `0600`. Version 3 stores the decimal workspace checkpoint, per-conversation
-pending read targets, and at most 4,096 unfinished ambient-turn anchors. Each
-anchor contains message, conversation, author, and thread-root IDs, workspace
-and conversation sequences, and a timestamp. It contains no message text or
-credentials. Valid version 1 and version 2 checkpoints migrate in place before
-watch starts; malformed recovery targets fail startup.
+mode `0600`. Version 4 stores the workspace `{epoch, sequence}` checkpoint,
+per-conversation pending read targets, and at most 4,096 unfinished ambient-turn
+anchors. Each anchor contains a workspace position, message, conversation,
+author and thread-root IDs, a conversation sequence, a timestamp, and a unique
+positive `recoveryOrder` ordinal. It contains no message text or credentials.
+
+Migration accepts two strict version-3 formats: an epoch position with read targets,
+and the older scalar checkpoint with read targets and ambient anchors. Scalar
+checkpoints restart from a fresh bootstrap position; validated read targets and
+ambient identities remain pending. The old scalar sequence is retained as
+`legacyWorkspaceSequence` provenance and orders only the initial migrated anchors
+when assigning their durable ordinals.
+Recovery uses `recoveryOrder` to preserve each channel's chronology across epochs.
+Newly retained anchors follow the maximum pending ordinal. Epoch UUIDs and legacy
+scalars are never compared with current checkpoint sequences. Epoch checkpoints
+retain their position when the bootstrap epoch matches and use the fresh bootstrap
+position when it changes. Unknown, mixed, or malformed state fails startup. Version
+1 and 2 scalar formats also use a fresh bootstrap; version 2 read targets are retained.
 
 On a new installation, the adapter checkpoints bootstrap's current cursor
 before starting watch, so it never answers historical messages. Existing
-installations resume from their persisted cursor. At-least-once duplicate
-events at or below that cursor are ignored.
+installations with a current version 4 checkpoint resume from that position. Duplicate
+events at or below its sequence are ignored within the same epoch. An epoch mismatch
+requires another bootstrap.
 
 On restart, the adapter refetches unfinished ambient anchors' context packs.
 It repeats current sender authorization and strict pack validation before
@@ -481,14 +494,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
 ```
 
 Coverage includes startup/bootstrap, scoped locking, DM delivery, allowlist and
-mention gating before context retrieval, self-message suppression, exact
+authorization gating before context retrieval, self-message suppression, exact
 context argv and limits, strict malformed/mismatch rejection, untrusted-content
 rendering and injection-safe byte accounting, transient context replay,
 post-handoff ordering, failed handoff, retracted-anchor poison-event skipping,
 read-scope warning/no-mutation behavior, durable pending read retry across
 idle uptime and restart, Retry-After propagation, permanent-failure parking,
 retry-task and in-flight child cancellation, fatal-handler teardown ownership,
-v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
+v1/v2 bootstrap migration and v3-to-v4 epoch migration, anchor-only ambient recovery with fresh context and
 authorization, write/fsync failure rollback, reconnect admission deduplication,
 per-turn completion across mixed failed/successful FIFO decisions, isolated
 Hype display configuration, deferred recovery beyond live FIFO capacity,

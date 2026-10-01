@@ -770,7 +770,9 @@ function projectNotificationBootstrap(
     return;
   }
   try {
-    const firstActivation = notificationActiveGeneration !== scope.sessionGeneration;
+    const firstActivation =
+      notificationActiveGeneration !== scope.sessionGeneration ||
+      controller.diagnostics.watermark?.epoch !== bootstrap.syncCursor.epoch;
     if (firstActivation) {
       // Realtime is stopped before a new scope can bootstrap, so this first response safely seeds
       // the session baseline and member labels.

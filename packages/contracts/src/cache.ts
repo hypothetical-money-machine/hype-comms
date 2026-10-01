@@ -142,7 +142,7 @@ export const syncAttemptResultSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("reset_required"),
-      reason: z.enum(["cursor_expired", "server_reset"]),
+      reason: z.enum(["cursor_expired", "epoch_mismatch", "server_reset"]),
     })
     .strict(),
   z

@@ -1,3 +1,4 @@
+import { testPosition } from "../../shared/test-support/sync-position";
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
@@ -159,7 +160,7 @@ const snapshot: WorkspaceSnapshot = {
   },
   members: [morgan, alice],
   conversations: [directSummary, zebraSummary, alphaSummary],
-  syncCursor: "0",
+  syncCursor: testPosition("0"),
   featureFlags: {
     channels: true,
     directMessages: true,
@@ -198,7 +199,7 @@ const messageCreatedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "7",
+  position: testPosition("7"),
   conversationSequence: "2",
   entityVersion: 1,
   delivery: "at_least_once",
@@ -212,7 +213,7 @@ const messageRetractedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "9",
+  position: testPosition("9"),
   conversationSequence: "2",
   entityVersion: 2,
   delivery: "at_least_once",
@@ -226,7 +227,7 @@ const readCursorEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "8",
+  position: testPosition("8"),
   conversationSequence: null,
   entityVersion: 1,
   delivery: "at_least_once",
@@ -251,7 +252,7 @@ const reactionAddedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "9",
+  position: testPosition("9"),
   conversationSequence: "2",
   entityVersion: 1,
   delivery: "at_least_once",
@@ -270,7 +271,7 @@ const reactionRemovedEvent: WorkspaceEvent = {
   ...reactionAddedEvent,
   id: "10000000-0000-4000-8000-000000000065",
   type: "reaction.removed",
-  workspaceSequence: "10",
+  position: testPosition("10"),
 };
 
 /**
@@ -315,7 +316,7 @@ const memberUpdatedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: null,
-  workspaceSequence: "11",
+  position: testPosition("11"),
   conversationSequence: null,
   entityVersion: 1,
   delivery: "at_least_once",
@@ -329,7 +330,7 @@ const selfRemovedEvent: WorkspaceEvent = {
   occurredAt: NOW,
   workspaceId: WORKSPACE_ID,
   conversationId: ALPHA_ID,
-  workspaceSequence: "12",
+  position: testPosition("12"),
   conversationSequence: null,
   entityVersion: 1,
   delivery: "at_least_once",
@@ -390,7 +391,7 @@ function taskEvent(value: Task, sequence: string): WorkspaceEvent {
     occurredAt: value.updatedAt,
     workspaceId: WORKSPACE_ID,
     conversationId: ALPHA_ID,
-    workspaceSequence: sequence,
+    position: testPosition(sequence),
     conversationSequence: null,
     entityVersion: value.version,
     delivery: "at_least_once",
@@ -579,7 +580,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const alpha = after.bootstrap?.conversations.find(
       (summary) => summary.conversation.id === ALPHA_ID,
     );
-    expect(after.syncCursor).toBe("7");
+    expect(after.syncCursor).toEqual(testPosition("7"));
     expect(alpha?.conversation.topic).toBe("A projected update");
     expect(alpha?.lastMessage?.id).toBe(MESSAGE_SEQUENCE_2_ID);
     expect(alpha?.unreadCount).toBe(1);
@@ -640,7 +641,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.applyEvent(readCursorEvent)).resolves.toBe(true);
     const state = await cache.load();
     expect(state.bootstrap).toBeNull();
-    expect(state.syncCursor).toBe("8");
+    expect(state.syncCursor).toEqual(testPosition("8"));
   });
 
   it("stores message.created when no workspace row is cached", async () => {
@@ -652,7 +653,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const state = await cache.load();
     expect(state.bootstrap).toBeNull();
     expect(state.messages.map((message) => message.id)).toEqual([MESSAGE_SEQUENCE_2_ID]);
-    expect(state.syncCursor).toBe("7");
+    expect(state.syncCursor).toEqual(testPosition("7"));
   });
 
   it("applies a message.retracted tombstone and refuses to resurrect the body", async () => {
@@ -717,7 +718,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
             mentionCount: 1,
           },
         ],
-        syncCursor: messageCreatedEvent.workspaceSequence,
+        syncCursor: messageCreatedEvent.position,
       },
       [],
     );
@@ -758,7 +759,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
             mentionCount: 1,
           },
         ],
-        syncCursor: created.workspaceSequence,
+        syncCursor: created.position,
       },
       [messageSequence1, messageSequence10],
       [],
@@ -786,10 +787,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
     await cache.applyEvent(messageCreatedEvent);
-    await cache.replaceSnapshot(
-      { ...snapshot, syncCursor: messageCreatedEvent.workspaceSequence },
-      [],
-    );
+    await cache.replaceSnapshot({ ...snapshot, syncCursor: messageCreatedEvent.position }, []);
 
     await expect(cache.getCreatedMessageMentions(MESSAGE_SEQUENCE_2_ID)).resolves.toBeUndefined();
   });
@@ -822,7 +820,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
             mentionCount: 1,
           },
         ],
-        syncCursor: messageCreatedEvent.workspaceSequence,
+        syncCursor: messageCreatedEvent.position,
       },
       [messageSequence1, messageSequence2],
     );
@@ -854,7 +852,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const retract: WorkspaceEvent = {
       ...messageRetractedEvent,
       id: "10000000-0000-4000-8000-000000000089",
-      workspaceSequence: "11",
+      position: testPosition("11"),
       conversationSequence: closedThreadReply.conversationSequence,
       payload: { messageId: closedThreadReply.id, deletedAt: NOW },
     };
@@ -900,13 +898,13 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(
       cache.applyEvent(messageRetractedEvent, undefined, messageSequence1),
     ).rejects.toThrow("retract source does not match the retracted message");
-    expect((await cache.load()).syncCursor).toBe("0");
+    expect((await cache.load()).syncCursor).toEqual(testPosition("0"));
 
     await expect(
       cache.applyEvent(messageRetractedEvent, undefined, messageSequence2),
     ).resolves.toBe(true);
     const state = await cache.load();
-    expect(state.syncCursor).toBe("9");
+    expect(state.syncCursor).toEqual(testPosition("9"));
     expect(state.messages).toContainEqual(
       expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
     );
@@ -919,7 +917,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 
     const reserved = await cache.load();
     expect(reserved.messages).toEqual([]);
-    expect(reserved.syncCursor).toBe("9");
+    expect(reserved.syncCursor).toEqual(testPosition("9"));
     expect(reserved.retractReservations).toEqual([
       {
         messageId: MESSAGE_SEQUENCE_2_ID,
@@ -1028,14 +1026,14 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     const cache = create();
     const deleted = { ...messageSequence2, deletedAt: NOW, version: 2, updatedAt: NOW };
     await cache.replaceSnapshot(
-      { ...snapshot, syncCursor: "10" },
+      { ...snapshot, syncCursor: testPosition("10") },
       [messageSequence2],
       [reactionAddedEvent.payload.reaction],
     );
 
     await expect(
       cache.replaceSnapshot(
-        { ...snapshot, syncCursor: "9" },
+        { ...snapshot, syncCursor: testPosition("9") },
         [deleted],
         [reactionAddedEvent.payload.reaction],
       ),
@@ -1055,7 +1053,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 
   it("does not let an older snapshot replace a newer retract cursor", async () => {
     const cache = create();
-    const staleSnapshot = { ...snapshot, syncCursor: "8" };
+    const staleSnapshot = { ...snapshot, syncCursor: testPosition("8") };
     await cache.replaceSnapshot(
       staleSnapshot,
       [messageSequence2],
@@ -1070,7 +1068,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     );
 
     const state = await cache.load();
-    expect(state.syncCursor).toBe(messageRetractedEvent.workspaceSequence);
+    expect(state.syncCursor).toEqual(messageRetractedEvent.position);
     expect(state.messages).toContainEqual(
       expect.objectContaining({ id: MESSAGE_SEQUENCE_2_ID, deletedAt: NOW, version: 2 }),
     );
@@ -1162,7 +1160,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
             mentionCount: 1,
           },
         ],
-        syncCursor: messageCreatedEvent.workspaceSequence,
+        syncCursor: messageCreatedEvent.position,
       },
       [],
     );
@@ -1186,7 +1184,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.applyEvent(reactionAddedEvent)).resolves.toBe(false);
 
     const added = await cache.load();
-    expect(added.syncCursor).toBe("9");
+    expect(added.syncCursor).toEqual(testPosition("9"));
     expect(added.reactions).toEqual([reactionAddedEvent.payload.reaction]);
     expect(added.messages).toEqual([messageSequence2]);
     expect(added.bootstrap?.conversations).toHaveLength(snapshot.conversations.length);
@@ -1194,7 +1192,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(true);
     await expect(cache.applyEvent(reactionRemovedEvent)).resolves.toBe(false);
     const removed = await cache.load();
-    expect(removed.syncCursor).toBe("10");
+    expect(removed.syncCursor).toEqual(testPosition("10"));
     expect(removed.reactions).toEqual([]);
   });
 
@@ -1212,7 +1210,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     // that unwriteable: the payload member must not appear, and no existing member may change.
     expect(after.bootstrap?.members).toEqual(before.bootstrap?.members);
     expect(after.bootstrap?.members.map((member) => member.id)).not.toContain(disabledAgent.id);
-    expect(after.syncCursor).toBe("11");
+    expect(after.syncCursor).toEqual(testPosition("11"));
     await expect(cache.applyEvent(memberUpdatedEvent)).resolves.toBe(false);
   });
 
@@ -1236,7 +1234,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.reactions).toEqual([]);
     expect(state.tasks.filter((item) => item.conversationId === ALPHA_ID)).toEqual([]);
     expect(state.outbox.filter((item) => item.operation.conversationId === ALPHA_ID)).toEqual([]);
-    expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+    expect(state.syncCursor).toEqual(selfRemovedEvent.position);
     await expect(cache.applyEvent(reactionAddedEvent)).rejects.toThrow(
       "Membership repair must complete",
     );
@@ -1287,7 +1285,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       state.bootstrap?.conversations.find((summary) => summary.conversation.id === ALPHA_ID)
         ?.participantIds,
     ).toEqual([MORGAN_ID]);
-    expect(state.syncCursor).toBe(otherMemberRemovedEvent.workspaceSequence);
+    expect(state.syncCursor).toEqual(otherMemberRemovedEvent.position);
     expect(state.repairMarker).toBeNull();
     await expect(cache.applyEvent(otherMemberRemovedEvent)).resolves.toBe(false);
   });
@@ -1304,7 +1302,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
         conversations: snapshot.conversations.filter(
           (summary) => summary.conversation.id !== ALPHA_ID,
         ),
-        syncCursor: "12",
+        syncCursor: testPosition("12"),
       },
       [],
     );
@@ -1388,18 +1386,18 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       cache.upsertAcknowledgedMessage(
         acknowledged,
         queuedAlphaMessage.message.clientMessageId,
-        "1",
+        testPosition("1"),
       ),
     ).resolves.toBe(false);
     expect((await cache.load()).messages).toEqual([]);
     expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([queuedAlphaMessage]);
 
-    await cache.replaceSnapshot({ ...snapshot, syncCursor: "1" }, []);
+    await cache.replaceSnapshot({ ...snapshot, syncCursor: testPosition("1") }, []);
     await expect(
       cache.upsertAcknowledgedMessage(
         acknowledged,
         queuedAlphaMessage.message.clientMessageId,
-        "1",
+        testPosition("1"),
       ),
     ).resolves.toBe(true);
     const accepted = await cache.load();
@@ -1415,7 +1413,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
 
     await expect(
       cache.replaceSnapshot(
-        { ...snapshot, conversations: [], syncCursor: "12" },
+        { ...snapshot, conversations: [], syncCursor: testPosition("12") },
         [],
         [],
         [],
@@ -1424,7 +1422,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     ).rejects.toMatchObject({ name: "AbortError" });
 
     const state = await cache.load();
-    expect(state.syncCursor).toBe("0");
+    expect(state.syncCursor).toEqual(testPosition("0"));
     expect(state.bootstrap?.conversations.map((item) => item.conversation.id)).toEqual([
       ALPHA_ID,
       ZEBRA_ID,
@@ -1511,7 +1509,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     };
     await expect(cache.applyEvent(taskEvent(olderEventTask, "11"))).resolves.toBe(true);
     expect(await cache.load()).toMatchObject({
-      syncCursor: "11",
+      syncCursor: testPosition("11"),
       tasks: [mutationProjection],
     });
 
@@ -1525,7 +1523,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(true);
     await expect(cache.applyEvent(taskEvent(newerEventTask, "12"))).resolves.toBe(false);
     expect(await cache.load()).toMatchObject({
-      syncCursor: "12",
+      syncCursor: testPosition("12"),
       tasks: [newerEventTask],
     });
   });
@@ -1724,7 +1722,7 @@ describe("PersistentWorkspaceCache durability", () => {
       repairMarker: {
         kind: "membership",
         eventId: selfRemovedEvent.id,
-        workspaceSequence: selfRemovedEvent.workspaceSequence,
+        position: selfRemovedEvent.position,
         conversationId: ALPHA_ID,
         selfRemoval: true,
       },
@@ -1732,7 +1730,7 @@ describe("PersistentWorkspaceCache durability", () => {
     database.close();
 
     const reopened = new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope });
-    expect(await reopened.loadSyncCursor()).toBe(selfRemovedEvent.workspaceSequence);
+    expect(await reopened.loadSyncCursor()).toEqual(selfRemovedEvent.position);
     // Cursor-only reads must finish the same crash-recovery purge as a complete cache load.
     const purged = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
     await purged.open();
@@ -1748,7 +1746,7 @@ describe("PersistentWorkspaceCache durability", () => {
     expect(state.reactions).toEqual([]);
     expect(state.tasks).toEqual([]);
     expect(state.outbox).toEqual([]);
-    expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+    expect(state.syncCursor).toEqual(selfRemovedEvent.position);
   });
 
   it("purges an orphaned reaction when a staged removal is reopened", async () => {
@@ -1825,7 +1823,7 @@ describe("PersistentWorkspaceCache retraction write races", () => {
 
     const gate = writerCrypto.pauseNextEncryption();
     const replacing = writer.replaceSnapshot(
-      { ...snapshot, syncCursor: messageRetractedEvent.workspaceSequence },
+      { ...snapshot, syncCursor: messageRetractedEvent.position },
       [messageSequence2],
       [reactionAddedEvent.payload.reaction],
     );
@@ -1956,7 +1954,7 @@ describe("PersistentWorkspaceCache retraction write races", () => {
     };
     const liveEvent: WorkspaceEvent = {
       ...messageCreatedEvent,
-      workspaceSequence: "100",
+      position: testPosition("100"),
       entityVersion: 2,
       payload: {
         message: newerLiveMessage,
@@ -2059,7 +2057,7 @@ describe("workspace cache implementation parity", () => {
       expect(after.tasks).toEqual(before.tasks);
       expect(after.reactions).toEqual(before.reactions);
       expect(after.outbox).toEqual(before.outbox);
-      expect(after.syncCursor).toBe(before.syncCursor);
+      expect(after.syncCursor).toEqual(before.syncCursor);
       expect(after.bootstrap?.workspace.name).toBe("Renamed workspace");
       expect(after.bootstrap?.members).toMatchObject([morgan]);
     }
@@ -2071,15 +2069,19 @@ describe("workspace cache implementation parity", () => {
       new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
     ]) {
       await cache.replaceSnapshot(snapshot, [messageSequence2]);
-      expect(await cache.refreshMetadata({ ...snapshot, syncCursor: "1" })).toBeNull();
+      expect(
+        await cache.refreshMetadata({ ...snapshot, syncCursor: testPosition("1") }),
+      ).toBeNull();
       expect(
         await cache.refreshMetadata({ ...snapshot, conversations: [zebraSummary] }),
       ).toBeNull();
       expect((await cache.load()).messages).toEqual([messageSequence2]);
-      await cache.advanceCursor("1");
+      await cache.advanceCursor(testPosition("1"));
       expect(await cache.refreshMetadata(snapshot)).toBeNull();
       await cache.stageMembershipRepair(selfRemovedEvent);
-      expect(await cache.refreshMetadata({ ...snapshot, syncCursor: "12" })).toBeNull();
+      expect(
+        await cache.refreshMetadata({ ...snapshot, syncCursor: testPosition("12") }),
+      ).toBeNull();
       const state = await cache.load();
       expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
       expect(state.messages).toEqual([]);
@@ -2093,11 +2095,11 @@ describe("workspace cache implementation parity", () => {
     ]) {
       expect(await cache.loadSyncCursor()).toBeNull();
       await cache.replaceSnapshot(snapshot, [messageSequence2]);
-      expect(await cache.loadSyncCursor()).toBe(snapshot.syncCursor);
+      expect(await cache.loadSyncCursor()).toEqual(snapshot.syncCursor);
       await cache.stageMembershipRepair(selfRemovedEvent);
-      expect(await cache.loadSyncCursor()).toBe(selfRemovedEvent.workspaceSequence);
+      expect(await cache.loadSyncCursor()).toEqual(selfRemovedEvent.position);
       const state = await cache.load();
-      expect(state.syncCursor).toBe(selfRemovedEvent.workspaceSequence);
+      expect(state.syncCursor).toEqual(selfRemovedEvent.position);
       expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
       expect(state.messages).toEqual([]);
     }

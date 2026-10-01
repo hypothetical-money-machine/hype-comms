@@ -23,7 +23,9 @@
     "typecheck": "tsc --build --pretty false && npm run typecheck:route-declarations",
     "typecheck:route-declarations": "tsc -p tsconfig.route-declarations.json --noEmit",
     "test:unit": "npm run --prefix ../.. build:contracts && vitest run --project unit",
-    "test:integration": "npm run --prefix ../.. build:contracts && vitest run --project integration"
+    "test:integration": "npm run --prefix ../.. build:contracts && vitest run --project integration",
+    "protocol:epoch": "tsx src/modules/workspace/protocol-epoch-cli.ts",
+    "protocol:epoch:dist": "node dist/modules/workspace/protocol-epoch-cli.js"
   },
   "engines": {
     "node": ">=24"

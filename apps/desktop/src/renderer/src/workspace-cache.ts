@@ -1,3 +1,9 @@
+import {
+  compareSyncPositions,
+  sameSyncPosition,
+  syncPositionSchema,
+  type SyncPosition,
+} from "@hype-comms/contracts";
 import Dexie, { type Table } from "dexie";
 
 import {
@@ -6,7 +12,6 @@ import {
   messageSchema,
   reactionSchema,
   sendMessageOperationSchema,
-  sequenceSchema,
   taskSchema,
   userSchema,
   workspaceEventSchema,
@@ -67,7 +72,7 @@ export interface OutboxUpdateExpectation {
 export interface MembershipRepairMarker {
   readonly kind: "membership";
   readonly eventId: string;
-  readonly workspaceSequence: string;
+  readonly position: SyncPosition;
   readonly conversationId: string;
   readonly selfRemoval: boolean;
 }
@@ -88,7 +93,7 @@ export interface CachedWorkspaceState {
   readonly reactions: readonly Reaction[];
   readonly tasks: readonly Task[];
   readonly outbox: readonly OutboxItem[];
-  readonly syncCursor: string | null;
+  readonly syncCursor: SyncPosition | null;
   readonly lastSyncedAt: string | null;
   readonly repairMarker: MembershipRepairMarker | null;
   /**
@@ -112,7 +117,7 @@ export interface WorkspaceCache {
   /** Omit options to restore all histories, as required by full snapshot/repair callers. */
   load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState>;
   /** Reads durable sync progress without decrypting message history; finishes any staged purge. */
-  loadSyncCursor(): Promise<string | null>;
+  loadSyncCursor(): Promise<SyncPosition | null>;
   /**
    * Refreshes metadata at the durable cursor without rewriting histories. Returns null when the
    * cursor or conversation set changed, or a membership repair requires a full snapshot.
@@ -163,7 +168,7 @@ export interface WorkspaceCache {
   ): Promise<boolean>;
   /** Exact server-verified mention IDs retained for a live message until it is retracted. */
   getCreatedMessageMentions(messageId: string): Promise<readonly string[] | undefined>;
-  advanceCursor(syncCursor: string): Promise<void>;
+  advanceCursor(syncCursor: SyncPosition): Promise<void>;
   /** Atomically persists a history page only while its conversation remains authorized. */
   upsertHistory(
     conversationId: string,
@@ -191,7 +196,7 @@ export interface WorkspaceCache {
   upsertAcknowledgedMessage(
     message: Message,
     expectedClientMessageId: string,
-    syncCursor: string,
+    syncCursor: SyncPosition,
     signal?: AbortSignal,
   ): Promise<boolean>;
   /** Queues a send only while its conversation remains authorized. */
@@ -220,6 +225,8 @@ export interface WorkspaceCache {
   ): Promise<boolean>;
   removeOutbox(clientMessageId: string): Promise<void>;
   clearServerStatePreservingOutbox(): Promise<void>;
+  /** Drops an obsolete protocol replica, including recovery markers, without touching queued work. */
+  resetProtocolReplica(): Promise<void>;
   clearAll(): Promise<void>;
 }
 
@@ -232,7 +239,7 @@ interface MetadataRow {
   readonly id: "state";
   readonly userId: string;
   readonly workspaceId: string;
-  readonly syncCursor: string | null;
+  readonly syncCursor: SyncPosition | null;
   readonly lastSyncedAt: string | null;
   /** Non-indexed local recovery metadata; adding it does not require an IndexedDB schema bump. */
   readonly repairMarker?: MembershipRepairMarker | null;
@@ -380,6 +387,24 @@ class WorkspaceCacheDatabase extends Dexie {
           })),
         );
       });
+    this.version(6)
+      .stores({})
+      .upgrade(async (transaction) => {
+        // Old sequence-only replicas cannot establish an epoch. Keep their encrypted outbox in
+        // this same database; encryption identity/version and main-process keys remain unchanged.
+        await Promise.all(
+          [
+            "metadata",
+            "workspaces",
+            "members",
+            "conversations",
+            "messages",
+            "reactions",
+            "tasks",
+            "events",
+          ].map((store) => transaction.table(store).clear()),
+        );
+      });
   }
 }
 
@@ -396,8 +421,8 @@ const MEMBERSHIP_REPAIR_MARKER_KEYS = [
   "conversationId",
   "eventId",
   "kind",
+  "position",
   "selfRemoval",
-  "workspaceSequence",
 ] as const;
 
 const RETRACT_RESERVATION_KEYS = ["deletedAt", "entityVersion", "messageId"] as const;
@@ -449,7 +474,7 @@ function parseMembershipRepairMarker(value: unknown): MembershipRepairMarker | n
   return {
     kind: "membership",
     eventId: entityIdSchema.parse(record.eventId),
-    workspaceSequence: sequenceSchema.parse(record.workspaceSequence),
+    position: syncPositionSchema.parse(record.position),
     conversationId: entityIdSchema.parse(record.conversationId),
     selfRemoval: record.selfRemoval,
   };
@@ -461,7 +486,7 @@ function sameMembershipRepair(
 ): boolean {
   return (
     marker?.eventId === event.id &&
-    marker.workspaceSequence === event.workspaceSequence &&
+    sameSyncPosition(marker.position, event.position) &&
     marker.conversationId === event.conversationId
   );
 }
@@ -1076,10 +1101,10 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     this.#database = new WorkspaceCacheDatabase(databaseName(options.scope));
   }
 
-  async loadSyncCursor(): Promise<string | null> {
+  async loadSyncCursor(): Promise<SyncPosition | null> {
     await this.#finishStagedMembershipEvent();
     const cursor = (await this.#database.metadata.get("state"))?.syncCursor;
-    return cursor === null || cursor === undefined ? null : sequenceSchema.parse(cursor);
+    return cursor === null || cursor === undefined ? null : syncPositionSchema.parse(cursor);
   }
 
   async refreshMetadata(
@@ -1095,7 +1120,11 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     }
     signal?.throwIfAborted();
     const base = await this.#database.metadata.get("state");
-    if (base?.syncCursor !== parsed.syncCursor || parseMembershipRepairMarker(base.repairMarker)) {
+    if (
+      base?.syncCursor == null ||
+      !sameSyncPosition(base.syncCursor, parsed.syncCursor) ||
+      parseMembershipRepairMarker(base.repairMarker) !== null
+    ) {
       return null;
     }
     const reservations = parseRetractReservations(base.retractReservations);
@@ -1130,7 +1159,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         signal?.throwIfAborted();
         const current = await this.#database.metadata.get("state");
         if (
-          current?.syncCursor !== parsed.syncCursor ||
+          current?.syncCursor == null ||
+          !sameSyncPosition(current.syncCursor, parsed.syncCursor) ||
           parseMembershipRepairMarker(current.repairMarker) !== null ||
           !sameRetractReservations(
             reservations,
@@ -1276,14 +1306,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     // Dexie reads return primary-key (UUID) order, so both collections are re-sorted into the
     // order the server sent them; the renderer does not sort.
     const bootstrap =
-      workspace === undefined
+      workspace === undefined || metadata?.syncCursor == null
         ? null
         : canonicalSnapshot(
             parseSnapshotInput({
               ...workspace,
               members: cappedMembers,
               conversations: retainedConversations,
-              syncCursor: metadata?.syncCursor ?? "0",
+              syncCursor: metadata.syncCursor,
             }),
           );
     return {
@@ -1375,7 +1405,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           const repairMarker = parseMembershipRepairMarker(metadata?.repairMarker);
           if (
             repairMarker !== null &&
-            compareSequence(parsed.syncCursor, repairMarker.workspaceSequence) < 0
+            repairMarker.position.epoch === parsed.syncCursor.epoch &&
+            compareSyncPositions(parsed.syncCursor, repairMarker.position) < 0
           ) {
             throw new Error("Authoritative snapshot predates the membership repair marker");
           }
@@ -1384,7 +1415,8 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           if (
             metadata?.syncCursor !== null &&
             metadata?.syncCursor !== undefined &&
-            compareSequence(parsed.syncCursor, metadata.syncCursor) < 0
+            metadata.syncCursor.epoch === parsed.syncCursor.epoch &&
+            compareSyncPositions(parsed.syncCursor, metadata.syncCursor) < 0
           ) {
             // The stale snapshot cannot replace the newer projection, but its tombstone still
             // prevents an older history response from restoring the message body later.
@@ -1505,7 +1537,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     const marker: MembershipRepairMarker = {
       kind: "membership",
       eventId: parsed.id,
-      workspaceSequence: parsed.workspaceSequence,
+      position: parsed.position,
       conversationId: parsed.conversationId,
       selfRemoval:
         parsed.payload.action === "removed" && parsed.payload.memberId === this.#scope.userId,
@@ -1520,7 +1552,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
       if (
         metadata?.syncCursor !== null &&
         metadata?.syncCursor !== undefined &&
-        compareSequence(parsed.workspaceSequence, metadata.syncCursor) <= 0
+        compareSyncPositions(parsed.position, metadata.syncCursor) <= 0
       ) {
         return false;
       }
@@ -1580,7 +1612,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     if (
       (metadata?.syncCursor !== null &&
         metadata?.syncCursor !== undefined &&
-        compareSequence(parsed.workspaceSequence, metadata.syncCursor) <= 0) ||
+        compareSyncPositions(parsed.position, metadata.syncCursor) <= 0) ||
       (await this.#database.events.get(parsed.id)) !== undefined
     ) {
       return false;
@@ -1665,7 +1697,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           if (
             (currentMetadata?.syncCursor !== null &&
               currentMetadata?.syncCursor !== undefined &&
-              compareSequence(parsed.workspaceSequence, currentMetadata.syncCursor) <= 0) ||
+              compareSyncPositions(parsed.position, currentMetadata.syncCursor) <= 0) ||
             (await this.#database.events.get(parsed.id)) !== undefined
           ) {
             return "stale";
@@ -1821,7 +1853,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
           if (
             (currentMetadata?.syncCursor !== null &&
               currentMetadata?.syncCursor !== undefined &&
-              compareSequence(parsed.workspaceSequence, currentMetadata.syncCursor) <= 0) ||
+              compareSyncPositions(parsed.position, currentMetadata.syncCursor) <= 0) ||
             (await this.#database.events.get(parsed.id)) !== undefined
           ) {
             return "stale";
@@ -1913,14 +1945,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async advanceCursor(syncCursor: string): Promise<void> {
+  async advanceCursor(syncCursor: SyncPosition): Promise<void> {
     await this.#database.transaction("rw", this.#database.metadata, async () => {
       await this.#assertNoMembershipRepair();
       const current = await this.#database.metadata.get("state");
       if (
         current?.syncCursor !== null &&
         current?.syncCursor !== undefined &&
-        compareSequence(syncCursor, current.syncCursor) <= 0
+        compareSyncPositions(syncCursor, current.syncCursor) <= 0
       ) {
         return;
       }
@@ -1938,7 +1970,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   async upsertAcknowledgedMessage(
     message: Message,
     expectedClientMessageId: string,
-    syncCursor: string,
+    syncCursor: SyncPosition,
     signal?: AbortSignal,
   ): Promise<boolean> {
     if (signal?.aborted) return false;
@@ -1988,7 +2020,7 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
                 syncCursor:
                   metadata?.syncCursor === null ||
                   metadata?.syncCursor === undefined ||
-                  compareSequence(syncCursor, metadata.syncCursor) > 0
+                  compareSyncPositions(syncCursor, metadata.syncCursor) > 0
                     ? syncCursor
                     : metadata.syncCursor,
                 lastSyncedAt: new Date().toISOString(),
@@ -2346,6 +2378,14 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
   }
 
   async clearServerStatePreservingOutbox(): Promise<void> {
+    await this.#clearServerState(false);
+  }
+
+  async resetProtocolReplica(): Promise<void> {
+    await this.#clearServerState(true);
+  }
+
+  async #clearServerState(resetProtocol: boolean): Promise<void> {
     await this.#database.transaction(
       "rw",
       [
@@ -2359,10 +2399,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
         this.#database.events,
       ],
       async () => {
-        await this.#assertNoMembershipRepair();
-        const reservations = parseRetractReservations(
-          (await this.#database.metadata.get("state"))?.retractReservations,
-        );
+        if (!resetProtocol) await this.#assertNoMembershipRepair();
+        const reservations = resetProtocol
+          ? []
+          : parseRetractReservations(
+              (await this.#database.metadata.get("state"))?.retractReservations,
+            );
         await Promise.all([
           this.#database.metadata.clear(),
           this.#database.workspaces.clear(),
@@ -2424,15 +2466,15 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
 
         await this.#database.events.put({
           id: marker.eventId,
-          workspaceSequence: marker.workspaceSequence,
+          workspaceSequence: marker.position.sequence,
         });
         await this.#database.metadata.put(
           mergeMetadataRow(metadata, this.#scope, {
             syncCursor:
               metadata?.syncCursor === null ||
               metadata?.syncCursor === undefined ||
-              compareSequence(marker.workspaceSequence, metadata.syncCursor) > 0
-                ? marker.workspaceSequence
+              compareSyncPositions(marker.position, metadata.syncCursor) > 0
+                ? marker.position
                 : metadata.syncCursor,
             lastSyncedAt: new Date().toISOString(),
             repairMarker: marker,
@@ -2554,12 +2596,12 @@ export class PersistentWorkspaceCache implements WorkspaceCache {
     const syncCursor =
       current?.syncCursor !== null &&
       current?.syncCursor !== undefined &&
-      compareSequence(current.syncCursor, event.workspaceSequence) > 0
+      compareSyncPositions(current.syncCursor, event.position) > 0
         ? current.syncCursor
-        : event.workspaceSequence;
+        : event.position;
     await this.#database.events.put({
       id: event.id,
-      workspaceSequence: event.workspaceSequence,
+      workspaceSequence: event.position.sequence,
     });
     await this.#database.metadata.put(
       mergeMetadataRow(current, this.#scope, {
@@ -2628,7 +2670,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   readonly #tasks = new Map<string, Task>();
   readonly #outbox = new Map<string, OutboxItem>();
   readonly #events = new Set<string>();
-  #syncCursor: string | null = null;
+  #syncCursor: SyncPosition | null = null;
   #lastSyncedAt: string | null = null;
   #repairMarker: MembershipRepairMarker | null = null;
   #retractReservations: RetractReservation[] = [];
@@ -2636,7 +2678,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   /** Exact mention IDs from live creates, retained until their matching retract arrives. */
   readonly #createdMessageMentions = new Map<string, readonly string[]>();
 
-  async loadSyncCursor(): Promise<string | null> {
+  async loadSyncCursor(): Promise<SyncPosition | null> {
     this.#finishStagedMembershipEvent();
     return this.#syncCursor;
   }
@@ -2654,7 +2696,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     ) {
       throw new Error("The workspace metadata did not match the cache scope");
     }
-    if (this.#repairMarker !== null || this.#syncCursor !== parsed.syncCursor) return null;
+    if (
+      this.#repairMarker !== null ||
+      this.#syncCursor === null ||
+      !sameSyncPosition(this.#syncCursor, parsed.syncCursor)
+    ) {
+      return null;
+    }
     const incomingIds = new Set(parsed.conversations.map((summary) => summary.conversation.id));
     if (
       this.#snapshot.conversations.length !== incomingIds.size ||
@@ -2696,9 +2744,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
           };
     // The reported snapshot cursor tracks applied events, matching how PersistentWorkspaceCache
     // rebuilds it from the metadata row.
-    const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? "0";
+    const syncCursor = this.#syncCursor ?? snapshot?.syncCursor ?? null;
     const bootstrap =
-      snapshot === null
+      snapshot === null || syncCursor === null
         ? null
         : canonicalSnapshot({ ...snapshot, members: [...this.#members], syncCursor });
     return {
@@ -2748,12 +2796,17 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     signal?.throwIfAborted();
     if (
       this.#repairMarker !== null &&
-      compareSequence(parsed.syncCursor, this.#repairMarker.workspaceSequence) < 0
+      this.#repairMarker.position.epoch === parsed.syncCursor.epoch &&
+      compareSyncPositions(parsed.syncCursor, this.#repairMarker.position) < 0
     ) {
       throw new Error("Authoritative snapshot predates the membership repair marker");
     }
     const nextReservations = reserveTombstonedMessages(this.#retractReservations, parsedMessages);
-    if (this.#syncCursor !== null && compareSequence(parsed.syncCursor, this.#syncCursor) < 0) {
+    if (
+      this.#syncCursor !== null &&
+      this.#syncCursor.epoch === parsed.syncCursor.epoch &&
+      compareSyncPositions(parsed.syncCursor, this.#syncCursor) < 0
+    ) {
       this.#retractReservations = nextReservations;
       return false;
     }
@@ -2837,16 +2890,13 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       if (sameMembershipRepair(this.#repairMarker, parsed)) return false;
       throw new Error("Membership repair is already pending");
     }
-    if (
-      this.#syncCursor !== null &&
-      compareSequence(parsed.workspaceSequence, this.#syncCursor) <= 0
-    ) {
+    if (this.#syncCursor !== null && compareSyncPositions(parsed.position, this.#syncCursor) <= 0) {
       return false;
     }
     this.#repairMarker = {
       kind: "membership",
       eventId: parsed.id,
-      workspaceSequence: parsed.workspaceSequence,
+      position: parsed.position,
       conversationId: parsed.conversationId,
       selfRemoval:
         parsed.payload.action === "removed" && parsed.payload.memberId === this.#currentUserId,
@@ -2882,13 +2932,12 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       parsed.type === "message.retracted" ? matchingRetractSource(parsed, retractSource) : null;
     if (
       this.#events.has(parsed.id) ||
-      (this.#syncCursor !== null &&
-        compareSequence(parsed.workspaceSequence, this.#syncCursor) <= 0)
+      (this.#syncCursor !== null && compareSyncPositions(parsed.position, this.#syncCursor) <= 0)
     ) {
       return false;
     }
     this.#events.add(parsed.id);
-    this.#syncCursor = parsed.workspaceSequence;
+    this.#syncCursor = parsed.position;
     this.#lastSyncedAt = new Date().toISOString();
     if (parsed.type === "channel.membership_changed") {
       if (this.#snapshot !== null) {
@@ -3049,9 +3098,9 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     return true;
   }
 
-  async advanceCursor(syncCursor: string): Promise<void> {
+  async advanceCursor(syncCursor: SyncPosition): Promise<void> {
     this.#assertNoMembershipRepair();
-    if (this.#syncCursor === null || compareSequence(syncCursor, this.#syncCursor) > 0) {
+    if (this.#syncCursor === null || compareSyncPositions(syncCursor, this.#syncCursor) > 0) {
       this.#syncCursor = syncCursor;
       this.#lastSyncedAt = new Date().toISOString();
     }
@@ -3060,7 +3109,7 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
   async upsertAcknowledgedMessage(
     message: Message,
     expectedClientMessageId: string,
-    syncCursor: string,
+    syncCursor: SyncPosition,
     signal?: AbortSignal,
   ): Promise<boolean> {
     if (signal?.aborted) return false;
@@ -3301,6 +3350,14 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
     this.#createdMessageMentions.clear();
   }
 
+  async resetProtocolReplica(): Promise<void> {
+    this.#repairMarker = null;
+    this.#retractReservations = [];
+    this.#members = [];
+    this.#currentUserId = null;
+    await this.clearServerStatePreservingOutbox();
+  }
+
   async clearAll(): Promise<void> {
     this.#repairMarker = null;
     this.#retractReservations = [];
@@ -3340,11 +3397,8 @@ export class MemoryWorkspaceCache implements WorkspaceCache {
       }
     }
     this.#events.add(marker.eventId);
-    if (
-      this.#syncCursor === null ||
-      compareSequence(marker.workspaceSequence, this.#syncCursor) > 0
-    ) {
-      this.#syncCursor = marker.workspaceSequence;
+    if (this.#syncCursor === null || compareSyncPositions(marker.position, this.#syncCursor) > 0) {
+      this.#syncCursor = marker.position;
     }
     this.#lastSyncedAt = new Date().toISOString();
     return !alreadyRecorded;

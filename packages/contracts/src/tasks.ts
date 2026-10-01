@@ -1,3 +1,4 @@
+import { syncPositionSchema } from "./sync-position.js";
 import { z } from "zod";
 
 import {
@@ -181,7 +182,7 @@ export const moveTaskOperationSchema = moveTaskRequestSchema
 export const taskMutationResponseSchema = z
   .object({
     task: taskSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 
@@ -190,7 +191,7 @@ export const taskRecordResponseSchema = z.object({ task: taskRecordSchema }).str
 export const taskRecordMutationResponseSchema = z
   .object({
     task: taskRecordSchema,
-    syncCursor: sequenceSchema,
+    syncCursor: syncPositionSchema,
   })
   .strict();
 

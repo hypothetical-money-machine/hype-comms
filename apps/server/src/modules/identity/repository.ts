@@ -568,7 +568,7 @@ export async function insertDeviceSession(
       input.createdAt,
       input.lastSeenAt,
       input.expiresAt,
-      input.workosSessionId == null
+      input.workosSessionId === undefined || input.workosSessionId === null
         ? null
         : authKitProviderSessionIdSchema.parse(input.workosSessionId),
     ],

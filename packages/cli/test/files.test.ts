@@ -1,3 +1,4 @@
+import { testPosition } from "./support/sync-position.js";
 import { createHash } from "node:crypto";
 import {
   lstat,
@@ -251,7 +252,7 @@ describe("safe attachment files", () => {
             updatedAt: TIMESTAMP,
           },
           attachments: [attachment()],
-          syncCursor: "1",
+          syncCursor: testPosition("1"),
         });
       }
       return jsonResponse({ messages: [], attachments: [], nextCursor: null });

@@ -1,17 +1,11 @@
-import type { PoolClient, QueryResultRow } from "pg";
-import { DomainError } from "../../domain-errors.js";
+import type { SyncPosition } from "@hype-comms/contracts";
+import type { PoolClient } from "pg";
+import { readWorkspaceProtocol } from "./protocol-epoch.js";
 
-export async function readWorkspaceSequence(
+export async function readWorkspacePosition(
   client: PoolClient,
   workspaceId: string,
-): Promise<string> {
-  const result = await client.query<{ last_event_sequence: string } & QueryResultRow>(
-    `SELECT last_event_sequence::text
-         FROM workspaces
-        WHERE id = $1`,
-    [workspaceId],
-  );
-  const value = result.rows[0]?.last_event_sequence;
-  if (value === undefined) throw new DomainError("not_found", "Workspace not found");
-  return value;
+): Promise<SyncPosition> {
+  const { epoch, sequence } = await readWorkspaceProtocol(client, workspaceId);
+  return { epoch, sequence };
 }
