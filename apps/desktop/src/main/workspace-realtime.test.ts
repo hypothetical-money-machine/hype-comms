@@ -224,7 +224,9 @@ function createHarness(options?: {
       options?.onDrop?.(reason);
     },
     createSocket,
-    nextSessionEpoch: options?.nextSessionEpoch,
+    ...(options?.nextSessionEpoch === undefined
+      ? {}
+      : { nextSessionEpoch: options.nextSessionEpoch }),
   });
   return {
     realtime,

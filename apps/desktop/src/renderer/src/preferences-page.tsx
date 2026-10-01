@@ -39,7 +39,7 @@ interface PreferencesPageProps {
   readonly devicePreferences: DevicePreferencesControlRuntime;
   readonly fencedBlockquotes: FencedBlockquoteRuntime;
   readonly sidebarPosition: SidebarPositionRuntime;
-  readonly notifications?: NotificationTransport;
+  readonly notifications?: NotificationTransport | undefined;
   readonly platform: DesktopPlatform;
   readonly currentUser: User;
   readonly onUpdateProfile: (title: string | null) => Promise<void>;

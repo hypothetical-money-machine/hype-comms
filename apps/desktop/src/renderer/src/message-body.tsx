@@ -126,7 +126,7 @@ const ChannelReferencesEnabledContext = createContext(true);
 interface MessageReferences {
   readonly channels: readonly ChannelReferenceTarget[];
   readonly members: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }
 
 const EMPTY_CHANNELS: readonly ChannelReferenceTarget[] = [];
@@ -154,11 +154,11 @@ function renderText(children: ReactNode): ReactNode {
 interface MarkdownBodyProps {
   readonly body: string;
   readonly className: string;
-  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode | undefined;
   readonly suffix?: ReactNode;
-  readonly channels?: readonly ChannelReferenceTarget[];
+  readonly channels?: readonly ChannelReferenceTarget[] | undefined;
   readonly members?: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }
 
 const MARKDOWN_PLUGINS = [remarkGfm, remarkLiteralHtml];
@@ -298,11 +298,11 @@ export const MessageBody = memo(function MessageBody({
   onOpenChannel,
 }: {
   readonly body: string;
-  readonly fencedBlockquoteMode?: FencedBlockquoteMode;
+  readonly fencedBlockquoteMode?: FencedBlockquoteMode | undefined;
   readonly suffix?: ReactNode;
-  readonly channels?: readonly ChannelReferenceTarget[];
+  readonly channels?: readonly ChannelReferenceTarget[] | undefined;
   readonly members?: readonly User[];
-  readonly onOpenChannel?: (conversationId: string) => void;
+  readonly onOpenChannel?: ((conversationId: string) => void) | undefined;
 }) {
   return (
     <MarkdownBody

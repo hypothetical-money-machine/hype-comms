@@ -199,7 +199,7 @@ function PermissionOptionButton({
 }: {
   readonly option: AiChannelPermissionOption;
   readonly disabled: boolean;
-  readonly firstOptionRef?: Ref<HTMLButtonElement>;
+  readonly firstOptionRef?: Ref<HTMLButtonElement> | undefined;
   readonly onSelect: (optionId: string) => void;
 }) {
   const rejecting = option.kind === "reject_once" || option.kind === "reject_always";

@@ -232,7 +232,7 @@ export function SignIn({
 }: {
   client: DesktopApi;
   theme: ThemeRuntime;
-  sessionMessage?: string;
+  sessionMessage?: string | undefined;
 }) {
   const [email, setEmail] = useState("");
   const [capabilities, setCapabilities] = useState<AuthCapabilities>({

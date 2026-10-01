@@ -1155,7 +1155,7 @@ describe("NotificationController resource and lifecycle bounds", () => {
       messageEvent({
         eventNumber: 50,
         sequence: 6,
-        conversationId: complete[0]?.conversation.id,
+        conversationId: complete[0]!.conversation.id,
       }),
     );
     expect(suppressed).toMatchObject({

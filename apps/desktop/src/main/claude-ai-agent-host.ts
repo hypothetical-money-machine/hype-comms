@@ -55,13 +55,17 @@ function neutralError(error: unknown, fallback: AiAgentHostErrorCode): AiAgentHo
 function projectTool(tool: ToolCall | ToolCallUpdate): AiAgentHostTool {
   return {
     id: tool.toolCallId,
-    title: tool.title,
-    kind: tool.kind,
-    status: tool.status,
-    locations: tool.locations?.map((location) => ({
-      path: location.path,
-      line: location.line,
-    })),
+    ...(tool.title === undefined ? {} : { title: tool.title }),
+    ...(tool.kind === undefined ? {} : { kind: tool.kind }),
+    ...(tool.status === undefined ? {} : { status: tool.status }),
+    ...(tool.locations === undefined || tool.locations === null
+      ? {}
+      : {
+          locations: tool.locations.map((location) => ({
+            path: location.path,
+            ...(location.line === undefined ? {} : { line: location.line }),
+          })),
+        }),
   };
 }
 
