@@ -3,6 +3,11 @@ name: Desktop package smoke
 on:
   workflow_dispatch:
     inputs:
+      release_rehearsal:
+        description: Build production candidates and test native cache migration without publication
+        required: false
+        default: false
+        type: boolean
       native_notification_evidence:
         description: Capture signed, installed macOS notification and click evidence
         required: false
@@ -74,6 +79,7 @@ permissions:
 jobs:
   package:
     name: Package on ${{ matrix.platform }}
+    if: ${{ !inputs.release_rehearsal }}
     strategy:
       fail-fast: false
       matrix:
@@ -385,3 +391,158 @@ jobs:
         if: always()
         shell: bash
         run: node scripts/desktop-release.mjs cleanup-macos-signing
+
+  release-rehearsal:
+    name: Rehearse ${{ matrix.platform }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS
+            runner: '["macos-15"]'
+            artifact_os: mac
+            manifest: latest-mac.yml
+            package_script: package:desktop:mac
+            native_notifications_enabled: "1"
+            cache_paths: |
+              ~/.npm
+              ~/Library/Caches/electron
+              ~/Library/Caches/electron-builder
+          - platform: Windows
+            runner: '["windows-11-arm"]'
+            artifact_os: win
+            manifest: latest.yml
+            package_script: package:desktop:win
+            native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/AppData/Local/electron/Cache
+              ~/AppData/Local/electron-builder/Cache
+          - platform: Linux
+            runner: '["ubuntu-24.04-arm"]'
+            artifact_os: linux
+            manifest: latest-linux.yml
+            package_script: package:desktop:linux
+            native_notifications_enabled: "0"
+            cache_paths: |
+              ~/.npm
+              ~/.cache/electron
+              ~/.cache/electron-builder
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    env:
+      HYPE_COMMS_BUILD_FLAVOR: production
+      HYPE_COMMS_API_ORIGIN: https://chat-api.hypemm.com
+      HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: ${{ matrix.native_notifications_enabled }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Restore desktop dependency downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ matrix.cache_paths }}
+          key: desktop-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            desktop-downloads-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install dependencies
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm ci --no-audit --prefer-offline
+      - name: Install dependencies on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm ci --no-audit --prefer-offline
+      - name: Install Linux protected-storage test dependencies
+        if: matrix.platform == 'Linux'
+        shell: bash
+        run: |-
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring libsecret-1-0 xvfb
+      - name: Rehearse native cache migration on Linux
+        if: matrix.platform == 'Linux'
+        shell: bash
+        env:
+          HYPE_COMMS_REHEARSAL_NO_SANDBOX: "1"
+        run: bash scripts/rehearsal/linux-native-cache.sh
+      - name: Rehearse native cache migration on macOS
+        if: matrix.platform == 'macOS'
+        shell: bash
+        run: npm run rehearse:native-cache
+      - name: Rehearse native cache migration on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm run rehearse:native-cache
+      - name: Configure Windows Authenticode signing
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        env:
+          HYPE_COMMS_WINDOWS_AZURE_TENANT_ID: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_TENANT_ID }}
+          HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_CLIENT_ID }}
+          HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET: ${{ secrets.HYPE_COMMS_WINDOWS_AZURE_CLIENT_SECRET }}
+          HYPE_COMMS_WINDOWS_AZURE_ENDPOINT: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_ENDPOINT }}
+          HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+          HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ vars.HYPE_COMMS_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
+          HYPE_COMMS_WINDOWS_PUBLISHER_NAME: ${{ vars.HYPE_COMMS_WINDOWS_PUBLISHER_NAME }}
+        run: node scripts/require-windows-signing-env.mjs
+      - name: Configure macOS signing and notarization
+        if: matrix.platform == 'macOS'
+        shell: bash
+        env:
+          HYPE_COMMS_MACOS_CSC_LINK: ${{ secrets.HYPE_COMMS_MACOS_CSC_LINK }}
+          HYPE_COMMS_MACOS_CSC_KEY_PASSWORD: ${{ secrets.HYPE_COMMS_MACOS_CSC_KEY_PASSWORD }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_BASE64 }}
+          HYPE_COMMS_MACOS_APPLE_API_KEY_ID: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_KEY_ID }}
+          HYPE_COMMS_MACOS_APPLE_API_ISSUER: ${{ secrets.HYPE_COMMS_MACOS_APPLE_API_ISSUER }}
+          EXPECTED_MACOS_TEAM_ID: 5LTMYWRTYR
+        run: node scripts/desktop-release.mjs configure-macos-signing
+      - name: Package desktop application
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run ${{ matrix.package_script }}
+      - name: Package desktop application on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm run ${{ matrix.package_script }}
+      - name: Verify packaged application contents, updater, and fuses
+        if: matrix.platform != 'Windows'
+        shell: sh
+        run: npm run verify:desktop-package
+      - name: Verify packaged application contents, updater, and fuses on Windows
+        if: matrix.platform == 'Windows'
+        shell: cmd
+        run: npm run verify:desktop-package
+      - name: Verify Windows release signing
+        if: matrix.platform == 'Windows' && env.HYPE_COMMS_WINDOWS_SIGNING_ENABLED == 'true'
+        shell: cmd
+        run: npm run verify:desktop-package:windows-release
+      - name: Verify macOS release signing and notarization
+        if: matrix.platform == 'macOS'
+        shell: bash
+        run: npm run verify:desktop-package:macos-release
+      - name: Remove temporary macOS signing keychain
+        if: always() && matrix.platform == 'macOS'
+        shell: bash
+        run: node scripts/desktop-release.mjs cleanup-macos-signing
+      - name: Record candidate artifact checksums
+        shell: sh
+        run: node scripts/rehearsal-package-manifest.mjs
+      - name: Upload candidate packages and native preservation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rehearsal-${{ matrix.artifact_os }}-${{ github.sha }}
+          path: |-
+            apps/desktop/release/hype-comms-*
+            apps/desktop/release/latest*.yml
+            .dev-data/rehearsal/*.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+    if: github.event_name == 'workflow_dispatch' && inputs.release_rehearsal
