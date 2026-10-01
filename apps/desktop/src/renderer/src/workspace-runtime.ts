@@ -493,13 +493,23 @@ export class WorkspaceRuntime {
 
   subscribe(listener: (state: WorkspaceRuntimeState) => void): () => void {
     this.#listeners.add(listener);
-    listener(this.#state);
+    this.#notifyStateSubscriber(listener);
     return () => this.#listeners.delete(listener);
   }
 
   #setState(update: Partial<WorkspaceRuntimeState>): void {
     this.#state = { ...this.#state, ...update };
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
+  }
+
+  #notifyStateSubscriber(listener: (state: WorkspaceRuntimeState) => void): void {
+    try {
+      listener(this.#state);
+    } catch {
+      // Subscribers observe committed state; they cannot interrupt cache repair or each other.
+      // Their error messages may contain private renderer data, so report only a fixed diagnostic.
+      console.error("Workspace state subscriber failed");
+    }
   }
 
   #pruneCreatedMessageMentions(
@@ -842,7 +852,7 @@ export class WorkspaceRuntime {
     this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
   }
 
   #isActiveRealtimeScope(candidate: RealtimeSessionScope, generation: number): boolean {
@@ -1366,8 +1376,16 @@ export class WorkspaceRuntime {
   }
 
   async #projectTasks(projection: ProjectionGuard, tasks: readonly Task[]): Promise<void> {
-    this.#cancelCollectionLoads("A task mutation superseded the collection read");
     if (!this.#isProjectionCurrent(projection)) return;
+    for (const journal of this.#collectionJournals) {
+      const identity = journal.identity;
+      if (
+        identity.kind === "my_tasks" ||
+        (identity.kind === "tasks" &&
+          tasks.some((task) => task.conversationId === identity.conversationId))
+      )
+        journal.cancel("A task mutation superseded the collection read");
+    }
     const accepted = await projection.cache.upsertTasks(tasks, projection.signal);
     if (!this.#isProjectionCurrent(projection)) return;
     const authorized = accepted.filter((task) =>
@@ -1529,6 +1547,7 @@ export class WorkspaceRuntime {
             };
           },
           (records) => {
+            if (this.#state.selectedConversationId !== conversationId) return;
             const retractedIds = retractedMessageIds(
               this.#state.messages,
               retractReservationMap(this.#retractReservations),
@@ -1546,6 +1565,7 @@ export class WorkspaceRuntime {
           },
         );
         if (!this.#isProjectionCurrent(projection, conversationId)) return;
+        if (this.#state.selectedConversationId !== conversationId) return;
         const next = this.collectionState(identity).nextCursor;
         if (next === null) return;
         if (seen.has(next) || next === cursor)
@@ -1555,14 +1575,20 @@ export class WorkspaceRuntime {
       }
       throw new Error("The collection exceeded local capacity");
     } catch (error) {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({
           conversationFilesError: errorMessage(error, "Could not load shared files"),
         });
       }
       throw error;
     } finally {
-      if (projection.generation === this.#generation) {
+      if (
+        this.#isProjectionCurrent(projection, conversationId) &&
+        this.#state.selectedConversationId === conversationId
+      ) {
         this.#setState({ conversationFilesBusy: false });
       }
     }
@@ -3579,12 +3605,28 @@ export class WorkspaceRuntime {
         history.messages,
         hydrated.reactions,
         projection.signal,
+        {
+          state: {
+            identity: { kind: "timeline", conversationId },
+            loaded: true,
+            snapshotPosition: history.snapshotPosition,
+            nextCursor: history.nextCursor,
+            invalidatedAt: null,
+          },
+          expectedPosition: this.#syncCursor,
+          requestCursor: null,
+        },
       );
       if (!persisted || !this.#isProjectionCurrent(projection, conversationId)) return false;
+      const collections = await cache.readCollections();
+      if (!this.#isProjectionCurrent(projection, conversationId)) return false;
+      for (const message of history.messages)
+        this.#threadSummaryPositions.set(message.id, history.snapshotPosition);
       const retainedMessages = this.#retainMessages(history.messages);
       this.#historyCursors.set(conversationId, history.nextCursor);
       this.#invalidatedThreadSummaryConversationIds.delete(conversationId);
       this.#setState({
+        collections,
         messages: mergeMessages(this.#state.messages, retainedMessages),
         threadSummaries: history.threadsSupported
           ? mergeThreadSummaries(
@@ -4020,9 +4062,12 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection)) return;
     if (applied.status === "ignored") return;
     this.#syncCursor = applied.committedPosition;
+    const membersInvalidated = applied.changes.invalidated.some(
+      (entry) => entry.kind === "members",
+    );
+    if (membersInvalidated) this.#membersDirty = true;
     this.#publishCommittedEvent(event, applied);
-    if (applied.changes.invalidated.some((entry) => entry.kind === "members")) {
-      this.#membersDirty = true;
+    if (membersInvalidated) {
       await this.#refreshMembers(generation);
     }
     if (applied.changes.invalidated.some((entry) => entry.kind === "conversation_metadata")) {
