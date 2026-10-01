@@ -8,6 +8,24 @@ export async function timelineCount(page) {
     );
 }
 
+/**
+ * Click a conversation in the sidebar. `name` matches the label exactly, `slug` matches it
+ * case-insensitively; one place knows the sidebar markup.
+ */
+export async function clickConversation(page, match) {
+  await page.evaluate((match) => {
+    const label = (button) => button.querySelector(".conversation-label-text")?.textContent ?? "";
+    const button = [...document.querySelectorAll('nav[aria-label="Conversations"] button')].find(
+      (candidate) =>
+        match.name === undefined
+          ? label(candidate).toLowerCase() === match.slug.toLowerCase()
+          : label(candidate) === match.name,
+    );
+    if (!button) throw new Error(`Missing conversation: ${match.name ?? match.slug}`);
+    button.click();
+  }, match);
+}
+
 export async function scrollTimelineEdge(page, edge) {
   await page.locator(".message-list").evaluate(async (list, edge) => {
     for (let frame = 0; frame < 8; frame++) {

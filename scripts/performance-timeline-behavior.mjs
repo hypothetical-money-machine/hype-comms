@@ -2,6 +2,7 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import {
+  clickConversation,
   timelineCount,
   inspectTimeline,
   scrollTimelineEdge,
@@ -16,13 +17,7 @@ async function frames(page) {
 }
 
 async function select(page, channel) {
-  await page.evaluate(
-    (name) =>
-      [...document.querySelectorAll('nav[aria-label="Conversations"] button')]
-        .find((button) => button.querySelector(".conversation-label-text")?.textContent === name)
-        .click(),
-    channel.name,
-  );
+  await clickConversation(page, { name: channel.name });
   await frames(page);
 }
 
