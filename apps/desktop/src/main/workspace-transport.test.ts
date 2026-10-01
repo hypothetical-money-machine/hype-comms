@@ -285,6 +285,119 @@ function transportAnswering(response: () => Response | Promise<Response>): Works
   return createTransport(async () => response()).transport;
 }
 
+describe("WorkspaceTransport credential rotation", () => {
+  it.each(["sync", "send"] as const)(
+    "keeps %s retryable when its retry is rejected after another credential rotation",
+    async (operation) => {
+      const cookies = new MemoryCookies();
+      cookies.values.set("hype_comms_session", "initial-cookie");
+      let startFirst!: () => void;
+      let finishFirst!: () => void;
+      let startRetry!: () => void;
+      let finishRetry!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        startFirst = resolve;
+      });
+      const firstCanFinish = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      const retryStarted = new Promise<void>((resolve) => {
+        startRetry = resolve;
+      });
+      const retryCanFinish = new Promise<void>((resolve) => {
+        finishRetry = resolve;
+      });
+      const requests: {
+        readonly credential: string | undefined;
+        readonly url: string;
+        readonly key: string | null;
+        readonly body: RequestInit["body"];
+      }[] = [];
+      let rotations = 0;
+      const session = new ChatSession({
+        apiOrigin: API_ORIGIN,
+        authVariant: "production",
+        cookies,
+        request: async (url, init) => {
+          if (url.endsWith("/v1/auth/me")) return jsonResponse(CURRENT_USER);
+          if (url.endsWith("/v1/auth/session/refresh")) {
+            rotations += 1;
+            cookies.values.set("hype_comms_session", `rotated-cookie-${rotations}`);
+            return statusResponse(204);
+          }
+          requests.push({
+            credential: cookies.values.get("hype_comms_session"),
+            url,
+            key: new Headers(init.headers).get("idempotency-key"),
+            body: init.body,
+          });
+          if (requests.length === 1) {
+            startFirst();
+            await firstCanFinish;
+            return statusResponse(401);
+          }
+          if (requests.length === 2) {
+            startRetry();
+            await retryCanFinish;
+            return statusResponse(401);
+          }
+          return operation === "sync"
+            ? jsonResponse(SYNC_RESPONSE)
+            : jsonResponse({ message: THREAD_REPLY, syncCursor: "43" });
+        },
+      });
+      const transport = new WorkspaceTransport(API_ORIGIN, session);
+      const attempt = () =>
+        operation === "sync" ? transport.sync("41") : transport.send(SEND_OPERATION);
+
+      try {
+        await session.restore();
+        const firstAttempt = attempt();
+        await firstStarted;
+        await session.renewSession();
+        finishFirst();
+        await retryStarted;
+        await session.renewSession();
+        finishRetry();
+
+        expect(await firstAttempt).toEqual({
+          status: "retryable",
+          reason: "server",
+          retryAfterMs: null,
+        });
+        expect(requests).toHaveLength(2);
+        expect(cookies.removals).toEqual([]);
+        expect(cookies.values.get("hype_comms_session")).toBe("rotated-cookie-2");
+        expect(session.state).toMatchObject({ status: "signed-in" });
+
+        await expect(attempt()).resolves.toMatchObject({ status: "accepted" });
+        expect(requests.map((request) => request.credential)).toEqual([
+          "initial-cookie",
+          "rotated-cookie-1",
+          "rotated-cookie-2",
+        ]);
+        expect(new Set(requests.map((request) => request.url)).size).toBe(1);
+        if (operation === "send") {
+          expect(requests.map((request) => request.key)).toEqual([
+            SEND_OPERATION.idempotencyKey,
+            SEND_OPERATION.idempotencyKey,
+            SEND_OPERATION.idempotencyKey,
+          ]);
+          expect(requests.map((request) => request.body)).toEqual([
+            JSON.stringify(SEND_OPERATION.message),
+            JSON.stringify(SEND_OPERATION.message),
+            JSON.stringify(SEND_OPERATION.message),
+          ]);
+        }
+      } finally {
+        finishFirst();
+        finishRetry();
+        session.stop();
+      }
+    },
+  );
+});
+
 describe("WorkspaceTransport bootstrap compatibility", () => {
   it("treats a pre-pagination bootstrap response as one complete conversation page", async () => {
     // A pre-pagination server omitted both conversation-page fields entirely.
