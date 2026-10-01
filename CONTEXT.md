@@ -15,6 +15,14 @@ The external system that operates an agent identity and performs work after bein
 agent runtime is distinct from the identity it represents in Hype Comms.
 _Avoid_: Agent identity, provider
 
+**Wake**:
+The activation of an agent identity by one eligible message. Eligibility is decided per message:
+direct messages qualify, channel messages qualify when they explicitly mention the agent's user,
+and thread follow-ups qualify where the operator enabled them; an author allowlist can narrow all
+three. An agent runtime receives a wake as a bounded context pack anchored on the eligible
+message, not as full conversation history.
+_Avoid_: Prompt, message dump, history replay
+
 **Grok Bot agent identity**:
 An agent identity operated by an actual Grok Bot runtime. A Grok Build CLI session or generic xAI
 model call is not interchangeable with a Grok Bot agent identity.

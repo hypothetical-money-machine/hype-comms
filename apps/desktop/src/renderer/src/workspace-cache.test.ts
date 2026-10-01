@@ -2,7 +2,7 @@ import { testPosition } from "../../shared/test-support/sync-position";
 import "fake-indexeddb/auto";
 
 import Dexie from "dexie";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cacheDecryptBatchResponseSchema,
@@ -217,6 +217,180 @@ afterEach(async () => {
 });
 
 describe("PersistentWorkspaceCache", () => {
+  it("decrypts only the requested conversation's history", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    const otherId = "10000000-0000-4000-8000-00000000000b";
+    const otherMessage = {
+      ...message,
+      id: "10000000-0000-4000-8000-00000000000c",
+      clientMessageId: "10000000-0000-4000-8000-00000000000d",
+      conversationId: otherId,
+    };
+    await cache.replaceSnapshot(
+      {
+        ...bootstrap,
+        conversations: [
+          ...bootstrap.conversations,
+          {
+            ...bootstrap.conversations[0]!,
+            conversation: {
+              ...bootstrap.conversations[0]!.conversation,
+              id: otherId,
+              slug: "other",
+            },
+          },
+        ],
+      },
+      [message, otherMessage],
+    );
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    await cache.load({ conversationId: null });
+    expect(
+      decrypt.mock.calls.flatMap(([input]) => input.items).some((item) => item.store === "message"),
+    ).toBe(false);
+    decrypt.mockClear();
+    const loaded = await cache.load({ conversationId: CONVERSATION_ID });
+    expect(loaded.messages).toEqual([message]);
+    expect(
+      decrypt.mock.calls
+        .flatMap(([input]) => input.items)
+        .filter((item) => item.store === "message")
+        .map((item) => item.recordId),
+    ).toEqual([MESSAGE_ID]);
+  });
+
+  it("refreshes the catalog without decrypting or encrypting unchanged history", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message], [reaction]);
+    await cache.enqueue(operation);
+    const before = await cache.load();
+    const encrypt = vi.spyOn(crypto, "encryptCacheRecords");
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        syncCursor: { ...bootstrap.syncCursor },
+        workspace: { ...bootstrap.workspace, name: "New name" },
+      }),
+    ).not.toBeNull();
+    expect(decrypt).not.toHaveBeenCalled();
+    expect(encrypt.mock.calls.flatMap(([input]) => input.items.map((item) => item.store))).toEqual([
+      "workspace",
+      "member",
+      "conversation",
+    ]);
+    const after = await cache.load();
+    expect(after.messages).toEqual(before.messages);
+    expect(after.reactions).toEqual(before.reactions);
+    expect(after.outbox).toEqual(before.outbox);
+  });
+
+  it("rejects a metadata refresh when its cursor changes during encryption", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message]);
+    const encrypt = crypto.encryptCacheRecords.bind(crypto);
+    vi.spyOn(crypto, "encryptCacheRecords").mockImplementationOnce(async (input) => {
+      await cache.advanceCursor(testPosition("1"));
+      return encrypt(input);
+    });
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        workspace: { ...bootstrap.workspace, name: "Stale name" },
+      }),
+    ).toBeNull();
+    const state = await cache.load();
+    expect(state.bootstrap?.workspace.name).toBe(bootstrap.workspace.name);
+    expect(state.syncCursor).toEqual(testPosition("1"));
+    expect(state.messages).toEqual([message]);
+  });
+
+  it("rejects a metadata refresh when its epoch changes during encryption", async () => {
+    const crypto = new FakeCrypto();
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    await cache.replaceSnapshot(bootstrap, [message]);
+    await cache.enqueue(operation);
+    const nextEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+    const nextPosition = testPosition("0", nextEpoch);
+    const nextMessage = { ...message, body: "New epoch history" };
+    const encrypt = crypto.encryptCacheRecords.bind(crypto);
+    vi.spyOn(crypto, "encryptCacheRecords").mockImplementationOnce(async (input) => {
+      await cache.resetProtocolReplica();
+      await cache.replaceSnapshot(
+        {
+          ...bootstrap,
+          syncCursor: nextPosition,
+          workspace: { ...bootstrap.workspace, name: "New epoch" },
+        },
+        [nextMessage],
+      );
+      return encrypt(input);
+    });
+    expect(
+      await cache.refreshMetadata({
+        ...bootstrap,
+        syncCursor: { ...bootstrap.syncCursor },
+        workspace: { ...bootstrap.workspace, name: "Stale name" },
+      }),
+    ).toBeNull();
+    const state = await cache.load();
+    expect(state.bootstrap?.workspace.name).toBe("New epoch");
+    expect(state.syncCursor).toEqual(nextPosition);
+    expect(state.messages).toEqual([nextMessage]);
+    expect(state.outbox).toHaveLength(1);
+    expect(state.outbox[0]?.operation).toEqual(operation);
+  });
+
+  it("refreshes metadata at equal position values and rejects another epoch in both caches", async () => {
+    const caches = [
+      new PersistentWorkspaceCache({ crypto: new FakeCrypto(), scope }),
+      new MemoryWorkspaceCache(),
+    ];
+    for (const cache of caches) {
+      await cache.replaceSnapshot(bootstrap, [message], [reaction]);
+      const equalPosition = { ...bootstrap.syncCursor };
+      expect(equalPosition).not.toBe(bootstrap.syncCursor);
+      await expect(
+        cache.refreshMetadata({
+          ...bootstrap,
+          syncCursor: equalPosition,
+          workspace: { ...bootstrap.workspace, name: "Refreshed name" },
+        }),
+      ).resolves.toMatchObject({
+        syncCursor: bootstrap.syncCursor,
+        workspace: { name: "Refreshed name" },
+      });
+      await expect(
+        cache.refreshMetadata({
+          ...bootstrap,
+          syncCursor: testPosition("0", "eeeeeeee-0000-4000-8000-000000000002"),
+          workspace: { ...bootstrap.workspace, name: "Wrong epoch" },
+        }),
+      ).resolves.toBeNull();
+      const state = await cache.load();
+      expect(state.bootstrap?.workspace.name).toBe("Refreshed name");
+      expect(state.syncCursor).toEqual(bootstrap.syncCursor);
+      expect(state.messages).toEqual([message]);
+      expect(state.reactions).toEqual([reaction]);
+    }
+  });
+
+  it("reads committed sync progress without decrypting history", async () => {
+    const crypto = new FakeCrypto();
+    const decrypt = vi.spyOn(crypto, "decryptCacheRecords");
+    const cache = new PersistentWorkspaceCache({ crypto, scope });
+    expect(await cache.loadSyncCursor()).toBeNull();
+    await cache.replaceSnapshot(bootstrap, []);
+    expect(await cache.loadSyncCursor()).toEqual(bootstrap.syncCursor);
+    await cache.advanceCursor(testPosition("100"));
+    expect(await cache.loadSyncCursor()).toEqual(testPosition("100"));
+    expect(decrypt).not.toHaveBeenCalled();
+    expect((await cache.load()).syncCursor).toEqual(testPosition("100"));
+  });
+
   it("derives personalized roles for group creation events in both cache implementations", async () => {
     const creatorGroupId = "10000000-0000-4000-8000-00000000000a";
     const inviteeGroupId = "10000000-0000-4000-8000-00000000000b";

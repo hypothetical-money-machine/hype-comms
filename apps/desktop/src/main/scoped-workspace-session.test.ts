@@ -20,7 +20,7 @@ describe("scoped workspace networking", () => {
     const session = lifetime();
     const chat = {
       fetch: vi.fn(() => pending.promise),
-      markSignedOut: vi.fn(async () => undefined),
+      markSignedOut: vi.fn(async () => false),
     };
     const scoped = scopedWorkspaceSession(chat, session);
     const response = scoped.fetch("https://chat.example/v2/members");
@@ -53,7 +53,7 @@ describe("scoped workspace networking", () => {
       return reader;
     });
     const scoped = scopedWorkspaceSession(
-      { fetch: async () => response, markSignedOut: async () => undefined },
+      { fetch: async () => response, markSignedOut: async () => false },
       session,
     );
     session.initialize(() => ({
@@ -74,11 +74,14 @@ describe("scoped workspace networking", () => {
       async () => new Response(),
     );
     let signOutGuard: (() => boolean) | undefined;
+    let signOutResponse: Response | undefined;
     const scoped = scopedWorkspaceSession(
       {
         fetch,
-        markSignedOut: async (isCurrent) => {
+        markSignedOut: async (response, isCurrent) => {
+          signOutResponse = response;
           signOutGuard = isCurrent;
+          return false;
         },
       },
       session,
@@ -87,7 +90,9 @@ describe("scoped workspace networking", () => {
     const signal = fetch.mock.calls[0]?.[1].signal;
     caller.abort();
     expect(signal?.aborted).toBe(true);
-    await scoped.markSignedOut();
+    const rejected = new Response(null, { status: 401 });
+    await scoped.markSignedOut(rejected);
+    expect(signOutResponse).toBe(rejected);
     expect(signOutGuard?.()).toBe(true);
     await session.dispose();
     expect(signOutGuard?.()).toBe(false);
