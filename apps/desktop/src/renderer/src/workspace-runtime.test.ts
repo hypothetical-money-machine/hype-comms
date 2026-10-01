@@ -9002,13 +9002,24 @@ describe("WorkspaceRuntime", () => {
     });
     const cache = new FakeWorkspaceCache();
     const queuedId = "20000000-0000-4000-8000-00000000002c";
-    await cache.enqueue(queuedOperation(queuedId, "Private queued send", SECOND_CONVERSATION_ID));
+    await cache.replaceSnapshot(api.bootstrap, []);
+    const operation = queuedOperation(queuedId, "Private queued send", SECOND_CONVERSATION_ID);
+    await expect(cache.enqueue(operation)).resolves.toBe(true);
     await cache.updateOutbox(queuedId, {
       status: "permanent_failure",
       attemptCount: 1,
       nextAttemptAt: null,
       failureReason: "offline",
     });
+    expect((await cache.load()).outbox).toMatchObject([
+      {
+        operation,
+        status: "permanent_failure",
+        attemptCount: 1,
+        nextAttemptAt: null,
+        failureReason: "offline",
+      },
+    ]);
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
@@ -9042,7 +9053,9 @@ describe("WorkspaceRuntime", () => {
     expect(
       purged.messages.filter((item) => item.conversationId === SECOND_CONVERSATION_ID),
     ).toEqual([]);
-    expect(purged.outbox).toEqual([]);
+    expectRetainedUnsent(purged.outbox, operation);
+    expect(purged.outbox[0]?.attemptCount).toBe(1);
+    expect(runtime.state.outbox).toEqual([]);
     expect(purged.repairMarker?.conversationId).toBe(SECOND_CONVERSATION_ID);
     expect(api.acknowledged).not.toContain("11");
     expect(api.sent).toEqual([]);

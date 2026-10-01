@@ -5044,7 +5044,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await restarted.connect())
         self.assertEqual(restarted.handled_events, [])
         self.assertEqual(json.loads(seed._cursor_path.read_bytes()), {
-            "version": 3, "cursor": position("600"), "pendingReadCursors": {},
+            "version": 4, "cursor": position("600"), "pendingReadCursors": {}, "pendingAmbientWakes": {},
         })
         await restarted.disconnect()
 
