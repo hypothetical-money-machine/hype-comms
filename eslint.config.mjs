@@ -7,6 +7,7 @@ export default tseslint.config(
     ignores: [
       "**/.claude/**",
       "**/.clog/**",
+      "**/.venv/**",
       "**/coverage/**",
       "**/dist/**",
       "**/node_modules/**",

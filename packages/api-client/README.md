@@ -23,9 +23,11 @@ Parsing or delivering a frame does not advance the resume position. Desktop ackn
 cache commit. CLI acknowledges after the writable completes the output line.
 
 Replay before the identity handshake and durable events waiting for consumer acknowledgement
-are each limited to 1,024 events and 4 MiB. Individual frames are limited to 4 MiB. Overflow stops
-the connection and requests bootstrap. Unknown product events are incompatible with the single
-supported canonical protocol; they are never skipped while acknowledging later positions.
+are each limited to 1,024 events and 4 MiB. Unacknowledged delivery budgets persist across socket
+reconnects and are released by durable acknowledgement or a replacement session. Individual frames
+are limited to 4 MiB. Overflow stops the connection and requests bootstrap. Unknown product events
+are incompatible with the single supported canonical protocol; they are never skipped while
+acknowledging later positions.
 
 Run `npm test --workspace @hype-comms/api-client` for package tests. The full repository check
 also runs the desktop and CLI consumers, including a real WebSocket test that holds output at
