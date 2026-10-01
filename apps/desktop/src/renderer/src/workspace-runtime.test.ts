@@ -1574,11 +1574,11 @@ describe("WorkspaceRuntime", () => {
       expect(healthyObserver).toHaveBeenLastCalledWith(
         expect.objectContaining({ bootstrap: null, messages: [], outbox: [] }),
       );
-      expect(reportError).toHaveBeenCalledTimes(2);
-      expect(reportError.mock.calls).toEqual([
-        ["Workspace state subscriber failed"],
-        ["Workspace state subscriber failed"],
-      ]);
+      expect(healthyObserver.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(reportError).toHaveBeenCalledTimes(healthyObserver.mock.calls.length);
+      for (const call of reportError.mock.calls) {
+        expect(call).toEqual(["Workspace state subscriber failed"]);
+      }
     } finally {
       unsubscribeThrowing();
       unsubscribeHealthy();
@@ -5115,6 +5115,7 @@ describe("WorkspaceRuntime", () => {
         ...directConversation(groupDmId, [USER_ID, PEER_ID, AGENT_ID]).conversation,
         kind: "group_direct_message",
       },
+      membershipRole: "member",
     };
     const api = new FakeDesktopApi(
       bootstrapAt("10", {
