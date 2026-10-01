@@ -1433,7 +1433,7 @@ export class WorkspaceRuntime {
           if (!this.#isProjectionCurrent(projection, conversationId)) return;
           await this.#serialize(async () => {
             if (!this.#isProjectionCurrent(projection, conversationId)) return;
-            const records = replayCollectionPage(
+            let records = replayCollectionPage(
               page.records,
               journal.newerThan(page.snapshotPosition),
             );
@@ -1459,7 +1459,13 @@ export class WorkspaceRuntime {
                 return;
               }
             } else if (identity.kind === "tasks" || identity.kind === "my_tasks") {
-              await cache.upsertTasks(records.tasks, signal, commit);
+              const accepted = await cache.upsertTasks(records.tasks, signal, commit);
+              records = {
+                ...records,
+                tasks: accepted.filter((task) =>
+                  this.#isConversationAuthorized(task.conversationId),
+                ),
+              };
             } else {
               await cache.commitCollectionMetadata(commit, signal);
             }
@@ -1679,6 +1685,10 @@ export class WorkspaceRuntime {
               ...(cursor === null ? {} : { after: cursor }),
               limit: 200,
             });
+            for (const task of page.tasks) {
+              if (task.workspaceId !== this.#scope?.workspaceId)
+                throw new Error("The My Tasks catalog crossed workspace scope");
+            }
             if (page.hasMore !== (page.nextCursor !== null))
               throw new Error("The collection has inconsistent pagination");
             return {
