@@ -50,6 +50,7 @@ export const AGENT_CONTEXT_PACK_CAPABILITY = "agent-context-pack-v1";
 export const EPHEMERAL_ACTIVITY_CAPABILITY = "ephemeral-activity-v1";
 export const GROUP_DIRECT_MESSAGES_CAPABILITY = "group-direct-messages-v1";
 export const HUMANS_ONLY_CHANNELS_CAPABILITY = "humans-only-channels-v1";
+export const SYSTEM_CHANNELS_CAPABILITY = "system-channels-v1";
 export { ATTACHMENTS_CAPABILITY } from "./files.js";
 const clientCapabilitySchema = z
   .string()

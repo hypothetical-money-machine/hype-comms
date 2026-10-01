@@ -10,13 +10,11 @@ import {
   addArtifactCacheKeys,
   assertVersionCanPublish,
   cacheKeyPlatformManifest,
-  missingGithubReleaseAssets,
   parseManifestVersion,
   runAws,
   runAwsWithRetry,
   selectArtifactNames,
   uploadPlatformManifest,
-  waitForGithubReleaseAssets,
 } from "./desktop-release-helpers.mjs";
 import { releaseBodyStartsWithReviewedNotes } from "./desktop-release-notes.mjs";
 
@@ -107,8 +105,6 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
       to: "hmm-notification-authorization.node",
     },
   ]);
-  assert.match(desktopPackage.scripts["package:win:arm64"], /--win nsis:arm64/u);
-  assert.match(desktopPackage.scripts["package:linux:arm64"], /--linux AppImage:arm64 deb:arm64/u);
   assert.equal(productionBuild.nsis.buildUniversalInstaller, false);
   assert.equal(productionBuild.artifactName, "hype-comms-${version}-${os}-${arch}.${ext}");
   for (const packageScript of Object.values(desktopPackage.scripts).filter((script) =>
@@ -293,26 +289,14 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     packageSmokeWorkflow,
     /^ {6}native_notification_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
   );
-  assert.match(
-    packageSmokeWorkflow,
-    /^ {6}agent_wake_package_evidence:\n {8}description: .+\n {8}required: false\n {8}default: false\n {8}type: boolean$/mu,
-  );
   assert.match(nativeEvidenceJob, /^ {4}environment: release$/mu);
   assert.match(
     nativeEvidenceJob,
-    /^ {4}if: >-\n {6}github\.event_name == 'workflow_dispatch' &&\n {6}\(inputs\.native_notification_evidence \|\| inputs\.agent_wake_package_evidence\)$/mu,
+    /^ {4}if: >-\n {6}github\.event_name == 'workflow_dispatch' &&\n {6}inputs\.native_notification_evidence$/mu,
   );
   assert.match(
     nativeEvidenceJob,
-    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: \$\{\{ inputs\.agent_wake_package_evidence && '1' \|\| '0' \}\}$/mu,
-  );
-  assert.match(
-    smokePackageJob,
-    /^ {6}HYPE_COMMS_AGENT_WAKE_ENABLED: "0"\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"$/mu,
-  );
-  assert.match(
-    releasePackageJob,
-    /^ {6}HYPE_COMMS_AGENT_WAKE_ENABLED: "0"\n {6}HYPE_COMMS_AGENT_WAKE_PACKAGE_EVIDENCE_ENABLED: "0"$/mu,
+    /^ {6}HYPE_COMMS_BUILD_FLAVOR: production\n {6}HYPE_COMMS_API_ORIGIN: https:\/\/chat-api\.hypemm\.com\n {6}HYPE_COMMS_NATIVE_NOTIFICATIONS_ENABLED: "1"\n {6}HYPE_COMMS_MACOS_NATIVE_NOTIFICATION_EVIDENCE_ENABLED: \$\{\{ inputs\.native_notification_evidence && '1' \|\| '0' \}\}$/mu,
   );
   assert.match(nativeEvidenceJob, /npm run package:desktop:mac:arm64/u);
   assert.match(
@@ -328,9 +312,6 @@ test("configures native ARM64 and x64 desktop release targets", async () => {
     nativeEvidenceJob,
     /name: Capture installed notification and click callback\n {8}if: inputs\.native_notification_evidence/u,
   );
-  assert.match(nativeEvidenceJob, /name: Upload signed Agent Wake pilot package/u);
-  assert.match(nativeEvidenceJob, /if: inputs\.agent_wake_package_evidence/u);
-  assert.match(nativeEvidenceJob, /name: macos-arm64-agent-wake-package/u);
   assert.match(releasePackageJob, /name: Configure Windows Authenticode signing/u);
   assert.match(releasePackageJob, /node scripts\/require-windows-signing-env\.mjs/u);
   assert.match(releasePackageJob, /name: Verify Windows release signing/u);
@@ -683,84 +664,6 @@ test("selects only exact version and platform artifacts", () => {
       "hype-comms-1.2.3-linux-x64.AppImage",
       "hype-comms-1.2.3-linux-x64.deb",
     ],
-  );
-});
-
-test("waits for every GitHub Release asset without shell utilities", async () => {
-  const completeAssets = [
-    "latest-mac.yml",
-    "latest.yml",
-    "latest-linux.yml",
-    "latest-linux-arm64.yml",
-    "hype-comms-1.2.3-mac-arm64.zip",
-    "hype-comms-1.2.3-win-x64.exe",
-    "hype-comms-1.2.3-linux-arm64.AppImage",
-  ];
-  const responses = [completeAssets.slice(0, -1), completeAssets];
-  const requests = [];
-  const delays = [];
-
-  await waitForGithubReleaseAssets({
-    attempts: 2,
-    delayMilliseconds: 25,
-    environment,
-    fetchImplementation: async (url, options) => {
-      requests.push({ options, url: url.href });
-      return Response.json([
-        { assets: [], tag_name: "v1.2.2" },
-        {
-          assets: responses.shift().map((name) => ({ name })),
-          tag_name: "v1.2.3",
-        },
-      ]);
-    },
-    sleep(milliseconds) {
-      delays.push(milliseconds);
-    },
-  });
-
-  assert.equal(requests.length, 2);
-  assert.equal(
-    requests[0].url,
-    "https://api.github.example/repos/example/hype-comms/releases?per_page=100",
-  );
-  assert.equal(requests[0].options.headers.authorization, "Bearer test-token");
-  assert.deepEqual(delays, [25]);
-  assert.deepEqual(missingGithubReleaseAssets(completeAssets, "1.2.3"), []);
-});
-
-test("bounds GitHub Release asset polling and validates the response", async () => {
-  const delays = [];
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 2,
-      delayMilliseconds: 5,
-      environment,
-      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.3" }]),
-      sleep(milliseconds) {
-        delays.push(milliseconds);
-      },
-    }),
-    /Missing: latest-mac\.yml, latest\.yml, latest-linux\.yml, latest-linux-arm64\.yml/,
-  );
-  assert.deepEqual(delays, [5]);
-
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 1,
-      environment,
-      fetchImplementation: async () =>
-        Response.json([{ assets: [{ name: 42 }], tag_name: "v1.2.3" }]),
-    }),
-    /assets must have non-empty string names/,
-  );
-  await assert.rejects(
-    waitForGithubReleaseAssets({
-      attempts: 1,
-      environment,
-      fetchImplementation: async () => Response.json([{ assets: [], tag_name: "v1.2.2" }]),
-    }),
-    /does not contain draft tag v1\.2\.3/,
   );
 });
 

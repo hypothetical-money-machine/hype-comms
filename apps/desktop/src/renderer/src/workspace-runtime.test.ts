@@ -611,7 +611,10 @@ class FakeWorkspaceCache implements WorkspaceCache {
           this.#messages.get(reaction.messageId)?.conversationId === options.conversationId,
       ),
       tasks: [...this.#tasks.values()].filter(
-        (task) => options === undefined || task.conversationId === options.conversationId,
+        (task) =>
+          options === undefined ||
+          options.includeAllTasks === true ||
+          task.conversationId === options.conversationId,
       ),
       outbox: [...this.#outbox.values()].sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
@@ -2001,7 +2004,7 @@ describe("WorkspaceRuntime", () => {
       const runtime = runtimeWith(api, cache);
       await runtime.start(session, { offline });
       expect(runtime.state.messages).toEqual([ownMessage]);
-      expect(runtime.state.tasks).toEqual([]);
+      expect(runtime.state.tasks).toEqual([secondTask]);
       const load = vi.spyOn(cache, "load");
       runtime.selectConversation(SECOND_CONVERSATION_ID);
       runtime.selectConversation(SECOND_CONVERSATION_ID);
@@ -2185,7 +2188,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
     expect(runtime.state.bootstrap?.conversations).toEqual(snapshot.conversations);
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
-    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([SECOND_CONVERSATION_ID, CONVERSATION_ID]);
     expect(api.startedCursors).toEqual(["10"]);
     expect(runtime.state.busy).toBe(false);
     expect((await cache.load()).messages).toEqual([]);
@@ -2336,7 +2339,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.tasks).toContainEqual(task);
     expect(load.mock.calls).toEqual([
       [{ conversationId: null }],
-      [{ conversationId: CONVERSATION_ID }],
+      [{ conversationId: CONVERSATION_ID, includeAllTasks: true }],
     ]);
     expect(replace).not.toHaveBeenCalled();
     expect((await cache.load()).bootstrap?.workspace.name).toBe("Updated name");
@@ -2421,6 +2424,69 @@ describe("WorkspaceRuntime", () => {
       conversationId: CONVERSATION_ID,
       lastReadMessageId: OWN_MESSAGE_ID,
     });
+  });
+
+  it("marks an unselected conversation as read using its last message and clears unreads", async () => {
+    const secondConversationId = "20000000-0000-4000-8000-000000000002";
+    const secondMessageId = "20000000-0000-4000-8000-000000000003";
+    const initialBootstrap = bootstrapAt("10");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: secondMessageId,
+      conversationId: secondConversationId,
+      conversationSequence: "5",
+    };
+    const secondSummary: ConversationSummary = {
+      ...channel(secondConversationId, "second-channel"),
+      lastMessage: secondMessage,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const bootstrapWithTwo: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [...initialBootstrap.conversations, secondSummary],
+    };
+    const api = new FakeDesktopApi(bootstrapWithTwo);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+
+    runtime.markConversationAsRead(secondConversationId);
+
+    const updatedSummary = runtime.state.bootstrap?.conversations.find(
+      (c) => c.conversation.id === secondConversationId,
+    );
+    expect(updatedSummary?.unreadCount).toBe(0);
+    expect(updatedSummary?.mentionCount).toBe(0);
+
+    await settle(
+      () => api.readCursorRequests.length === 1,
+      "read cursor request for second conversation",
+    );
+    expect(api.readCursorRequests[0]).toEqual({
+      conversationId: secondConversationId,
+      lastReadMessageId: secondMessageId,
+    });
+  });
+
+  it("does nothing when marking a conversation as read that has 0 unreads", async () => {
+    const initialBootstrap = bootstrapAt("10");
+    const zeroUnreadsSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const bootstrap: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [zeroUnreadsSummary],
+    };
+    const api = new FakeDesktopApi(bootstrap);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    runtime.markConversationAsRead(CONVERSATION_ID);
+    expect(api.readCursorRequests).toHaveLength(0);
   });
 
   it("retries a visible read target after a transient cursor failure", async () => {
@@ -4729,7 +4795,7 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
 
-  it("hydrates the opening channel, then repairs tasks only for channels and self DM", async () => {
+  it("hydrates only the opening history while restoring tasks for channels and self DM", async () => {
     const selfDmId = "20000000-0000-4000-8000-000000000030";
     const peerDmId = "20000000-0000-4000-8000-000000000031";
     const groupDmId = "20000000-0000-4000-8000-000000000032";
@@ -4755,7 +4821,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
-    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
 
     api.bootstrap = { ...api.bootstrap, syncCursor: "11" };
     api.emitWorkspaceEvent(membershipChanged(MEMBER_EVENT_ID, "11"));
@@ -4767,7 +4833,56 @@ describe("WorkspaceRuntime", () => {
       peerDmId,
       groupDmId,
     ]);
-    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, CONVERSATION_ID, selfDmId]);
+    expect(api.conversationTaskRequests).toEqual([
+      CONVERSATION_ID,
+      selfDmId,
+      CONVERSATION_ID,
+      selfDmId,
+    ]);
+  });
+
+  it("hydrates an announcement channel without asking for a task list it cannot have", async () => {
+    const announcementId = "10000000-0000-4000-8000-0000000000c1";
+    const builtInId = "10000000-0000-4000-8000-0000000000c2";
+    const announcement = channel(announcementId, "company-news");
+    const builtIn = channel(builtInId, "hype/release-notes");
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          {
+            ...announcement,
+            conversation: { ...announcement.conversation, channelMode: "announcement" },
+          },
+          {
+            ...builtIn,
+            conversation: {
+              ...builtIn.conversation,
+              channelMode: "announcement",
+              isBuiltIn: true,
+            },
+          },
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+    try {
+      expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+      runtime.selectConversation(announcementId);
+      await runtime.loadOlder(announcementId);
+      runtime.selectConversation(builtInId);
+      await runtime.loadOlder(builtInId);
+
+      // The server rejects tasks for an announcement channel, so requesting one would fail the
+      // whole snapshot and leave the workspace stuck loading.
+      expect(api.historyRequests).toEqual([CONVERSATION_ID, announcementId, builtInId]);
+      expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+      expect(runtime.state.historyErrors).toEqual({});
+    } finally {
+      await runtime.stop();
+    }
   });
 
   it.each([
@@ -8398,6 +8513,155 @@ describe("WorkspaceRuntime", () => {
   });
 });
 
+describe("workspace tasks during deferred history startup", () => {
+  const secondTask: Task = {
+    ...task,
+    id: "20000000-0000-4000-8000-000000000093",
+    conversationId: SECOND_CONVERSATION_ID,
+    sourceMessageId: PEER_MESSAGE_ID,
+    title: "Task in an unopened conversation",
+  };
+  const snapshot = bootstrapAt("10", {
+    conversations: [channel(CONVERSATION_ID, "general"), channel(SECOND_CONVERSATION_ID, "design")],
+  });
+
+  it("keeps unopened conversations' tasks available when My Tasks cannot refresh offline", async () => {
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(
+      snapshot,
+      [ownMessage, { ...peerMessage, conversationId: SECOND_CONVERSATION_ID }],
+      [],
+      [task, secondTask],
+    );
+    const api = new FakeDesktopApi(snapshot);
+    vi.spyOn(api, "listMyTasks").mockRejectedValue(new Error("Network is offline"));
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session, { offline: true });
+    try {
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      await expect(runtime.loadMyTasks()).rejects.toThrow("Network is offline");
+      expect(runtime.state.tasks).toEqual([task, secondTask]);
+      expect(api.historyRequests).toEqual([]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("persists all task boards on a fresh start while fetching only the opening history", async () => {
+    const cache = new MemoryWorkspaceCache();
+    const api = new FakeDesktopApi(snapshot);
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      nextCursor: null,
+      threadSummaries: [],
+      threadsSupported: true,
+    });
+    api.conversationTaskResults.push(
+      { tasks: [task], hasMore: false, nextCursor: null },
+      { tasks: [secondTask], hasMore: false, nextCursor: null },
+    );
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    try {
+      expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+      expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
+      expect((await cache.load()).tasks).toEqual([task, secondTask]);
+      await runtime.stop();
+      await runtime.start(session, { offline: true });
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      expect(runtime.state.tasks).toEqual([task, secondTask]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+});
+
+describe("history hydration after exact navigation", () => {
+  async function cachedWorkspace() {
+    const secondMessage = { ...peerMessage, conversationId: SECOND_CONVERSATION_ID };
+    const snapshot = bootstrapAt("10", {
+      conversations: [
+        channel(CONVERSATION_ID, "general"),
+        channel(SECOND_CONVERSATION_ID, "design"),
+      ],
+    });
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(snapshot, [ownMessage, secondMessage]);
+    const api = new FakeDesktopApi(snapshot);
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.messages).toEqual([ownMessage]);
+    return { runtime, api, secondMessage };
+  }
+
+  it("restores an unopened conversation when an unavailable notification falls back", async () => {
+    const { runtime, api, secondMessage } = await cachedWorkspace();
+    api.messageByIdFailures = 1;
+    const result = await runtime.handleNotificationAction(
+      {
+        ...notificationAction,
+        conversationId: SECOND_CONVERSATION_ID,
+        messageId: "20000000-0000-4000-8000-000000000090",
+      },
+      notificationContext,
+    );
+    expect(result).toBe("fallback");
+    expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+    try {
+      await settle(
+        () => runtime.state.messages.some((message) => message.id === secondMessage.id),
+        "notification fallback cached history",
+      );
+      expect(runtime.state.messages).toContainEqual(secondMessage);
+      expect(runtime.state.focusedMessageId).toBeNull();
+      expect(runtime.state.error).toBe("That notification is no longer available.");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it.each(["search", "notification"] as const)(
+    "restores cached context without changing the exact %s target",
+    async (entryPoint) => {
+      const { runtime, api, secondMessage } = await cachedWorkspace();
+      const target = {
+        ...secondMessage,
+        id: "20000000-0000-4000-8000-000000000091",
+        clientMessageId: "20000000-0000-4000-8000-000000000092",
+        conversationSequence: "3",
+        body: "Exact navigation target",
+      };
+      if (entryPoint === "search") {
+        await runtime.openSearchResult({ message: target });
+      } else {
+        api.messageByIdResults.push({ message: target });
+        await expect(
+          runtime.handleNotificationAction(
+            {
+              ...notificationAction,
+              conversationId: SECOND_CONVERSATION_ID,
+              messageId: target.id,
+            },
+            notificationContext,
+          ),
+        ).resolves.toBe("opened");
+      }
+      expect(runtime.state.selectedConversationId).toBe(SECOND_CONVERSATION_ID);
+      expect(runtime.state.messages).toContainEqual(target);
+      try {
+        await settle(
+          () => runtime.state.messages.some((message) => message.id === secondMessage.id),
+          "exact navigation cached context",
+        );
+        expect(runtime.state.messages).toContainEqual(secondMessage);
+        expect(runtime.state.focusedMessageId).toBe(target.id);
+      } finally {
+        await runtime.stop();
+      }
+    },
+  );
+});
+
 describe("opening-history reload after startup catch-up", () => {
   const secondOld: Message = {
     ...ownMessage,
@@ -8465,11 +8729,11 @@ describe("opening-history reload after startup catch-up", () => {
     await runtime.start(session);
     expect(runtime.state.messages).toEqual([peerMessage, ownMessage]);
     expect(runtime.state.reactions).toEqual([ownReaction]);
-    expect(runtime.state.tasks).toEqual([]);
+    expect(runtime.state.tasks).toEqual([secondTask]);
     expect(load.mock.calls).toEqual([
       [{ conversationId: null }],
-      [{ conversationId: CONVERSATION_ID }],
-      [{ conversationId: CONVERSATION_ID }],
+      [{ conversationId: CONVERSATION_ID, includeAllTasks: true }],
+      [{ conversationId: CONVERSATION_ID, includeAllTasks: true }],
     ]);
     expect(api.syncedFrom).toEqual(["9", "12"]);
     expect(api.acknowledged).toEqual(["12", "12"]);
