@@ -1,5 +1,5 @@
 import path from "node:path";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 
 // Call only after the runner has stopped its Electron, server and PostgreSQL processes.
 // Keep samples, logs, screenshots and CPU profiles available for inspection.
@@ -9,12 +9,60 @@ export async function removePerformanceRuntimeData(directory) {
   }
 }
 
-// A scenario failure remains the reported error if shutdown also fails. The cleanup callback
-// must stop processes before saving results or deleting runtime data, and stop at its first error.
-export async function finishPerformanceRuntime(cleanup, scenarioError) {
+// Preserve the scenario error and runtime data if shutdown or evidence persistence fails.
+// Attempt result persistence even when stop() fails, and delete only after both succeed.
+export async function finishPerformanceRuntime(
+  {
+    stop,
+    directory,
+    result,
+    keepRuntimeData = false,
+    removeRuntimeData = removePerformanceRuntimeData,
+  },
+  scenarioError,
+) {
+  let cleanupError = null;
+  const recordFailure = (error) => {
+    cleanupError = error;
+    result.status = "failed";
+    result.cleanupError = error instanceof Error ? error.message : String(error);
+    result.error =
+      scenarioError === null
+        ? result.cleanupError
+        : scenarioError instanceof Error
+          ? scenarioError.message
+          : String(scenarioError);
+  };
+  const saveResults = async () => {
+    await writeFile(path.join(directory, "results.json"), `${JSON.stringify(result, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    console.log(`Results: ${directory}/results.json`);
+  };
   try {
-    await cleanup();
-  } catch (cleanupError) {
+    await stop();
+  } catch (error) {
+    recordFailure(error);
+  }
+  try {
+    await saveResults();
+  } catch (error) {
+    if (cleanupError === null) recordFailure(error);
+    else console.error("Benchmark results could not be saved:", error);
+  }
+  if (cleanupError === null && !keepRuntimeData) {
+    try {
+      await removeRuntimeData(directory);
+    } catch (error) {
+      recordFailure(error);
+      try {
+        await saveResults();
+      } catch (saveError) {
+        console.error("Benchmark results could not be saved:", saveError);
+      }
+    }
+  }
+  if (cleanupError !== null) {
     if (scenarioError === null) throw cleanupError;
     console.error("Benchmark cleanup failed; runtime data retained:", cleanupError);
   }

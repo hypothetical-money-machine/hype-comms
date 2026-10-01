@@ -66,6 +66,7 @@ import { MessageDateSeparator, shouldShowDateSeparator } from "./message-date-se
 import { MessageBody } from "./message-body";
 import {
   captureTimelineScrollAnchor,
+  isTimelineScrollAnchorPreserved,
   restoreTimelineScrollAnchor,
   type TimelineScrollAnchor,
 } from "./timeline-scroll-anchor";
@@ -948,6 +949,7 @@ export function App({
     conversationId: string;
     focusRequest: number;
     anchor: TimelineScrollAnchor;
+    scrollTop: number;
   } | null>(null);
   const cancelHistoryAnchor = useCallback(() => {
     historyAnchor.current = null;
@@ -1478,6 +1480,17 @@ export function App({
   const handleTimelineScroll = useCallback((): void => {
     const list = messageList.current;
     if (list !== null) {
+      const pending = historyAnchor.current;
+      if (pending !== null) {
+        if (
+          list.scrollTop !== pending.scrollTop &&
+          !isTimelineScrollAnchorPreserved(list, pending.anchor)
+        ) {
+          historyAnchor.current = null;
+        } else {
+          pending.scrollTop = list.scrollTop;
+        }
+      }
       const atLiveTail = isTimelineAtBottom(list);
       stickToTimelineBottom.current = atLiveTail;
       setTimelineAtLiveTail(atLiveTail);
@@ -1499,7 +1512,17 @@ export function App({
       historyAnchor.current = null;
       return;
     }
+    // A scrollbar can move before its scroll event is dispatched. Browser anchoring instead
+    // changes scrollTop while keeping the captured row at the same visual offset.
+    if (
+      list.scrollTop !== pending.scrollTop &&
+      !isTimelineScrollAnchorPreserved(list, pending.anchor)
+    ) {
+      historyAnchor.current = null;
+      return;
+    }
     restoreTimelineScrollAnchor(list, pending.anchor);
+    pending.scrollTop = list.scrollTop;
     if (!selectedHistoryLoading) historyAnchor.current = null;
   }, [
     destination,
@@ -2920,6 +2943,7 @@ export function App({
                           conversationId,
                           focusRequest: runtimeState.focusedMessageRequest,
                           anchor,
+                          scrollTop: list?.scrollTop ?? 0,
                         };
                         stickToTimelineBottom.current = false;
                       }

@@ -1,7 +1,11 @@
 // @vitest-environment happy-dom
 
 import { expect, it, vi } from "vitest";
-import { captureTimelineScrollAnchor, restoreTimelineScrollAnchor } from "./timeline-scroll-anchor";
+import {
+  captureTimelineScrollAnchor,
+  isTimelineScrollAnchorPreserved,
+  restoreTimelineScrollAnchor,
+} from "./timeline-scroll-anchor";
 
 function rect(top: number, bottom: number): DOMRect {
   return {
@@ -35,15 +39,17 @@ it("preserves a fully visible row across a prepend without doubling browser anch
   list.append(clipped, row);
   list.scrollTop = 20;
   const anchor = captureTimelineScrollAnchor(list);
-  expect(anchor).toEqual({ messageId: "anchor", offset: 40 });
+  expect(anchor).toEqual({ messageId: "anchor", row, offset: 40 });
   if (anchor === null) throw new Error("Missing anchor");
   rowOffset += 420;
+  expect(isTimelineScrollAnchorPreserved(list, anchor)).toBe(false);
   restoreTimelineScrollAnchor(list, anchor);
   expect(list.scrollTop).toBe(440);
 
   // After scrolling (including native browser anchoring), the row is back at the desired offset.
   rowOffset = 40;
   viewportTop = 200;
+  expect(isTimelineScrollAnchorPreserved(list, anchor)).toBe(true);
   restoreTimelineScrollAnchor(list, anchor);
   expect(list.scrollTop).toBe(440);
 });
@@ -56,7 +62,7 @@ it("anchors within a message taller than the viewport and ignores a removed anch
   const bounds = vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(-200, 800));
   list.append(row);
   const anchor = captureTimelineScrollAnchor(list);
-  expect(anchor).toEqual({ messageId: "tall", offset: -300 });
+  expect(anchor).toEqual({ messageId: "tall", row, offset: -300 });
   if (anchor === null) throw new Error("Missing anchor");
   bounds.mockReturnValue(rect(300, 1300));
   restoreTimelineScrollAnchor(list, anchor);
@@ -71,4 +77,46 @@ it("does not capture an empty or hidden timeline", () => {
   expect(captureTimelineScrollAnchor(list)).toBeNull();
   vi.spyOn(list, "getBoundingClientRect").mockReturnValue(rect(100, 400));
   expect(captureTimelineScrollAnchor(list)).toBeNull();
+});
+
+it("finds a visible row in long history without measuring every preceding message", () => {
+  const list = document.createElement("div");
+  vi.spyOn(list, "getBoundingClientRect").mockReturnValue(rect(100, 400));
+  const measurements = vi.fn();
+  const rows = Array.from({ length: 10_000 }, (_, index) => {
+    const row = document.createElement("article");
+    row.dataset.messageId = `history-${index}`;
+    vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => {
+      measurements(index);
+      return rect((index - 9_000) * 40 + 80, (index - 9_000) * 40 + 110);
+    });
+    list.append(row);
+    return row;
+  });
+  expect(captureTimelineScrollAnchor(list)).toEqual({
+    messageId: "history-9001",
+    row: rows[9_001],
+    offset: 20,
+  });
+  expect(measurements.mock.calls.length).toBeLessThan(20);
+});
+
+it("stops after the viewport when only a partial row is visible", () => {
+  const list = document.createElement("div");
+  vi.spyOn(list, "getBoundingClientRect").mockReturnValue(rect(100, 400));
+  const rows = Array.from({ length: 1_000 }, (_, index) => {
+    const row = document.createElement("article");
+    row.dataset.messageId = `tall-${index}`;
+    vi.spyOn(row, "getBoundingClientRect").mockReturnValue(
+      rect((index - 500) * 1_000 - 200, (index - 500) * 1_000 + 800),
+    );
+    list.append(row);
+    return row;
+  });
+  expect(captureTimelineScrollAnchor(list)).toEqual({
+    messageId: "tall-500",
+    row: rows[500],
+    offset: -300,
+  });
+  expect(vi.mocked(rows[999]!.getBoundingClientRect)).not.toHaveBeenCalled();
 });
