@@ -1495,6 +1495,23 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         for event in events:
             await gateway._run_agent_inner(source=event.source, event_message_id=event.message_id)
 
+    def control_ambient_replay_wait(self, adapter: Any, callback: Any) -> None:
+        """Replace elapsed time with an explicit test gate for one-channel recovery."""
+
+        async def wait(remaining_ids: set[str]) -> None:
+            del remaining_ids
+            retry = min(adapter._ambient_replay_retries.values(), key=lambda item: item.not_before)
+            await callback(retry.attempt, retry.not_before - adapter_module.time.monotonic())
+            # Returning from the gate simulates expiration of the earliest
+            # channel deadline; later deadlines must remain in force.
+            for conversation_id, candidate in list(adapter._ambient_replay_retries.items()):
+                if candidate.not_before <= retry.not_before:
+                    adapter._ambient_replay_retries[conversation_id] = adapter_module.AmbientReplayRetry(
+                        attempt=candidate.attempt, not_before=0.0
+                    )
+
+        adapter._wait_for_ambient_replay = wait
+
     async def test_ambient_backlog_connects_and_recovers_without_new_watch_traffic(self) -> None:
         adapter, gateway, factory, key, watch = await self.deferred_recovery_fixture()
         sleeping, resume = asyncio.Event(), asyncio.Event()
@@ -1507,7 +1524,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             await resume.wait()
             resume.clear()
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         try:
             self.assertTrue(await adapter.connect())
             await asyncio.wait_for(sleeping.wait(), timeout=0.5)
@@ -1518,7 +1535,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(watch.terminated)
             self.assertEqual(gateway._queue_depth(key, adapter=adapter), 2)
             self.assertEqual(len(adapter._pending_ambient_wakes), 4)
-            self.assertEqual(delays, [1.0])
+            self.assertEqual(len(delays), 1)
+            self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].attempt, 1)
 
             # Later accepted watch traffic may advance the high cursor while
             # older recovered anchors are still awaiting FIFO capacity.
@@ -1553,7 +1571,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             resume.clear()
             sleeping.clear()
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         failed_id = message_id_for("101")
         gateway.results[failed_id] = {"failed": True, "final_response": ""}
         try:
@@ -1604,7 +1622,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             resume.clear()
             sleeping.clear()
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         try:
             self.assertTrue(await adapter.connect())
             await asyncio.wait_for(sleeping.wait(), timeout=0.5)
@@ -1661,7 +1679,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             sleeping.set()
             await resume.wait()
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         try:
             self.assertTrue(await adapter.connect())
             await asyncio.wait_for(sleeping.wait(), timeout=0.5)
@@ -1736,8 +1754,8 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             ]
         )
         before = len(context_calls(factory))
-        failure = await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
-        self.assertEqual(failure.code, "TEMPORARY")
+        await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
+        self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].attempt, 1)
         self.assertEqual(
             [call["args"][5] for call in context_calls(factory)[before:]],
             [message_id_for("101"), message_id_for("103")],
@@ -1757,7 +1775,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             sleeping.set()
             await resume.wait()
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         try:
             self.assertTrue(await adapter.connect())
             await asyncio.wait_for(sleeping.wait(), timeout=0.5)
@@ -1777,6 +1795,254 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         finally:
             await adapter.disconnect()
 
+    def retain_recovery_anchor(self, adapter: Any, cursor: str, conversation_id: str) -> None:
+        trigger = message_event(cursor, conversation_id, USER_ID)
+        normalized = adapter._normalized_message_event(
+            text="",
+            event=trigger,
+            message=trigger["payload"]["message"],
+            mentioned_user_ids=[],
+            chat_info=adapter._chat_info(conversation_id),
+            author_id=USER_ID,
+            author=HUMAN_USER,
+        )
+        adapter._retain_ambient_wake(normalized)
+        adapter._pending_ambient_admissions.add(normalized.message_id)
+
+    def recovery_channel_response(self, cursor: str, conversation_id: str) -> dict[str, Any]:
+        response = context_pack_result(message_id_for(cursor))
+        response["contextPack"]["conversation"] = {
+            "id": conversation_id,
+            "kind": "channel",
+            "slug": "other",
+            "selector": "#other",
+        }
+        response["contextPack"]["replyTarget"] = {
+            "kind": "thread",
+            "conversationId": conversation_id,
+            "rootMessageId": message_id_for(cursor),
+        }
+        return response
+
+    async def test_pending_channels_retry_at_their_own_deadlines_in_order(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        other_id = "00000000-0000-4000-8000-000000000029"
+        adapter._conversations[other_id] = conversation(
+            other_id, "channel", [], name="Other", slug="other"
+        )
+        for cursor, channel in [("101", CHANNEL_ID), ("102", CHANNEL_ID), ("103", other_id)]:
+            self.retain_recovery_anchor(adapter, cursor, channel)
+        async def quiet(event: Any) -> str:
+            return "NO_REPLY"
+
+        adapter.set_message_handler(quiet)
+        factory.specs.extend(
+            [
+                ProcessSpec(
+                    context_args(CHANNEL_ID, message_id_for("101")),
+                    adapter_module.CliFailure(5, "RATE_LIMITED", "temporary", True, retry_after=30),
+                ),
+                ProcessSpec(
+                    context_args(other_id, message_id_for("103")),
+                    adapter_module.CliFailure(5, "BUSY", "temporary", True, retry_after=1),
+                ),
+                ProcessSpec(
+                    context_args(other_id, message_id_for("103")),
+                    json_process(self.recovery_channel_response("103", other_id)),
+                ),
+            ]
+        )
+        now = [0.0]
+        with (
+            patch.object(adapter_module, "time", types.SimpleNamespace(monotonic=lambda: now[0])),
+            patch.object(adapter_module.random, "random", return_value=0),
+        ):
+            try:
+                await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
+                adapter._schedule_ambient_replay(adapter._pending_ambient_admissions)
+                task = adapter._ambient_replay_task
+                self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].not_before, 30)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].not_before, 1)
+
+                # New same-channel traffic cannot consume context or read state
+                # while its earlier recovery anchor is rate-limited.
+                await adapter._accept_event(message_event("104", CHANNEL_ID, USER_ID))
+                self.assertEqual(len(context_calls(factory)), 2)
+                self.assertEqual(adapter._pending_read_cursors, {})
+                now[0] = 1
+                adapter._ambient_replay_wakeup.set()
+
+                async def wait_for_other() -> None:
+                    while message_id_for("103") in adapter._pending_ambient_admissions:
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(wait_for_other(), timeout=0.5)
+                self.assertEqual(
+                    [event.message_id for event in adapter.handled_events],
+                    [message_id_for("103")],
+                )
+                self.assertEqual(len(context_calls(factory)), 3)
+                self.assertNotIn(other_id, adapter._ambient_replay_retries)
+                self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].attempt, 1)
+                self.assertIs(adapter._ambient_replay_task, task)
+                self.assertEqual(adapter._pending_read_cursors, {})
+
+                now[0] = 30
+                adapter._ambient_replay_wakeup.set()
+                await asyncio.wait_for(task, timeout=0.5)
+                self.assertEqual(
+                    [event.message_id for event in adapter.handled_events],
+                    [message_id_for(i) for i in ("103", "101", "102", "104")],
+                )
+                self.assertEqual(adapter._ambient_replay_retries, {})
+                self.assertEqual(adapter._pending_ambient_admissions, set())
+                self.assertEqual(adapter._pending_ambient_wakes, {})
+                self.assertEqual(adapter._cursor, cursor_text("104"))
+            finally:
+                await adapter.disconnect()
+
+    async def test_new_pending_channel_wakes_worker_and_resets_recovered_attempts(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        other_id = "00000000-0000-4000-8000-000000000029"
+        adapter._conversations[other_id] = conversation(
+            other_id, "channel", [], name="Other", slug="other"
+        )
+
+        async def quiet(event: Any) -> str:
+            return "NO_REPLY"
+
+        adapter.set_message_handler(quiet)
+        self.retain_recovery_anchor(adapter, "101", CHANNEL_ID)
+        self.retain_recovery_anchor(adapter, "102", other_id)
+        factory.specs.extend(
+            [
+                ProcessSpec(
+                    context_args(CHANNEL_ID, message_id_for("101")),
+                    adapter_module.CliFailure(5, "RATE_LIMITED", "temporary", True, retry_after=30),
+                ),
+                ProcessSpec(
+                    context_args(other_id, message_id_for("102")),
+                    adapter_module.CliFailure(5, "BUSY", "temporary", True),
+                ),
+                ProcessSpec(
+                    context_args(other_id, message_id_for("102")),
+                    adapter_module.CliFailure(5, "BUSY", "temporary", True),
+                ),
+                ProcessSpec(
+                    context_args(other_id, message_id_for("102")),
+                    json_process(self.recovery_channel_response("102", other_id)),
+                ),
+            ]
+        )
+        now = [0.0]
+        with (
+            patch.object(adapter_module, "time", types.SimpleNamespace(monotonic=lambda: now[0])),
+            patch.object(adapter_module.random, "random", return_value=0),
+        ):
+            try:
+                await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].attempt, 1)
+                now[0] = 1
+                await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].attempt, 2)
+                now[0] = 3
+                await adapter._replay_pending_ambient_wakes(adapter._pending_ambient_admissions)
+                adapter._schedule_ambient_replay(adapter._pending_ambient_admissions)
+                task = adapter._ambient_replay_task
+                # Let the owned worker enter the long wait before adding work.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertNotIn(other_id, adapter._ambient_replay_retries)
+                self.retain_recovery_anchor(adapter, "103", other_id)
+                factory.specs.append(
+                    ProcessSpec(
+                        context_args(other_id, message_id_for("103")),
+                        adapter_module.CliFailure(5, "BUSY", "temporary", True),
+                    )
+                )
+                adapter._schedule_ambient_replay(adapter._pending_ambient_admissions)
+
+                async def wait_for_new_channel() -> None:
+                    while other_id not in adapter._ambient_replay_retries:
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(wait_for_new_channel(), timeout=0.5)
+                self.assertIs(adapter._ambient_replay_task, task)
+                self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].not_before, 30)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].attempt, 1)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].not_before, 4)
+                self.assertEqual(len(context_calls(factory)), 5)
+                # Only the new channel reaches its second attempt at t4.
+                factory.specs.append(
+                    ProcessSpec(
+                        context_args(other_id, message_id_for("103")),
+                        adapter_module.CliFailure(5, "BUSY", "temporary", True),
+                    )
+                )
+                now[0] = 4
+                adapter._ambient_replay_wakeup.set()
+
+                async def wait_for_second_attempt() -> None:
+                    while adapter._ambient_replay_retries[other_id].attempt != 2:
+                        await asyncio.sleep(0)
+
+                await asyncio.wait_for(wait_for_second_attempt(), timeout=0.5)
+                self.assertEqual(adapter._ambient_replay_retries[other_id].not_before, 6)
+                self.assertEqual(adapter._ambient_replay_retries[CHANNEL_ID].attempt, 1)
+                self.assertEqual(len(context_calls(factory)), 6)
+            finally:
+                await adapter.disconnect()
+            self.assertEqual(adapter._ambient_replay_retries, {})
+            self.assertFalse(adapter._ambient_replay_wakeup.is_set())
+
+    async def test_reconnect_discards_previous_channel_retry_deadlines(self) -> None:
+        adapter, _gateway, _factory, _key, _watch = await self.deferred_recovery_fixture()
+        sleeping = asyncio.Event()
+
+        async def sleep_until_cancelled(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await asyncio.Future()
+
+        self.control_ambient_replay_wait(adapter, sleep_until_cancelled)
+        self.assertTrue(await adapter.connect())
+        await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+        self.assertIn(CHANNEL_ID, adapter._ambient_replay_retries)
+        await adapter.disconnect()
+        self.assertEqual(adapter._ambient_replay_retries, {})
+        self.assertFalse(adapter._ambient_replay_wakeup.is_set())
+        adapter._active_sessions.clear()
+        adapter._admitted_ambient_wakes.clear()
+        adapter._pending_messages.clear()
+
+        async def quiet(event: Any) -> str:
+            return "NO_REPLY"
+
+        adapter.set_message_handler(quiet)
+        watch = FakeWatchProcess(blocking=True)
+        adapter._process_factory = FakeProcessFactory(
+            startup_specs("500") + [ProcessSpec(("watch", "--json", "--after", cursor_text("104")), watch)]
+        )
+        # A stale volatile deadline must not suppress the reconnect's immediate
+        # fresh-context admission, even if a previous generation left one.
+        adapter._ambient_replay_retries[CHANNEL_ID] = adapter_module.AmbientReplayRetry(
+            attempt=8, not_before=adapter_module.time.monotonic() + 30
+        )
+        adapter._ambient_replay_wakeup.set()
+        try:
+            self.assertTrue(await adapter.connect())
+            self.assertEqual(adapter._pending_ambient_admissions, set())
+            self.assertEqual(adapter._ambient_replay_retries, {})
+            self.assertFalse(adapter._ambient_replay_wakeup.is_set())
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertEqual(len(adapter.handled_events), 4)
+        finally:
+            await adapter.disconnect()
+
     async def test_disconnect_cancels_sleeping_ambient_recovery_without_losing_anchors(self) -> None:
         adapter, _gateway, _factory, _key, watch = await self.deferred_recovery_fixture()
         sleeping = asyncio.Event()
@@ -1786,7 +2052,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             sleeping.set()
             await asyncio.Future()
 
-        adapter._backoff = sleep_until_cancelled
+        self.control_ambient_replay_wait(adapter, sleep_until_cancelled)
         self.assertTrue(await adapter.connect())
         await asyncio.wait_for(sleeping.wait(), timeout=0.5)
         task = adapter._ambient_replay_task
@@ -1807,7 +2073,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         async def no_backoff(attempt: int, retry_after: Optional[float]) -> None:
             del attempt, retry_after
 
-        adapter._backoff = no_backoff
+        self.control_ambient_replay_wait(adapter, no_backoff)
         try:
             self.assertTrue(await adapter.connect())
             await asyncio.wait_for(child.started.wait(), timeout=0.5)
@@ -1832,7 +2098,7 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         async def detached_disconnect(failed_adapter: Any) -> None:
             await asyncio.shield(asyncio.create_task(failed_adapter.disconnect()))
 
-        adapter._backoff = controlled_backoff
+        self.control_ambient_replay_wait(adapter, controlled_backoff)
         adapter.set_fatal_error_handler(detached_disconnect)
         try:
             self.assertTrue(await adapter.connect())
