@@ -80,6 +80,9 @@ class FakeBasePlatformAdapter:
         self.fatal_error: Optional[tuple[str, str, bool]] = None
         self._fatal_error_handler: Optional[Any] = None
         self._authorization_check: Optional[Any] = None
+        self._active_sessions: dict[str, asyncio.Event] = {}
+        self._pending_messages: dict[str, FakeMessageEvent] = {}
+        self._busy_session_handler: Optional[Any] = None
 
     def _acquire_platform_lock(self, scope: str, identity: str, description: str) -> bool:
         self.lock_calls.append((scope, identity, description))
@@ -102,6 +105,9 @@ class FakeBasePlatformAdapter:
 
     def set_authorization_check(self, callback: Any) -> None:
         self._authorization_check = callback
+
+    def set_busy_session_handler(self, callback: Any) -> None:
+        self._busy_session_handler = callback
 
     def _is_sender_authorized(
         self,
@@ -160,6 +166,46 @@ class FakeBasePlatformAdapter:
         self.session_keys.append(":".join(parts))
 
 
+def fake_build_session_key(
+    source: Any,
+    *,
+    group_sessions_per_user: bool,
+    thread_sessions_per_user: bool,
+) -> str:
+    parts = [source.platform.value, source.chat_type, source.chat_id]
+    if source.thread_id:
+        parts.append(source.thread_id)
+    isolate_user = group_sessions_per_user
+    if source.thread_id and not thread_sessions_per_user:
+        isolate_user = False
+    if isolate_user and source.user_id:
+        parts.append(source.user_id)
+    return ":".join(parts)
+
+
+class FakeBusyGateway:
+    _BUSY_QUEUE_MAX_PENDING = 32
+
+    def __init__(self, adapter: Any):
+        self.adapter = adapter
+        self._draining = False
+        self._queued_events: dict[str, list[FakeMessageEvent]] = {}
+
+    def _adapter_for_source(self, source: Any) -> Any:
+        return self.adapter
+
+    def _queue_depth(self, session_key: str, *, adapter: Any) -> int:
+        return len(self._queued_events.get(session_key, [])) + int(
+            session_key in adapter._pending_messages
+        )
+
+    def _enqueue_fifo(self, session_key: str, event: FakeMessageEvent, adapter: Any) -> None:
+        if session_key in adapter._pending_messages:
+            self._queued_events.setdefault(session_key, []).append(event)
+        else:
+            adapter._pending_messages[session_key] = event
+
+
 def _install_fake_hermes() -> None:
     gateway = types.ModuleType("gateway")
     gateway.__path__ = []
@@ -173,6 +219,7 @@ def _install_fake_hermes() -> None:
     base.MessageEvent = FakeMessageEvent
     base.MessageType = FakeMessageType
     base.SendResult = FakeSendResult
+    base.build_session_key = fake_build_session_key
     sys.modules.update(
         {
             "gateway": gateway,
@@ -977,6 +1024,223 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
             [],
         )
         self.assertEqual(adapter._cursor, "101")
+
+    async def test_busy_ambient_channel_wakes_queue_separate_turns_without_interrupt_or_ack(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        active_guard = asyncio.Event()
+        adapter._active_sessions[session_key] = active_guard
+
+        async def interrupt_and_ack(event: Any) -> None:
+            active_guard.set()
+            await adapter.send(CHANNEL_ID, "Interrupting current task")
+
+        adapter.handle_message = interrupt_and_ack
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, body="ambient first")
+        )
+        await adapter._accept_event(
+            message_event("102", CHANNEL_ID, USER_ID, body="ambient second")
+        )
+
+        self.assertFalse(active_guard.is_set())
+        self.assertEqual(send_calls(factory), [])
+        queued = [adapter._pending_messages[session_key], *gateway._queued_events[session_key]]
+        self.assertEqual(
+            [event.message_id for event in queued],
+            [message_id_for("101"), message_id_for("102")],
+        )
+        self.assertIn('"body":"ambient first"', queued[0].text)
+        self.assertNotIn('"body":"ambient second"', queued[0].text)
+        self.assertIn('"body":"ambient second"', queued[1].text)
+        self.assertNotIn('"body":"ambient first"', queued[1].text)
+        self.assertTrue(all("NO_REPLY" in event.channel_prompt for event in queued))
+        self.assertEqual(adapter._cursor, "102")
+
+        # Once the active response is delivered, each queued pack gets its own
+        # model turn. A silent decision still produces no network message.
+        adapter._active_sessions.clear()
+        adapter._pending_messages.clear()
+        gateway._queued_events.clear()
+        turns: list[str] = []
+
+        async def choose_silence(event: Any) -> None:
+            turns.append(event.message_id)
+            await adapter.send(CHANNEL_ID, "NO_REPLY")
+
+        adapter.handle_message = choose_silence
+        for event in queued:
+            await adapter._handoff_message(event)
+        self.assertEqual(turns, [message_id_for("101"), message_id_for("102")])
+        self.assertEqual(send_calls(factory), [])
+
+    async def test_busy_ambient_queue_full_retries_without_checkpointing_or_losing_the_wake(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        gateway._BUSY_QUEUE_MAX_PENDING = 2
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[session_key] = asyncio.Event()
+        for cursor in ("101", "102"):
+            await adapter._accept_event(message_event(cursor, CHANNEL_ID, USER_ID))
+
+        trigger = message_event("103", CHANNEL_ID, USER_ID, body="must survive overflow")
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(trigger)
+        self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_FULL")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.retry_after, 1.0)
+        self.assertEqual(adapter._cursor, "102")
+        self.assertEqual(adapter._load_cursor(), "102")
+        self.assertEqual(gateway._queue_depth(session_key, adapter=adapter), 2)
+        self.assertEqual(adapter.handled_events, [])
+        self.assertEqual(send_calls(factory), [])
+
+        # A freed slot admits the same uncheckpointed event exactly once.
+        adapter._pending_messages.pop(session_key)
+        await adapter._accept_event(trigger)
+        self.assertEqual(adapter._cursor, "103")
+        queued = [adapter._pending_messages[session_key], *gateway._queued_events[session_key]]
+        self.assertEqual(sum(event.message_id == message_id_for("103") for event in queued), 1)
+
+    async def test_draining_gateway_retries_ambient_wake_before_handoff_and_checkpoint(
+        self,
+    ) -> None:
+        for busy in (False, True):
+            with self.subTest(busy=busy):
+                factory = FakeProcessFactory([])
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+                gateway = FakeBusyGateway(adapter)
+                gateway._draining = True
+                adapter.gateway_runner = gateway
+                if busy:
+                    session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+                    adapter._active_sessions[session_key] = asyncio.Event()
+                with self.assertRaises(adapter_module.CliFailure) as raised:
+                    await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+                self.assertEqual(raised.exception.code, "HERMES_GATEWAY_DRAINING")
+                self.assertTrue(raised.exception.retryable)
+                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter.handled_events, [])
+                self.assertEqual(adapter._pending_messages, {})
+                self.assertEqual(gateway._queued_events, {})
+                self.assertEqual(send_calls(factory), [])
+
+    async def test_busy_ambient_wake_refuses_missing_or_wrong_gateway_fifo(self) -> None:
+        for wrong_adapter in (False, True):
+            with self.subTest(wrong_adapter=wrong_adapter):
+                factory = FakeProcessFactory([])
+                adapter = self.new_adapter(factory)
+                self.prepare_adapter(adapter)
+                session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+                adapter._active_sessions[session_key] = asyncio.Event()
+                if wrong_adapter:
+                    adapter.gateway_runner = FakeBusyGateway(object())
+                with self.assertRaises(adapter_module.CliFailure) as raised:
+                    await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+                self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
+                self.assertTrue(raised.exception.retryable)
+                self.assertEqual(adapter._cursor, "100")
+                self.assertEqual(adapter.handled_events, [])
+                self.assertEqual(send_calls(factory), [])
+
+    async def test_stale_busy_guard_does_not_trap_an_ambient_channel_wake(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[session_key] = asyncio.Event()
+        adapter._heal_stale_session_lock = adapter._active_sessions.pop
+
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+
+        self.assertEqual(len(adapter.handled_events), 1)
+        self.assertEqual(adapter._cursor, "101")
+
+    async def test_busy_mentions_and_dms_keep_normal_gateway_handoff(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        channel_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        adapter._active_sessions[channel_key] = asyncio.Event()
+        await adapter._accept_event(
+            message_event("101", CHANNEL_ID, USER_ID, mentions=[AGENT_ID])
+        )
+        await adapter._accept_event(message_event("102", DM_ID, USER_ID))
+
+        self.assertEqual(
+            [event.message_id for event in adapter.handled_events],
+            [message_id_for("101"), message_id_for("102")],
+        )
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter._cursor, "102")
+
+    async def test_idle_to_busy_race_queues_ambient_wake_without_calling_busy_policy(self) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        gateway = FakeBusyGateway(adapter)
+        adapter.gateway_runner = gateway
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        interruptions: list[str] = []
+
+        async def busy_policy(event: Any, key: str) -> bool:
+            interruptions.append(event.message_id)
+            await adapter.send(CHANNEL_ID, "Interrupting current task")
+            return True
+
+        adapter.set_busy_session_handler(busy_policy)
+
+        async def race_into_busy(event: Any) -> None:
+            await asyncio.sleep(0)
+            adapter._active_sessions[session_key] = asyncio.Event()
+            self.assertTrue(await adapter._busy_session_handler(event, session_key))
+
+        adapter.handle_message = race_into_busy
+        await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(interruptions, [])
+        self.assertEqual(send_calls(factory), [])
+        self.assertEqual(adapter._pending_messages[session_key].message_id, message_id_for("101"))
+        self.assertEqual(adapter._cursor, "101")
+
+    async def test_idle_to_busy_queue_failure_propagates_without_fallback_or_checkpoint(
+        self,
+    ) -> None:
+        factory = FakeProcessFactory([])
+        adapter = self.new_adapter(factory)
+        self.prepare_adapter(adapter)
+        adapter.gateway_runner = FakeBusyGateway(object())
+        session_key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+
+        async def forbidden_fallback(event: Any, key: str) -> bool:
+            self.fail("Ambient traffic must never reach the interrupting busy policy")
+
+        adapter.set_busy_session_handler(forbidden_fallback)
+
+        async def race_into_busy(event: Any) -> None:
+            await asyncio.sleep(0)
+            adapter._active_sessions[session_key] = asyncio.Event()
+            self.assertTrue(await adapter._busy_session_handler(event, session_key))
+
+        adapter.handle_message = race_into_busy
+        with self.assertRaises(adapter_module.CliFailure) as raised:
+            await adapter._accept_event(message_event("101", CHANNEL_ID, USER_ID))
+        self.assertEqual(raised.exception.code, "HERMES_BUSY_QUEUE_UNAVAILABLE")
+        self.assertEqual(adapter._cursor, "100")
+        self.assertEqual(adapter._pending_messages, {})
+        self.assertEqual(adapter._ambient_handoff_failures, {})
+        self.assertEqual(send_calls(factory), [])
 
     async def test_profile_denied_channel_is_checkpointed_without_handoff_or_context(
         self,

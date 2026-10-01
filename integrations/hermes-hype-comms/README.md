@@ -67,6 +67,11 @@ NousResearch/hermes-agent commit
   decide whether to open a streaming preview at all
 - `MessageEvent.channel_prompt`, applied as an ephemeral system prompt at
   API-call time and never persisted to transcript history
+- `BasePlatformAdapter.set_busy_session_handler`, `build_session_key`, and the
+  base's active-session guard and stale-lock recovery
+- `GatewayRunner._enqueue_fifo`, `_queue_depth`, `_adapter_for_source`, and
+  `_BUSY_QUEUE_MAX_PENDING` for separate ambient follow-up turns (upstream
+  internals, not public API)
 - The intentional-silence markers in `gateway.response_filters`
   (`[SILENT]`, `SILENT`, `NO_REPLY`, `NO REPLY`), matched against a whole
   response only
@@ -294,6 +299,14 @@ nothing from it. Hermes suppresses intentional-silence responses, and the
 adapter independently drops a whole-message silence marker before the network
 sender as a final delivery safeguard. The silent turn remains in Hermes's
 session history, so the agent can follow the conversation without posting.
+
+While Hermes is answering, an unmentioned channel message waits for its own
+turn in Hermes's FIFO. It does not interrupt or steer the active answer, and
+does not cause a busy acknowledgement. Explicit mentions and direct messages
+keep Hermes's normal busy-input policy. If the FIFO is full, the gateway is
+draining, or the pinned queue helpers are unavailable, the adapter retries the
+watch event without advancing its checkpoint. Each admitted message keeps its
+own context pack, reply anchor, and silence decision.
 
 Every authorized message costs one inference turn even when the model stays
 quiet. Keep peer agents out of `HYPE_COMMS_ALLOWED_USERS` unless agent-to-agent

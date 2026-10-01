@@ -33,6 +33,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    build_session_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -1081,6 +1082,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         self._thread_replies_enabled = _enabled("HYPE_COMMS_THREAD_REPLIES", default=True)
         self._context_limit = _configured_context_limit(config)
         self._channel_prompt_text: Optional[str] = None
+        self._ambient_handoff_failures: Dict[int, CliFailure] = {}
         self._cursor: Optional[str] = None
         self._cursor_path: Optional[Path] = None
         self._agent_scopes: frozenset[str] = frozenset()
@@ -2627,6 +2629,147 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 denied.append(author_id)
         return tuple(sorted(denied))
 
+    def _is_ambient_channel_wake(self, event: MessageEvent) -> bool:
+        raw = event.raw_message
+        mentions = raw.get("mentionedUserIds") if isinstance(raw, Mapping) else None
+        return (
+            event.source.chat_type == "channel"
+            and isinstance(raw, Mapping)
+            and raw.get("platform") == PLATFORM_NAME
+            and isinstance(mentions, list)
+            and self._agent_user_id not in mentions
+        )
+
+    def set_busy_session_handler(
+        self,
+        handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]],
+    ) -> None:
+        async def guarded_handler(event: MessageEvent, session_key: str) -> bool:
+            if not self._is_ambient_channel_wake(event):
+                return await handler(event, session_key) if handler is not None else False
+            try:
+                self._queue_ambient_wake(event, session_key)
+            except CliFailure as failure:
+                # Base catches callback exceptions and falls through to its
+                # merging queue. Return handled, then let the enclosing watch
+                # handoff raise this failure before advancing its checkpoint.
+                self._ambient_handoff_failures[id(event)] = failure
+            except Exception:
+                self._ambient_handoff_failures[id(event)] = CliFailure(
+                    5,
+                    "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                    "Hermes cannot safely queue an ambient channel wake",
+                    True,
+                    retry_after=1.0,
+                    error_kind="transient",
+                )
+            return True
+
+        super().set_busy_session_handler(guarded_handler)
+
+    async def _handoff_message(self, event: MessageEvent) -> None:
+        """Queue ambient channel wakes without interrupting an active answer."""
+
+        if not self._is_ambient_channel_wake(event):
+            await self.handle_message(event)
+            return
+
+        # Match Base.handle_message's key and stale-lock recovery. Its normal
+        # busy callback interrupts/steers the active turn and sends a status
+        # acknowledgement before the model can decide to remain silent.
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        runner = getattr(self, "gateway_runner", None)
+        if getattr(runner, "_draining", False):
+            raise CliFailure(
+                5,
+                "HERMES_GATEWAY_DRAINING",
+                "Hermes is draining; retry the ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        active_sessions = getattr(self, "_active_sessions", {})
+        if session_key in active_sessions:
+            heal = getattr(self, "_heal_stale_session_lock", None)
+            if callable(heal):
+                heal(session_key)
+        if session_key not in active_sessions:
+            try:
+                # Base may yield before checking its session guard. The
+                # installed busy wrapper protects an idle-to-busy race too.
+                await self.handle_message(event)
+                failure = self._ambient_handoff_failures.pop(id(event), None)
+                if failure is not None:
+                    raise failure
+            finally:
+                self._ambient_handoff_failures.pop(id(event), None)
+            return
+        self._queue_ambient_wake(event, session_key)
+
+    def _queue_ambient_wake(self, event: MessageEvent, session_key: str) -> None:
+        runner = getattr(self, "gateway_runner", None)
+        if getattr(runner, "_draining", False):
+            raise CliFailure(
+                5,
+                "HERMES_GATEWAY_DRAINING",
+                "Hermes is draining; retry the ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+
+        enqueue = getattr(runner, "_enqueue_fifo", None)
+        queue_depth = getattr(runner, "_queue_depth", None)
+        adapter_for_source = getattr(runner, "_adapter_for_source", None)
+        capacity = getattr(runner, "_BUSY_QUEUE_MAX_PENDING", 32)
+        if (
+            not callable(enqueue)
+            or not callable(queue_depth)
+            or not callable(adapter_for_source)
+            or adapter_for_source(event.source) is not self
+            or not isinstance(getattr(self, "_pending_messages", None), dict)
+            or not isinstance(capacity, int)
+            or capacity <= 0
+        ):
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                "Hermes cannot safely queue an ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        depth = queue_depth(session_key, adapter=self)
+        if not isinstance(depth, int) or depth < 0:
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_UNAVAILABLE",
+                "Hermes cannot safely queue an ambient channel wake",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        if depth >= capacity:
+            # Retry the uncheckpointed watch event once the bounded FIFO has
+            # room. Hermes's normal busy helper drops overflow, and falling
+            # back to the base pending slot merges distinct context packs.
+            raise CliFailure(
+                5,
+                "HERMES_BUSY_QUEUE_FULL",
+                "Hermes ambient channel wake queue is full",
+                True,
+                retry_after=1.0,
+                error_kind="transient",
+            )
+        # No await between the capacity check and enqueue: another event cannot
+        # fill the queue or finish the active session during this handoff.
+        # The pinned runner drains each FIFO entry as a separate model turn.
+        enqueue(session_key, event, self)
+
     async def _dispatch_message(self, event: Mapping[str, Any]) -> None:
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -2775,7 +2918,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # stable adapter instructions so untrusted history can never acquire
         # system-prompt authority or churn Hermes's prompt cache per wake.
         normalized.channel_prompt = self._channel_prompt()
-        await self.handle_message(normalized)
+        await self._handoff_message(normalized)
 
         if READ_CURSOR_SCOPE not in self._agent_scopes:
             self._warn_missing_read_cursor_scope()
