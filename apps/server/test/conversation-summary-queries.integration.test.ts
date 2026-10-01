@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createPool } from "../src/db/pool.js";
 import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
+import * as summaryReader from "../src/modules/workspace/conversation-summary-reader.js";
 import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
 import { createTestDatabase, type TestDatabase } from "./support/database.js";
 
@@ -78,6 +80,66 @@ describe("conversation summary query budget", () => {
       );
     } finally {
       queries.mockRestore();
+    }
+  });
+
+  it("reads a conversation page and its details from one repeatable-read snapshot", async () => {
+    const conversationId = randomUUID();
+    const authorId = randomUUID();
+    const messageId = randomUUID();
+    await database.pool.query(
+      "INSERT INTO users (id, email, username, display_name) VALUES ($1, 'author@example.test', 'author', 'Author')",
+      [authorId],
+    );
+    await database.pool.query(
+      "INSERT INTO workspace_memberships (workspace_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
+      [workspaceId, authorId],
+    );
+    await database.pool.query(
+      "INSERT INTO conversations (id, workspace_id, kind, name, slug, channel_access, created_by) VALUES ($1, $2, 'channel', 'Snapshot', 'snapshot', 'workspace', $3)",
+      [conversationId, workspaceId, userId],
+    );
+    const writer = createPool({ url: database.url, poolSize: 1 });
+    const readDetails = summaryReader.readConversationSummaries;
+    const details = vi
+      .spyOn(summaryReader, "readConversationSummaries")
+      .mockImplementationOnce(async (client, actorId, conversations) => {
+        expect(conversations.map((conversation) => conversation.id)).toEqual([conversationId]);
+        // Commit after the page is selected and before any batched detail query starts.
+        await writer.query(
+          `INSERT INTO messages (
+             id, workspace_id, conversation_id, conversation_sequence,
+             committed_workspace_sequence, client_message_id, request_fingerprint,
+             author_id, body, body_format
+           ) VALUES ($1, $2, $3, 1, 1, $4, decode(repeat('00', 32), 'hex'), $5,
+                     'arrived after page selection', 'hype_comms_markdown_v1')`,
+          [messageId, workspaceId, conversationId, randomUUID(), authorId],
+        );
+        await writer.query(
+          "INSERT INTO message_mentions (message_id, mentioned_user_id) VALUES ($1, $2)",
+          [messageId, userId],
+        );
+        return readDetails(client, actorId, conversations);
+      });
+    try {
+      const repository = new WorkspaceRepository(database.pool);
+      const page = await repository.listConversations(identity, undefined, 1);
+      expect(details).toHaveBeenCalledOnce();
+      expect(page.conversations[0]).toMatchObject({
+        lastMessage: null,
+        unreadCount: 0,
+        mentionCount: 0,
+      });
+      details.mockRestore();
+      const nextPage = await repository.listConversations(identity, undefined, 1);
+      expect(nextPage.conversations[0]).toMatchObject({
+        lastMessage: { id: messageId },
+        unreadCount: 1,
+        mentionCount: 1,
+      });
+    } finally {
+      details.mockRestore();
+      await writer.end();
     }
   });
 });
