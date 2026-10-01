@@ -403,6 +403,7 @@ describeWithPostgres("WorkspaceAuthorization", () => {
         readonly ephemeralActivity?: boolean;
         readonly groupDirectMessages?: boolean;
         readonly humansOnlyChannels?: boolean;
+        readonly systemChannels?: boolean;
       };
     } = {},
   ): Promise<string> {
@@ -414,12 +415,13 @@ describeWithPostgres("WorkspaceAuthorization", () => {
          (id, workspace_id, user_id, device_session_id, agent_token_id, token_hash,
           created_at, expires_at, reaction_events, read_state_events, task_events,
           announcement_channels, participated_thread_notifications, message_retract_events,
-          member_profiles, ephemeral_activity, group_direct_messages, humans_only_channels)
+          member_profiles, ephemeral_activity, group_direct_messages, humans_only_channels,
+          system_channels)
        VALUES (
          $1, $2, $3, $4, $5, $6,
          ${options.createdAtSql ?? "clock_timestamp()"},
          ${options.expiresAtSql ?? "clock_timestamp() + interval '1 minute'"},
-         $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+         $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
        )`,
       [
         randomUUID(),
@@ -438,6 +440,7 @@ describeWithPostgres("WorkspaceAuthorization", () => {
         capabilities.ephemeralActivity === true,
         capabilities.groupDirectMessages === true,
         capabilities.humansOnlyChannels === true,
+        capabilities.systemChannels === true,
       ],
     );
     return token;
@@ -802,6 +805,7 @@ describeWithPostgres("WorkspaceAuthorization", () => {
         ephemeralActivity: false,
         groupDirectMessages: false,
         humansOnlyChannels: false,
+        systemChannels: false,
       });
       await expect(authorization.consumeRealtimeTicket(issued)).resolves.toBeNull();
 
@@ -817,6 +821,7 @@ describeWithPostgres("WorkspaceAuthorization", () => {
           ephemeralActivity: true,
           groupDirectMessages: true,
           humansOnlyChannels: true,
+          systemChannels: true,
         },
       });
       await expect(authorization.consumeRealtimeTicket(capable)).resolves.toEqual({
@@ -834,6 +839,7 @@ describeWithPostgres("WorkspaceAuthorization", () => {
         ephemeralActivity: true,
         groupDirectMessages: true,
         humansOnlyChannels: true,
+        systemChannels: true,
       });
     });
 
@@ -886,12 +892,14 @@ describeWithPostgres("WorkspaceAuthorization", () => {
         userId: agentId,
         sessionId: null,
         agentTokenId,
+        capabilities: { systemChannels: true },
       });
       await expect(authorization.consumeRealtimeTicket(issued)).resolves.toMatchObject({
         workspaceId,
         userId: agentId,
         deviceSessionId: null,
         agentTokenId,
+        systemChannels: true,
       });
 
       const revoked = await insertRealtimeTicket({

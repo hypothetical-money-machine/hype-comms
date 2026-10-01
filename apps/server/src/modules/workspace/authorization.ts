@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
 import type { AuthenticatedIdentity } from "../identity/service.js";
+import { hashToken } from "../identity/tokens.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 
@@ -19,6 +19,7 @@ export interface ConversationRow extends QueryResultRow {
   channel_access: "workspace" | "members" | null;
   human_only: boolean;
   channel_mode: "chat" | "announcement" | null;
+  is_system: boolean;
   is_archived: boolean;
   created_by: string | null;
   dm_user_low_id: string | null;
@@ -43,6 +44,7 @@ interface TicketRow extends QueryResultRow {
   ephemeral_activity: boolean;
   group_direct_messages: boolean;
   humans_only_channels: boolean;
+  system_channels: boolean;
 }
 
 interface RealtimeSessionRow extends QueryResultRow {
@@ -263,7 +265,7 @@ export class WorkspaceAuthorization {
   }
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
-    const hash = createHash("sha256").update(token).digest();
+    const hash = hashToken(token);
     const result = await this.pool.query<TicketRow>(
       `WITH consumed_ticket AS (
          UPDATE realtime_tickets AS ticket
@@ -284,7 +286,8 @@ export class WorkspaceAuthorization {
                    ticket.member_profiles,
                    ticket.ephemeral_activity,
                    ticket.group_direct_messages,
-                   ticket.humans_only_channels
+                   ticket.humans_only_channels,
+                   ticket.system_channels
        )
        SELECT ticket.workspace_id,
               ticket.user_id,
@@ -299,7 +302,8 @@ export class WorkspaceAuthorization {
               ticket.member_profiles,
               ticket.ephemeral_activity,
               ticket.group_direct_messages,
-              ticket.humans_only_channels
+              ticket.humans_only_channels,
+              ticket.system_channels
          FROM consumed_ticket AS ticket
          JOIN workspace_memberships AS membership
            ON membership.workspace_id = ticket.workspace_id
@@ -356,6 +360,7 @@ export class WorkspaceAuthorization {
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
         humansOnlyChannels: row.humans_only_channels,
+        systemChannels: row.system_channels,
       };
     }
     if (row.device_session_id === null && row.agent_token_id !== null) {
@@ -374,6 +379,7 @@ export class WorkspaceAuthorization {
         ephemeralActivity: row.ephemeral_activity,
         groupDirectMessages: row.group_direct_messages,
         humansOnlyChannels: row.humans_only_channels,
+        systemChannels: row.system_channels,
       };
     }
     throw new Error("Consumed realtime ticket has an invalid credential binding");

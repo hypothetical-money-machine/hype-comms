@@ -71,7 +71,6 @@ export class ThemeController {
   #setTail: Promise<void> = Promise.resolve();
   #nativeThemeSubscribed = false;
   #suppressNativeUpdates = false;
-  #acceptingChanges = true;
   #disposed = false;
 
   readonly #handleNativeThemeUpdated = (): void => {
@@ -134,9 +133,6 @@ export class ThemeController {
   setPreference(preference: ThemePreference): Promise<ThemeState> {
     try {
       this.#assertReady();
-      if (!this.#acceptingChanges) {
-        throw new Error("ThemeController is shutting down");
-      }
       const parsedPreference = themePreferenceSchema.parse(preference);
       if (parsedPreference !== "system") {
         getThemeDefinition(parsedPreference);
@@ -155,9 +151,6 @@ export class ThemeController {
   setDesign(design: ThemeDesign): Promise<ThemeState> {
     try {
       this.#assertReady();
-      if (!this.#acceptingChanges) {
-        throw new Error("ThemeController is shutting down");
-      }
       const parsedDesign = themeDesignSchema.parse(design);
       if (parsedDesign.preference !== "system") {
         getThemeDefinition(parsedDesign.preference);
@@ -176,9 +169,6 @@ export class ThemeController {
   resolveSystemState(): Promise<ThemeState> {
     try {
       this.#assertReady();
-      if (!this.#acceptingChanges) {
-        throw new Error("ThemeController is shutting down");
-      }
       return this.#enqueueSet(() => this.#resolveSystemState());
     } catch (error) {
       return Promise.reject(error);
@@ -198,7 +188,6 @@ export class ThemeController {
     if (this.#disposed) {
       return;
     }
-    this.#acceptingChanges = false;
     this.#disposed = true;
     if (this.#nativeThemeSubscribed) {
       this.#nativeTheme.off("updated", this.#handleNativeThemeUpdated);
@@ -289,33 +278,27 @@ export class ThemeController {
     }
 
     const expectedSource = nativeThemeSourceForPreference(current.preference);
-    let shouldRestoreSource = false;
     let shouldUseDarkColors = false;
     let failure: unknown;
     this.#suppressNativeUpdates = true;
     try {
-      // A setter can fail after partially changing a native adapter, so restoration is required
-      // from the moment the probe is attempted, not only after it returns successfully.
-      shouldRestoreSource = true;
       this.#nativeTheme.themeSource = "system";
       shouldUseDarkColors = this.#nativeTheme.shouldUseDarkColors;
     } catch (error) {
       failure = error;
     } finally {
-      if (shouldRestoreSource) {
-        try {
-          // Derive this from canonical state rather than the adapter's observed source. If an
-          // earlier restoration failed and left nativeTheme on System, a retry must repair it.
-          this.#nativeTheme.themeSource = expectedSource;
-        } catch (restoreError) {
-          failure =
-            failure === undefined
-              ? restoreError
-              : new AggregateError(
-                  [failure, restoreError],
-                  "System appearance resolution failed and the native appearance could not be restored",
-                );
-        }
+      try {
+        // Restore even if the probe setter failed after partially changing the adapter. Derive
+        // the source from canonical state so retries also repair a failed earlier restoration.
+        this.#nativeTheme.themeSource = expectedSource;
+      } catch (restoreError) {
+        failure =
+          failure === undefined
+            ? restoreError
+            : new AggregateError(
+                [failure, restoreError],
+                "System appearance resolution failed and the native appearance could not be restored",
+              );
       }
       this.#suppressNativeUpdates = false;
     }

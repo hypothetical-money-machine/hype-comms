@@ -20,6 +20,7 @@ import type {
   CreateChannelOperation,
   CreateTaskOperation,
   DirectConversationRequest,
+  DevicePreferences,
   ListConversationsQuery,
   ListConversationsResponse,
   ListAgentEnrollmentsResponse,
@@ -61,6 +62,7 @@ import type {
   ScopedProductRealtimeEvent,
 } from "@hype-comms/contracts";
 
+import { DEFAULT_DEVICE_PREFERENCES } from "../../shared/device-preferences";
 import type {
   DesktopApi,
   DesktopPlatform,
@@ -1001,6 +1003,7 @@ class FakeDesktopApi implements DesktopApi {
     resolvedColorScheme: "dark",
   };
   readonly initialCompactMode = false;
+  readonly initialDevicePreferences = DEFAULT_DEVICE_PREFERENCES;
   bootstrap: HumanWorkspaceBootstrapResponse;
   cryptoStatus: CacheCryptoStatus = {
     mode: "memory_only",
@@ -1234,6 +1237,18 @@ class FakeDesktopApi implements DesktopApi {
 
   onCompactModeChanged(): () => void {
     throw new Error("The runtime test does not observe compact mode");
+  }
+
+  async getDevicePreferences(): Promise<DevicePreferences> {
+    throw new Error("The runtime test does not report device preferences");
+  }
+
+  async updateDevicePreferences(): Promise<DevicePreferences> {
+    throw new Error("The runtime test does not update device preferences");
+  }
+
+  onDevicePreferencesChanged(): () => void {
+    throw new Error("The runtime test does not observe device preferences");
   }
 
   async getAiChannelState(): Promise<AiChannelState> {
@@ -2122,6 +2137,69 @@ describe("WorkspaceRuntime", () => {
       conversationId: CONVERSATION_ID,
       lastReadMessageId: OWN_MESSAGE_ID,
     });
+  });
+
+  it("marks an unselected conversation as read using its last message and clears unreads", async () => {
+    const secondConversationId = "20000000-0000-4000-8000-000000000002";
+    const secondMessageId = "20000000-0000-4000-8000-000000000003";
+    const initialBootstrap = bootstrapAt("10");
+    const secondMessage: Message = {
+      ...peerMessage,
+      id: secondMessageId,
+      conversationId: secondConversationId,
+      conversationSequence: "5",
+    };
+    const secondSummary: ConversationSummary = {
+      ...channel(secondConversationId, "second-channel"),
+      lastMessage: secondMessage,
+      unreadCount: 3,
+      mentionCount: 1,
+    };
+    const bootstrapWithTwo: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [...initialBootstrap.conversations, secondSummary],
+    };
+    const api = new FakeDesktopApi(bootstrapWithTwo);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
+
+    runtime.markConversationAsRead(secondConversationId);
+
+    const updatedSummary = runtime.state.bootstrap?.conversations.find(
+      (c) => c.conversation.id === secondConversationId,
+    );
+    expect(updatedSummary?.unreadCount).toBe(0);
+    expect(updatedSummary?.mentionCount).toBe(0);
+
+    await settle(
+      () => api.readCursorRequests.length === 1,
+      "read cursor request for second conversation",
+    );
+    expect(api.readCursorRequests[0]).toEqual({
+      conversationId: secondConversationId,
+      lastReadMessageId: secondMessageId,
+    });
+  });
+
+  it("does nothing when marking a conversation as read that has 0 unreads", async () => {
+    const initialBootstrap = bootstrapAt("10");
+    const zeroUnreadsSummary: ConversationSummary = {
+      ...initialBootstrap.conversations[0]!,
+      unreadCount: 0,
+      mentionCount: 0,
+    };
+    const bootstrap: HumanWorkspaceBootstrapResponse = {
+      ...initialBootstrap,
+      conversations: [zeroUnreadsSummary],
+    };
+    const api = new FakeDesktopApi(bootstrap);
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+
+    runtime.markConversationAsRead(CONVERSATION_ID);
+    expect(api.readCursorRequests).toHaveLength(0);
   });
 
   it("retries a visible read target after a transient cursor failure", async () => {
@@ -4457,6 +4535,40 @@ describe("WorkspaceRuntime", () => {
 
     expect(api.historyRequests).toEqual([CONVERSATION_ID, selfDmId, peerDmId, groupDmId]);
     expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
+  });
+
+  it("hydrates an announcement channel without asking for a task list it cannot have", async () => {
+    const announcementId = "10000000-0000-4000-8000-0000000000c1";
+    const builtInId = "10000000-0000-4000-8000-0000000000c2";
+    const announcement = channel(announcementId, "company-news");
+    const builtIn = channel(builtInId, "hype/release-notes");
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          {
+            ...announcement,
+            conversation: { ...announcement.conversation, channelMode: "announcement" },
+          },
+          {
+            ...builtIn,
+            conversation: {
+              ...builtIn.conversation,
+              channelMode: "announcement",
+              isBuiltIn: true,
+            },
+          },
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+
+    await runtime.start(session);
+
+    // The server rejects tasks for an announcement channel, so requesting one would fail the
+    // whole snapshot and leave the workspace stuck loading.
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, announcementId, builtInId]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
   });
 
   it.each([
