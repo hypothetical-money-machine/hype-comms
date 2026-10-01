@@ -27,6 +27,7 @@ import {
   type PresentedNotificationHandle,
 } from "./notification-presenter";
 import { NotificationSettingsController } from "./notification-settings-controller";
+import { NotificationProjectionRepairCoordinator } from "./notification-projection-repair";
 import {
   PendingNotificationAuthorizationBarrier,
   settlePendingNotificationAuthorization,
@@ -1399,4 +1400,76 @@ it("replaces the notification replay baseline on epoch change and ignores late o
   });
   expect(harness.settings.state).toEqual(settingsBefore);
   harness.controller.shutdown();
+});
+
+it("supersedes an old member repair when the notification replay epoch changes", async () => {
+  const harness = createHarness();
+  let resolveStale!: (value: { members: User[] }) => void;
+  let resolveFresh!: (value: { members: User[] }) => void;
+  const stale = new Promise<{ members: User[] }>((resolve) => {
+    resolveStale = resolve;
+  });
+  const fresh = new Promise<{ members: User[] }>((resolve) => {
+    resolveFresh = resolve;
+  });
+  const members = vi
+    .fn()
+    .mockImplementationOnce(() => stale)
+    .mockImplementationOnce(() => fresh);
+  const coordinator = new NotificationProjectionRepairCoordinator({
+    transport: {
+      members,
+      conversations: async () => ({
+        conversations: [conversationSummary()],
+        nextCursor: null,
+        hasMore: false,
+      }),
+    },
+    target: harness.controller,
+    getScope: () => ({ sessionGeneration: 1, userId: USER_ID, workspaceId: WORKSPACE_ID }),
+    onFailure: vi.fn(),
+  });
+  harness.repair.mockImplementation((reason: "members" | "conversations") => {
+    void coordinator.request(reason);
+  });
+  const repairing = coordinator.request("members");
+  await Promise.resolve();
+  const epoch = "eeeeeeee-0000-4000-8000-000000000002";
+  const freshAuthor = { ...AUTHOR, displayName: "Current epoch author" };
+  try {
+    harness.controller.startSession({
+      sessionGeneration: 1,
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      bootstrapCursor: testPosition("20", epoch),
+    });
+    // Main seeds the new bootstrap directory before the obsolete HTTP repair completes.
+    harness.controller.replaceMembers([CURRENT_USER, freshAuthor]);
+    harness.controller.replaceConversations([conversationSummary()]);
+    resolveStale({ members: [CURRENT_USER, AUTHOR] });
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    expect(members).toHaveBeenCalledTimes(2);
+    harness.controller.handleEvent({ ...connectedEvent(), position: testPosition("20", epoch) });
+    harness.controller.handleEvent({
+      ...messageEvent({ eventNumber: 1, sequence: 21 }),
+      position: testPosition("21", epoch),
+    });
+    expect((harness.presenter as FakePresenter).presentations[0]?.presentation.title).toBe(
+      "Current epoch author",
+    );
+    resolveFresh({ members: [CURRENT_USER, freshAuthor] });
+    await expect(repairing).resolves.toBe("applied");
+    harness.controller.handleEvent({
+      ...messageEvent({ eventNumber: 2, sequence: 22 }),
+      position: testPosition("22", epoch),
+    });
+    expect((harness.presenter as FakePresenter).presentations[1]?.presentation.title).toBe(
+      "Current epoch author",
+    );
+  } finally {
+    resolveStale({ members: [CURRENT_USER, AUTHOR] });
+    resolveFresh({ members: [CURRENT_USER, freshAuthor] });
+    await repairing;
+    harness.controller.shutdown();
+  }
 });

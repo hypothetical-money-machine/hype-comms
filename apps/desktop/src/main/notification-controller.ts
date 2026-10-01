@@ -284,7 +284,7 @@ export class NotificationController {
         this.#handledEventOrder = [];
         this.#armedConnectionId = null;
         this.#conversations.clear();
-        this.#members.clear();
+        this.#disableMemberProjection();
         this.#watermark = bootstrapCursor;
       } else {
         this.#watermark = maxPosition(this.#watermark, bootstrapCursor);

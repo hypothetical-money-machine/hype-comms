@@ -1,4 +1,3 @@
-import { reportMainProcessError } from "./main-process-log";
 import { notifyStateListeners } from "./state-listeners";
 import path from "node:path";
 
@@ -30,6 +29,7 @@ import {
   type CreateAiAgentHost,
 } from "./ai-agent-host";
 import type { AiChannelPreference, AiChannelPreferenceStore } from "./ai-channel-preference-store";
+import { reportMainProcessError } from "./main-process-log";
 
 const MAX_ENTRIES = 200;
 const MAX_PLAN_ENTRIES = 100;
