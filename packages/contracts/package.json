@@ -14,20 +14,19 @@
     }
   },
   "scripts": {
-    "build": "tsc --build",
-    "dev": "tsc -p tsconfig.json --watch",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "test": "tsc -b && vitest run",
+    "typecheck": "tsc -b"
   },
   "engines": {
     "node": ">=24"
   },
-  "peerDependencies": {
-    "zod": "4.4.3"
-  },
   "devDependencies": {
     "typescript": "6.0.3",
-    "vitest": "4.1.11",
+    "vitest": "4.1.11"
+  },
+  "dependencies": {
     "zod": "4.4.3"
   }
 }

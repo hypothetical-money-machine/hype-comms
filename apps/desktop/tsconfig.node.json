@@ -11,15 +11,24 @@
     "noFallthroughCasesInSwitch": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    // Deferred: exactOptionalPropertyTypes is scheduled after a renderer refactor, not this slice.
-    "exactOptionalPropertyTypes": false
+    "exactOptionalPropertyTypes": false,
+    "verbatimModuleSyntax": false,
+    "isolatedModules": true,
+    "resolveJsonModule": true
   },
-  "references": [{ "path": "../../packages/contracts" }, { "path": "../../packages/api-client" }],
   "include": [
     "electron.vite.config.ts",
     "vitest.config.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
     "src/shared/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/api-client"
+    }
   ]
 }

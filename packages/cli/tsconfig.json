@@ -1,18 +1,20 @@
 {
-  "extends": "../../tsconfig.base.json",
+  "extends": "../../tsconfig.node.json",
   "compilerOptions": {
-    "target": "ES2024",
-    "lib": ["ES2024"],
     "rootDir": "src",
-    "outDir": "dist",
-    // build.mjs recreates dist from scratch, so the marker lives beside tsconfig; the bundle is
-    // always regenerated and nothing consumes the tsc emit, so a stale marker cannot hide output.
-    "tsBuildInfoFile": ".tsbuildinfo",
-    "declarationMap": true,
     "composite": true,
-    "rewriteRelativeImportExtensions": true
+    "rewriteRelativeImportExtensions": true,
+    "noEmit": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
   },
-  "references": [{ "path": "../../packages/contracts" }, { "path": "../../packages/api-client" }],
   "include": ["src/**/*.ts"],
-  "exclude": ["dist", "node_modules", "test"]
+  "exclude": ["dist", "node_modules", "test"],
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../api-client"
+    }
+  ]
 }

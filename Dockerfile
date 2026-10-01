@@ -14,7 +14,7 @@ ENV npm_config_update_notifier=false
 # Build: install every dependency needed to compile, then emit dist output.
 # ---------------------------------------------------------------------------
 FROM base AS build
-COPY .npmrc package.json package-lock.json tsconfig.base.json ./
+COPY .npmrc package.json package-lock.json tsconfig.base.json tsconfig.node.json ./
 COPY packages/contracts/package.json ./packages/contracts/
 COPY apps/server/package.json ./apps/server/
 COPY apps/desktop/package.json ./apps/desktop/

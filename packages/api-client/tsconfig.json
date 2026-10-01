@@ -1,13 +1,16 @@
 {
-  "extends": "../../tsconfig.base.json",
+  "extends": "../../tsconfig.node.json",
   "compilerOptions": {
-    "target": "ES2024",
     "lib": ["ES2024", "DOM"],
     "rootDir": "src",
     "outDir": "dist",
     "composite": true,
-    "exactOptionalPropertyTypes": true
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "references": [{ "path": "../contracts" }],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/contracts"
+    }
+  ]
 }
