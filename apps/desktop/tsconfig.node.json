@@ -14,7 +14,7 @@
     // Deferred: exactOptionalPropertyTypes is scheduled after a renderer refactor, not this slice.
     "exactOptionalPropertyTypes": false
   },
-  "references": [{ "path": "../../packages/contracts" }],
+  "references": [{ "path": "../../packages/contracts" }, { "path": "../../packages/api-client" }],
   "include": [
     "electron.vite.config.ts",
     "vitest.config.ts",
