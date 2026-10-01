@@ -1,15 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import {
-  conversationAudience,
-  conversationVisibilitySql,
-  requireVisibleConversation,
-} from "./conversation-access.js";
+import { conversationAudience, requireVisibleConversation } from "./conversation-access.js";
 import { ConversationEventWriter } from "./conversation-events.js";
 import { UUID_PATTERN } from "./pagination.js";
 import { WorkspaceTaskOperations } from "./task-operations.js";
 import { mapTask, type TaskRow } from "./task-records.js";
 import { runWorkspaceTransaction } from "./transaction.js";
-import type { AuthenticatedTaskIdentity } from "./workspace-identity.js";
 
 import {
   addReactionResponseSchema,
@@ -103,11 +98,6 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import { ApiError } from "../../errors.js";
-import type { AuthenticatedIdentity } from "../identity/service.js";
-import { hashToken } from "../identity/tokens.js";
-import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
-import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
-import type { SystemBulletin } from "../system-channels/release-notes.js";
 import {
   ATTACHMENT_UPLOAD_TTL_MS,
   isRejectedAttachment,
@@ -116,6 +106,15 @@ import {
   sha256Hex,
   type AttachmentStore,
 } from "./file-store.js";
+import { hashToken } from "../identity/tokens.js";
+import type { AuthenticatedIdentity } from "../identity/service.js";
+import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
+import {
+  conversationVisibilitySql,
+  WorkspaceAuthorization,
+  type AuthenticatedTaskIdentity,
+  type ConsumedRealtimeTicket,
+} from "./authorization.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import {
   fingerprintApiRequest,
@@ -127,13 +126,8 @@ import {
   insertSyncEventWithSequence,
   nextWorkspaceSequence,
 } from "./sync-events.js";
-
-const REALTIME_TICKET_TTL_MS = 30_000;
-const SYNC_RETENTION_DAYS = 90;
-const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
-const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
-const POSTGRES_REAL_MAX = 3.4028234663852886e38;
-
+import type { SystemBulletin } from "../system-channels/release-notes.js";
+import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
 import {
   readConversationSummaries,
   readUnreadCounts,
@@ -150,6 +144,12 @@ import {
   type MessageRow,
   type ReadCursorRow,
 } from "./records.js";
+
+const REALTIME_TICKET_TTL_MS = 30_000;
+const SYNC_RETENTION_DAYS = 90;
+const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
+const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const POSTGRES_REAL_MAX = 3.4028234663852886e38;
 
 interface WorkspaceRow extends QueryResultRow {
   id: string;
@@ -288,36 +288,6 @@ interface EventRow extends QueryResultRow {
   conversation_human_only: boolean;
 }
 
-interface TicketRow extends QueryResultRow {
-  workspace_id: string;
-  user_id: string;
-  device_session_id: string | null;
-  agent_token_id: string | null;
-  reaction_events: boolean;
-  read_state_events: boolean;
-  task_events: boolean;
-  announcement_channels: boolean;
-  participated_thread_notifications: boolean;
-  message_retract_events: boolean;
-  member_profiles: boolean;
-  ephemeral_activity: boolean;
-  group_direct_messages: boolean;
-  humans_only_channels: boolean;
-  system_channels: boolean;
-}
-
-interface RealtimeSessionRow extends QueryResultRow {
-  revoked: boolean;
-  expired: boolean;
-  membership_inactive: boolean;
-}
-
-interface RealtimeAgentRow extends QueryResultRow {
-  revoked: boolean;
-  disabled: boolean;
-  membership_inactive: boolean;
-}
-
 /** One bounded page of conversation summaries plus the keyset cursor that follows it. */
 interface ConversationPage {
   readonly conversations: ConversationSummary[];
@@ -331,6 +301,8 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
+  /** Test hook after search establishes its access and message snapshot. */
+  readonly afterSearchVisibilityRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
@@ -367,7 +339,7 @@ export interface AnnouncementAuditRecord {
   readonly reason?: string | undefined;
 }
 
-export type ConsumedRealtimeTicket = RealtimePrincipal;
+export type { ConsumedRealtimeTicket } from "./authorization.js";
 
 export interface WorkspacePrincipal {
   readonly workspaceId: string;
@@ -434,6 +406,16 @@ function mapStoredConversation(row: ConversationRow): Conversation {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+// Preserve id::text equality: PostgreSQL prints UUIDs in canonical lowercase form. Guard the
+// payload cast so malformed or noncanonical stored references stay invisible instead of failing
+// the whole sync page, while allowing the message primary-key index to serve each lookup.
+function canonicalUuidSql(expression: string): string {
+  return `CASE
+    WHEN ${expression} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN (${expression})::uuid
+  END`;
 }
 
 /**
@@ -685,6 +667,7 @@ function mentionPattern(username: string): RegExp {
 export class WorkspaceRepository {
   private readonly tasks: WorkspaceTaskOperations;
   private readonly events: ConversationEventWriter;
+  private readonly authz: WorkspaceAuthorization;
 
   constructor(
     private readonly pool: Pool,
@@ -692,6 +675,7 @@ export class WorkspaceRepository {
   ) {
     this.events = new ConversationEventWriter(this.announcementChannelsEnabled);
     this.tasks = new WorkspaceTaskOperations(pool, this.events);
+    this.authz = new WorkspaceAuthorization(pool);
   }
 
   get announcementChannelsEnabled(): boolean {
@@ -799,19 +783,11 @@ export class WorkspaceRepository {
     conversationIds: readonly string[],
     supported: boolean,
   ): Promise<void> {
-    if (supported || conversationIds.length === 0) return;
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT EXISTS (
-         SELECT 1
-           FROM conversations AS conversation
-          WHERE conversation.workspace_id = $1
-            AND conversation.id = ANY($3::uuid[])
-            AND conversation.kind = 'group_direct_message'
-            AND ${conversationVisibilitySql("conversation", "$2")}
-       ) AS blocked`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, conversationIds],
+    return this.authz.requireGroupDirectMessagesForConversations(
+      identity,
+      conversationIds,
+      supported,
     );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
   }
 
   async requireGroupDirectMessagesForMessages(
@@ -820,36 +796,12 @@ export class WorkspaceRepository {
     supported: boolean,
     eligibility: "any" | "active" | "retractable" = "any",
   ): Promise<void> {
-    if (supported || messageIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "active"
-        ? "AND message.deleted_at IS NULL"
-        : eligibility === "retractable"
-          ? `AND message.author_id = $2
-             AND (
-               message.deleted_at IS NOT NULL
-               OR (
-                 message.edited_at IS NULL
-                 AND clock_timestamp() <= message.created_at + interval '5 minutes'
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM messages AS message
-           JOIN conversations AS conversation
-             ON conversation.id = message.conversation_id
-            AND conversation.workspace_id = message.workspace_id
-          WHERE message.workspace_id = $1
-            AND message.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, messageIds],
+    return this.authz.requireGroupDirectMessagesForMessages(
+      identity,
+      messageIds,
+      supported,
+      eligibility,
     );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
   }
 
   async requireGroupDirectMessagesForAttachments(
@@ -858,44 +810,12 @@ export class WorkspaceRepository {
     supported: boolean,
     eligibility: "any" | "content-write" | "complete" = "any",
   ): Promise<void> {
-    if (supported || attachmentIds.length === 0) return;
-    const eligibilitySql =
-      eligibility === "content-write"
-        ? `AND attachment.uploaded_by = $2
-           AND attachment.status = 'pending'
-           AND (
-             attachment.upload_expires_at IS NULL
-             OR attachment.upload_expires_at > clock_timestamp()
-           )`
-        : eligibility === "complete"
-          ? `AND attachment.uploaded_by = $2
-             AND (
-               attachment.status = 'ready'
-               OR (
-                 attachment.status = 'pending'
-                 AND (
-                   attachment.upload_expires_at IS NULL
-                   OR attachment.upload_expires_at > clock_timestamp()
-                 )
-               )
-             )`
-          : "";
-    const result = await this.pool.query<{ blocked: boolean } & QueryResultRow>(
-      `SELECT (
-         count(*) = cardinality($3::uuid[])
-         AND bool_or(conversation.kind = 'group_direct_message')
-       ) AS blocked
-           FROM attachments AS attachment
-           JOIN conversations AS conversation
-             ON conversation.id = attachment.conversation_id
-            AND conversation.workspace_id = attachment.workspace_id
-          WHERE attachment.workspace_id = $1
-            AND attachment.id = ANY($3::uuid[])
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            ${eligibilitySql}`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id, attachmentIds],
+    return this.authz.requireGroupDirectMessagesForAttachments(
+      identity,
+      attachmentIds,
+      supported,
+      eligibility,
     );
-    if (result.rows[0]?.blocked) throw new GroupDirectClientUpgradeRequiredError();
   }
 
   /**
@@ -911,22 +831,12 @@ export class WorkspaceRepository {
     conversationId: string,
     includeGroupDirectMessages: boolean,
   ): Promise<boolean> {
-    const result = await this.pool.query<{ visible: boolean } & QueryResultRow>(
-      `SELECT EXISTS (
-         SELECT 1
-           FROM conversations AS conversation
-           JOIN workspace_memberships AS active_membership
-             ON active_membership.workspace_id = conversation.workspace_id
-            AND active_membership.user_id = $2
-            AND active_membership.status = 'active'
-          WHERE conversation.id = $3
-            AND conversation.workspace_id = $1
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            AND ($4::boolean OR conversation.kind <> 'group_direct_message')
-       ) AS visible`,
-      [workspaceId, userId, conversationId, includeGroupDirectMessages],
+    return this.authz.canViewConversation(
+      workspaceId,
+      userId,
+      conversationId,
+      includeGroupDirectMessages,
     );
-    return result.rows[0]?.visible ?? false;
   }
 
   /**
@@ -1466,16 +1376,24 @@ export class WorkspaceRepository {
                updated_at = clock_timestamp()`,
         [conversationId, identity.currentUser.workspaceId, memberId, input.role],
       );
-      const audienceAfter = await conversationAudience(client, conversation);
+      // For a members-access channel (the only kind #requireManagedChannel admits), the upsert
+      // only flips the target's own membership row live, and the target was validated as an
+      // active human/agent workspace member earlier in this transaction — so the post-upsert
+      // audience is the pre-upsert audience plus the target, and deriving it avoids a second
+      // audience query. #requireManagedChannel holds the conversation and workspace locks;
+      // normal channel mutations and workspace deactivations cannot commit in between.
       const action = current === undefined || current.left_at !== null ? "added" : "updated";
+      // Assemble the response before inserting the event. #requireManagedChannel has already
+      // acquired the workspace lock, so this ordering does not shorten the lock duration.
+      const channelMembers = await this.#channelMembers(client, identity, conversation);
       const event = await this.events.insert(client, identity, {
         type: "channel.membership_changed",
         conversation,
         payload: { memberId, action },
-        audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
+        audienceUserIds: [...new Set([...audienceBefore, memberId])],
       });
       return channelMembershipMutationResponseSchema.parse({
-        channelMembers: await this.#channelMembers(client, identity, conversation),
+        channelMembers,
         syncCursor: event.workspaceSequence,
       });
     });
@@ -1529,6 +1447,9 @@ export class WorkspaceRepository {
           RETURNING *`,
         [conversationId, memberId, identity.currentUser.user.id],
       );
+      // Read the post-removal member list before inserting events; it does not depend on those
+      // events. #requireManagedChannel has already acquired the workspace lock.
+      const channelMembers = await this.#channelMembers(client, identity, conversation);
       for (const row of unassigned.rows) {
         const task = mapTask(row);
         await this.events.insert(client, identity, {
@@ -1546,7 +1467,7 @@ export class WorkspaceRepository {
         audienceUserIds: [...new Set([...audienceBefore, ...audienceAfter])],
       });
       return channelMembershipMutationResponseSchema.parse({
-        channelMembers: await this.#channelMembers(client, identity, conversation),
+        channelMembers,
         syncCursor: event.workspaceSequence,
       });
     });
@@ -2803,57 +2724,75 @@ export class WorkspaceRepository {
     const queryHash = searchQueryHash(normalizedQuery);
     const cursor = decodeSearchCursor(after, queryHash);
     const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), MESSAGE_SEARCH_MAX_LIMIT);
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query<SearchMessageRow>(
-        `WITH search_query AS (
-           SELECT websearch_to_tsquery('simple', $3) AS value
+    return runWorkspaceTransaction(
+      this.pool,
+      async (client) => {
+        if (this.hooks.afterSearchVisibilityRead !== undefined) {
+          // Establish the repeatable-read snapshot before the test interleaves committed writes.
+          await client.query("SELECT 1");
+          await this.hooks.afterSearchVisibilityRead();
+        }
+        // Keep the access set in the database and compute it once before ranking. Sort only
+        // IDs and rank/sequence, then fetch bodies for the page to avoid sorting full messages.
+        const result = await client.query<SearchMessageRow>(
+          `WITH search_query AS (SELECT websearch_to_tsquery('simple', $2) AS value),
+         visible_conversations AS MATERIALIZED (
+           SELECT conversation.id
+             FROM conversations AS conversation
+            WHERE conversation.workspace_id = $1
+              AND ${conversationVisibilitySql("conversation", "$7")}
+              AND ($8::boolean OR conversation.kind <> 'group_direct_message')
+              AND ($9::boolean OR NOT conversation.is_system)
+         ), search_page AS (
+           SELECT message.id, message.committed_workspace_sequence,
+                  ts_rank_cd(message.search_vector, search_query.value) AS search_rank
+             FROM messages AS message
+             JOIN visible_conversations AS visible ON visible.id = message.conversation_id
+            CROSS JOIN search_query
+            WHERE message.workspace_id = $1
+              AND message.deleted_at IS NULL
+              AND message.search_vector @@ search_query.value
+              AND (
+                $3::real IS NULL
+                OR (
+                  ts_rank_cd(message.search_vector, search_query.value),
+                  message.committed_workspace_sequence,
+                  message.id
+                ) < ($3::real, $4::bigint, $5::uuid)
+              )
+            ORDER BY ts_rank_cd(message.search_vector, search_query.value) DESC,
+                     message.committed_workspace_sequence DESC,
+                     message.id DESC
+            LIMIT $6
          )
-         SELECT message.*,
-                ts_rank_cd(message.search_vector, search_query.value)::text AS search_rank
-           FROM messages AS message
-           JOIN conversations AS conversation ON conversation.id = message.conversation_id
-          CROSS JOIN search_query
-          WHERE message.workspace_id = $1
-            AND ${conversationVisibilitySql("conversation", "$2")}
-            AND ($8::boolean OR conversation.kind <> 'group_direct_message')
-            AND ($9::boolean OR NOT conversation.is_system)
-            AND message.deleted_at IS NULL
-            AND message.search_vector @@ search_query.value
-            AND (
-              $4::real IS NULL
-              OR (
-                ts_rank_cd(message.search_vector, search_query.value),
-                message.committed_workspace_sequence,
-                message.id
-              ) < ($4::real, $5::bigint, $6::uuid)
-            )
-          ORDER BY ts_rank_cd(message.search_vector, search_query.value) DESC,
-                   message.committed_workspace_sequence DESC,
-                   message.id DESC
-          LIMIT $7`,
-        [
-          identity.currentUser.workspaceId,
-          identity.currentUser.user.id,
-          normalizedQuery,
-          cursor?.rank ?? null,
-          cursor?.workspaceSequence ?? null,
-          cursor?.id ?? null,
-          pageLimit + 1,
-          includeGroupDirectMessages,
-          includeSystemChannels,
-        ],
-      );
-      const hasMore = result.rows.length > pageLimit;
-      const selected = result.rows.slice(0, pageLimit);
-      const last = selected.at(-1);
-      return messageSearchResponseSchema.parse({
-        results: selected.map((row) => ({ message: mapMessage(row) })),
-        nextCursor: hasMore && last !== undefined ? encodeSearchCursor(last, queryHash) : null,
-      });
-    } finally {
-      client.release();
-    }
+         SELECT message.*, search_page.search_rank::text AS search_rank
+           FROM search_page
+           JOIN messages AS message ON message.id = search_page.id
+          ORDER BY search_page.search_rank DESC,
+                   search_page.committed_workspace_sequence DESC,
+                   search_page.id DESC`,
+          [
+            identity.currentUser.workspaceId,
+            normalizedQuery,
+            cursor?.rank ?? null,
+            cursor?.workspaceSequence ?? null,
+            cursor?.id ?? null,
+            pageLimit + 1,
+            identity.currentUser.user.id,
+            includeGroupDirectMessages,
+            includeSystemChannels,
+          ],
+        );
+        const hasMore = result.rows.length > pageLimit;
+        const selected = result.rows.slice(0, pageLimit);
+        const last = selected.at(-1);
+        return messageSearchResponseSchema.parse({
+          results: selected.map((row) => ({ message: mapMessage(row) })),
+          nextCursor: hasMore && last !== undefined ? encodeSearchCursor(last, queryHash) : null,
+        });
+      },
+      { isolationLevel: "repeatable_read", readOnly: true },
+    );
   }
 
   listConversationTasks(
@@ -3587,7 +3526,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS created_message
-                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                       WHERE created_message.id = ${canonicalUuidSql("event.payload #>> '{message,id}'")}
                          AND created_message.workspace_id = event.workspace_id
                          AND created_message.deleted_at IS NULL
                     )
@@ -3597,7 +3536,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS reaction_message
-                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                       WHERE reaction_message.id = ${canonicalUuidSql("event.payload #>> '{reaction,messageId}'")}
                          AND reaction_message.workspace_id = event.workspace_id
                          AND reaction_message.deleted_at IS NULL
                     )
@@ -3731,124 +3670,7 @@ export class WorkspaceRepository {
   }
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
-    const hash = hashToken(token);
-    const result = await this.pool.query<TicketRow>(
-      `WITH consumed_ticket AS (
-         UPDATE realtime_tickets AS ticket
-            SET consumed_at = clock_timestamp()
-          WHERE ticket.token_hash = $1
-            AND ticket.consumed_at IS NULL
-            AND ticket.expires_at > clock_timestamp()
-         RETURNING ticket.workspace_id,
-                   ticket.user_id,
-                   ticket.device_session_id,
-                   ticket.agent_token_id,
-                   ticket.reaction_events,
-                   ticket.read_state_events,
-                   ticket.task_events,
-                   ticket.announcement_channels,
-                   ticket.participated_thread_notifications,
-                   ticket.message_retract_events,
-                   ticket.member_profiles,
-                   ticket.ephemeral_activity,
-                   ticket.group_direct_messages,
-                   ticket.humans_only_channels,
-                   ticket.system_channels
-       )
-       SELECT ticket.workspace_id,
-              ticket.user_id,
-              ticket.device_session_id,
-              ticket.agent_token_id,
-              ticket.reaction_events,
-              ticket.read_state_events,
-              ticket.task_events,
-              ticket.announcement_channels,
-              ticket.participated_thread_notifications,
-              ticket.message_retract_events,
-              ticket.member_profiles,
-              ticket.ephemeral_activity,
-              ticket.group_direct_messages,
-              ticket.humans_only_channels,
-              ticket.system_channels
-         FROM consumed_ticket AS ticket
-         JOIN workspace_memberships AS membership
-           ON membership.workspace_id = ticket.workspace_id
-          AND membership.user_id = ticket.user_id
-          AND membership.status = 'active'
-        WHERE (
-            (
-              ticket.device_session_id IS NOT NULL
-              AND ticket.agent_token_id IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM device_sessions AS session
-                 WHERE session.id = ticket.device_session_id
-                   AND session.user_id = ticket.user_id
-                   AND session.revoked_at IS NULL
-                   AND session.expires_at > clock_timestamp()
-              )
-            )
-            OR
-            (
-              ticket.device_session_id IS NULL
-              AND ticket.agent_token_id IS NOT NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM agent_tokens AS agent_token
-                  JOIN agents AS agent
-                    ON agent.user_id = agent_token.agent_user_id
-                   AND agent.workspace_id = agent_token.workspace_id
-                 WHERE agent_token.id = ticket.agent_token_id
-                   AND agent_token.workspace_id = ticket.workspace_id
-                   AND agent_token.agent_user_id = ticket.user_id
-                   AND agent_token.revoked_at IS NULL
-                   AND agent.disabled_at IS NULL
-              )
-            )
-          )`,
-      [hash],
-    );
-    const row = result.rows[0];
-    if (row === undefined) return null;
-    if (row.device_session_id !== null && row.agent_token_id === null) {
-      return {
-        workspaceId: row.workspace_id,
-        userId: row.user_id,
-        deviceSessionId: row.device_session_id,
-        agentTokenId: null,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
-      };
-    }
-    if (row.device_session_id === null && row.agent_token_id !== null) {
-      return {
-        workspaceId: row.workspace_id,
-        userId: row.user_id,
-        deviceSessionId: null,
-        agentTokenId: row.agent_token_id,
-        reactionEvents: row.reaction_events,
-        readStateEvents: row.read_state_events,
-        taskEvents: row.task_events,
-        announcementChannels: row.announcement_channels,
-        participatedThreadNotifications: row.participated_thread_notifications,
-        messageRetractEvents: row.message_retract_events,
-        memberProfiles: row.member_profiles,
-        ephemeralActivity: row.ephemeral_activity,
-        groupDirectMessages: row.group_direct_messages,
-        humansOnlyChannels: row.humans_only_channels,
-        systemChannels: row.system_channels,
-      };
-    }
-    throw new Error("Consumed realtime ticket has an invalid credential binding");
+    return this.authz.consumeRealtimeTicket(token);
   }
 
   /**
@@ -3861,51 +3683,7 @@ export class WorkspaceRepository {
   async revalidateRealtimePrincipal(
     principal: RealtimePrincipal,
   ): Promise<RealtimePrincipalRevalidation> {
-    if (principal.agentTokenId !== null) {
-      const result = await this.pool.query<RealtimeAgentRow>(
-        `SELECT token.revoked_at IS NOT NULL AS revoked,
-                agent.disabled_at IS NOT NULL AS disabled,
-                coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
-           FROM agent_tokens AS token
-           LEFT JOIN agents AS agent
-             ON agent.user_id = token.agent_user_id
-            AND agent.workspace_id = token.workspace_id
-           LEFT JOIN workspace_memberships AS membership
-             ON membership.user_id = token.agent_user_id
-            AND membership.workspace_id = token.workspace_id
-          WHERE token.id = $1
-            AND token.workspace_id = $2
-            AND token.agent_user_id = $3`,
-        [principal.agentTokenId, principal.workspaceId, principal.userId],
-      );
-      const row = result.rows[0];
-      if (row === undefined) return { status: "invalid", reason: "unknown_agent_token" };
-      if (row.revoked) return { status: "invalid", reason: "agent_token_revoked" };
-      if (row.disabled) return { status: "invalid", reason: "agent_disabled" };
-      if (row.membership_inactive) {
-        return { status: "invalid", reason: "membership_inactive" };
-      }
-      return { status: "valid" };
-    }
-
-    const result = await this.pool.query<RealtimeSessionRow>(
-      `SELECT session.revoked_at IS NOT NULL AS revoked,
-              session.expires_at <= clock_timestamp() AS expired,
-              coalesce(membership.status, 'revoked') <> 'active' AS membership_inactive
-         FROM device_sessions AS session
-         LEFT JOIN workspace_memberships AS membership
-           ON membership.user_id = session.user_id
-          AND membership.workspace_id = $2
-        WHERE session.id = $1
-          AND session.user_id = $3`,
-      [principal.deviceSessionId, principal.workspaceId, principal.userId],
-    );
-    const row = result.rows[0];
-    if (row === undefined) return { status: "invalid", reason: "unknown_session" };
-    if (row.revoked) return { status: "invalid", reason: "session_revoked" };
-    if (row.expired) return { status: "invalid", reason: "session_expired" };
-    if (row.membership_inactive) return { status: "invalid", reason: "membership_inactive" };
-    return { status: "valid" };
+    return this.authz.revalidateRealtimePrincipal(principal);
   }
 
   async deleteExpiredState(): Promise<readonly AttachmentCleanupFailure[]> {
@@ -4198,60 +3976,14 @@ export class WorkspaceRepository {
     client: PoolClient,
     identity: AuthenticatedIdentity,
   ): Promise<{ readonly role: "owner" | "member"; readonly kind: "human" | "agent" }> {
-    const result = await client.query<
-      { role: "owner" | "member"; kind: "human" | "agent" } & QueryResultRow
-    >(
-      `SELECT membership.role, user_account.kind
-         FROM workspace_memberships AS membership
-         JOIN users AS user_account ON user_account.id = membership.user_id
-        WHERE membership.workspace_id = $1
-          AND membership.user_id = $2
-          AND membership.status = 'active'
-          AND user_account.kind IN ('human', 'agent')
-        FOR UPDATE OF membership`,
-      [identity.currentUser.workspaceId, identity.currentUser.user.id],
-    );
-    const principal = result.rows[0];
-    if (principal === undefined) {
-      throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
-    }
-    // Existing membership mutations take the membership row before the workspace sequence row.
-    // This matches delivery and identity revocation, preventing a membership/workspace inversion.
-    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
-      identity.currentUser.workspaceId,
-    ]);
-    return principal;
+    return this.authz.requireActivePrincipal(client, identity);
   }
 
   async #requireHumansOnlyCreator(
     client: PoolClient,
     identity: AuthenticatedIdentity,
   ): Promise<{ readonly role: "owner" | "member"; readonly kind: "human" }> {
-    const result = await client.query<
-      {
-        user_id: string;
-        role: "owner" | "member";
-        status: "invited" | "active" | "revoked";
-        kind: "human";
-      } & QueryResultRow
-    >(
-      `SELECT membership.user_id, membership.role, membership.status, user_account.kind
-         FROM workspace_memberships AS membership
-         JOIN users AS user_account ON user_account.id = membership.user_id
-        WHERE membership.workspace_id = $1
-          AND user_account.kind = 'human'
-        ORDER BY membership.user_id
-        FOR UPDATE OF membership`,
-      [identity.currentUser.workspaceId],
-    );
-    const principal = result.rows.find((row) => row.user_id === identity.currentUser.user.id);
-    if (principal === undefined || principal.status !== "active") {
-      throw new ApiError(403, "FORBIDDEN", "Only humans can create humans-only channels");
-    }
-    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
-      identity.currentUser.workspaceId,
-    ]);
-    return { role: principal.role, kind: principal.kind };
+    return this.authz.requireHumansOnlyCreator(client, identity);
   }
 
   async #requireActiveConversationParticipants(
@@ -4259,33 +3991,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     memberIds: readonly string[],
   ): Promise<void> {
-    const actorId = identity.currentUser.user.id;
-    const participantIds = [...new Set([actorId, ...memberIds])].sort();
-    const result = await client.query<{ id: string } & QueryResultRow>(
-      `SELECT membership.user_id AS id
-         FROM workspace_memberships AS membership
-         JOIN users AS user_account ON user_account.id = membership.user_id
-        WHERE membership.workspace_id = $1
-          AND membership.user_id = ANY($2::uuid[])
-          AND membership.status = 'active'
-          AND user_account.kind IN ('human', 'agent')
-        ORDER BY membership.user_id
-        FOR UPDATE OF membership`,
-      [identity.currentUser.workspaceId, participantIds],
-    );
-    const activeIds = new Set(result.rows.map((row) => row.id));
-    if (!activeIds.has(actorId)) {
-      throw new ApiError(403, "FORBIDDEN", "Workspace unavailable");
-    }
-    if (memberIds.some((id) => !activeIds.has(id))) {
-      throw new ApiError(404, "NOT_FOUND", "One or more members were not found");
-    }
-    // Membership rows are locked in deterministic UUID order before the workspace row. Agent
-    // disable and human membership revocation use the same membership-before-workspace order, so
-    // a DM cannot be created with a participant who is concurrently leaving the workspace.
-    await client.query(`SELECT id FROM workspaces WHERE id = $1 FOR UPDATE`, [
-      identity.currentUser.workspaceId,
-    ]);
+    return this.authz.requireActiveConversationParticipants(client, identity, memberIds);
   }
 
   #auditAnnouncement(record: AnnouncementAuditRecord): void {
@@ -4302,28 +4008,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversationId: string,
   ): Promise<ConversationRow> {
-    // Membership mutations take message delivery's canonical conversation row lock before
-    // inspecting or changing conversation_memberships.
-    const conversation = await requireVisibleConversation(
-      client,
-      identity,
-      conversationId,
-      true,
-      true,
-    );
-    await this.#requireActivePrincipal(client, identity);
-    if (
-      conversation.kind !== "channel" ||
-      conversation.channel_access !== "members" ||
-      conversation.human_only
-    ) {
-      throw new ApiError(404, "NOT_FOUND", "Managed channel not found");
-    }
-    const role = await this.#membershipRole(client, identity, conversation);
-    if (role !== "owner") {
-      throw new ApiError(403, "FORBIDDEN", "Only a channel owner can manage members");
-    }
-    return conversation;
+    return this.authz.requireManagedChannel(client, identity, conversationId);
   }
 
   async #requireAnotherChannelOwner(
@@ -4331,23 +4016,7 @@ export class WorkspaceRepository {
     conversationId: string,
     excludedUserId: string,
   ): Promise<void> {
-    const result = await client.query(
-      `SELECT 1
-         FROM conversation_memberships AS membership
-         JOIN workspace_memberships AS workspace_membership
-           ON workspace_membership.workspace_id = membership.workspace_id
-          AND workspace_membership.user_id = membership.user_id
-        WHERE membership.conversation_id = $1
-          AND membership.user_id <> $2
-          AND membership.role = 'owner'
-          AND membership.left_at IS NULL
-          AND workspace_membership.status = 'active'
-        LIMIT 1`,
-      [conversationId, excludedUserId],
-    );
-    if (result.rowCount !== 1) {
-      throw new ApiError(409, "CONFLICT", "A channel must retain at least one owner");
-    }
+    return this.authz.requireAnotherChannelOwner(client, conversationId, excludedUserId);
   }
 
   async #channelMembers(
@@ -4524,16 +4193,7 @@ export class WorkspaceRepository {
     identity: AuthenticatedIdentity,
     conversation: ConversationRow,
   ): Promise<"owner" | "member" | null> {
-    if (conversation.kind === "direct_message") return null;
-    const result = await client.query<{ role: "owner" | "member" } & QueryResultRow>(
-      `SELECT role
-         FROM conversation_memberships
-        WHERE conversation_id = $1
-          AND user_id = $2
-          AND left_at IS NULL`,
-      [conversation.id, identity.currentUser.user.id],
-    );
-    return result.rows[0]?.role ?? null;
+    return this.authz.membershipRole(client, identity, conversation);
   }
 
   #reactionEmoji(input: string): ReactionEmoji {
