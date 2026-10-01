@@ -487,13 +487,23 @@ export class WorkspaceRuntime {
 
   subscribe(listener: (state: WorkspaceRuntimeState) => void): () => void {
     this.#listeners.add(listener);
-    listener(this.#state);
+    this.#notifyStateSubscriber(listener);
     return () => this.#listeners.delete(listener);
   }
 
   #setState(update: Partial<WorkspaceRuntimeState>): void {
     this.#state = { ...this.#state, ...update };
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
+  }
+
+  #notifyStateSubscriber(listener: (state: WorkspaceRuntimeState) => void): void {
+    try {
+      listener(this.#state);
+    } catch {
+      // Subscribers observe committed state; they cannot interrupt cache repair or each other.
+      // Their error messages may contain private renderer data, so report only a fixed diagnostic.
+      console.error("Workspace state subscriber failed");
+    }
   }
 
   #pruneCreatedMessageMentions(
@@ -808,7 +818,7 @@ export class WorkspaceRuntime {
     this.#historyHydrations.clear();
     this.#clearReadTargets();
     this.#state = INITIAL_STATE;
-    for (const listener of this.#listeners) listener(this.#state);
+    for (const listener of this.#listeners) this.#notifyStateSubscriber(listener);
   }
 
   #isActiveRealtimeScope(candidate: RealtimeSessionScope, generation: number): boolean {
@@ -3850,9 +3860,12 @@ export class WorkspaceRuntime {
     if (!this.#isProjectionCurrent(projection)) return;
     if (applied.status === "ignored") return;
     this.#syncCursor = applied.committedPosition;
+    const membersInvalidated = applied.changes.invalidated.some(
+      (entry) => entry.kind === "members",
+    );
+    if (membersInvalidated) this.#membersDirty = true;
     this.#publishCommittedEvent(event, applied);
-    if (applied.changes.invalidated.some((entry) => entry.kind === "members")) {
-      this.#membersDirty = true;
+    if (membersInvalidated) {
       await this.#refreshMembers(generation);
     }
     if (applied.changes.invalidated.some((entry) => entry.kind === "conversation_metadata")) {
