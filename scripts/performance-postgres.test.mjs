@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { finishPerformanceRuntime, removePerformanceRuntimeData } from "./performance-cleanup.mjs";
+import { finishPerformanceRuntime } from "./performance-cleanup.mjs";
 import { createPerformancePostgres } from "./performance-postgres.mjs";
 
 async function fixture() {
@@ -43,17 +43,26 @@ test("stops a timed-out PostgreSQL startup before deleting its runtime data", as
           scenarioError = error;
           throw error;
         } finally {
-          await finishPerformanceRuntime(async () => {
-            postgres.stop();
-            assert.equal(running, false);
-            actions.push("remove");
-            await removePerformanceRuntimeData(directory);
-          }, scenarioError);
+          await finishPerformanceRuntime(
+            {
+              stop: async () => {
+                postgres.stop();
+                assert.equal(running, false);
+                assert.equal(
+                  await readFile(path.join(directory, "postgres", "data"), "utf8"),
+                  "synthetic database",
+                );
+              },
+              directory,
+              result: { status: "failed", error: scenarioError.message },
+            },
+            scenarioError,
+          );
         }
       },
       (error) => error === startupError,
     );
-    assert.deepEqual(actions, ["start", "stop", "remove"]);
+    assert.deepEqual(actions, ["start", "stop"]);
     await assert.rejects(readFile(path.join(directory, "postgres", "data")), { code: "ENOENT" });
     assert.equal(await readFile(path.join(directory, "postgres.log"), "utf8"), "startup evidence");
   } finally {
@@ -85,11 +94,14 @@ test("preserves the startup error and runtime data when PostgreSQL shutdown fail
           scenarioError = error;
           throw error;
         } finally {
-          await finishPerformanceRuntime(async () => {
-            postgres.stop();
-            actions.push("remove");
-            await removePerformanceRuntimeData(directory);
-          }, scenarioError);
+          await finishPerformanceRuntime(
+            {
+              stop: () => postgres.stop(),
+              directory,
+              result: { status: "failed", error: scenarioError.message },
+            },
+            scenarioError,
+          );
         }
       },
       (error) => error === startupError,
@@ -100,19 +112,14 @@ test("preserves the startup error and runtime data when PostgreSQL shutdown fail
       "synthetic database",
     );
     assert.equal(report.mock.calls[0].arguments[1], shutdownError);
+    assert.deepEqual(JSON.parse(await readFile(path.join(directory, "results.json"), "utf8")), {
+      status: "failed",
+      error: startupError.message,
+      cleanupError: shutdownError.message,
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-});
-
-test("reports a shutdown failure after a successful scenario", async () => {
-  const shutdownError = new Error("shutdown timeout");
-  await assert.rejects(
-    finishPerformanceRuntime(async () => {
-      throw shutdownError;
-    }, null),
-    (error) => error === shutdownError,
-  );
 });
 
 test("does not stop an unattempted or already stopped PostgreSQL process", () => {

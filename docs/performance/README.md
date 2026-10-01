@@ -2,7 +2,7 @@
 
 [PR split verification](publication-validation.md) records branch checks, fresh native smoke results and their limits.
 
-Make a busy Hype Comms workspace feel as fast as a small one. The [baseline](evidence-2026-09-06.tar.gz) (`docs/performance/baseline-2026-09-06.md` in the archive) sets initial budgets; [retained results](evidence-2026-09-06.tar.gz) (`docs/performance/results-2026-09-06.md` in the archive) records measured gains and remaining work.
+Make a busy Hype Comms workspace feel as fast as a small one. The [baseline](evidence-2026-09-06.tar.gz) (`docs/performance/baseline-2026-09-06.md` in the archive) sets initial budgets; [retained results](results-2026-09-06.md) records measured gains and remaining work.
 
 Original JSON samples, investigation reports and screenshots are preserved byte-for-byte in [the evidence archive](evidence-2026-09-06.tar.gz). Extract it into a temporary directory to browse the original `docs/performance/README.md` and relative links. [SHA-256 hashes](evidence-sha256.json) identify every original report and result. The archive includes failed and rejected experiments for diagnosis; only complete runs support comparisons.
 

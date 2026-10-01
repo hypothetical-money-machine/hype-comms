@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import electron from "electron";
 import { _electron } from "playwright";
-import { finishPerformanceRuntime, removePerformanceRuntimeData } from "./performance-cleanup.mjs";
+import { finishPerformanceRuntime } from "./performance-cleanup.mjs";
 import { createPerformancePostgres } from "./performance-postgres.mjs";
 import { startCacheReadProbe, stopCacheReadProbe } from "./performance-cache-reads.mjs";
 import {
@@ -946,21 +946,21 @@ async function main() {
   } finally {
     process.removeListener("SIGINT", interrupt);
     process.removeListener("SIGTERM", interrupt);
-    await finishPerformanceRuntime(async () => {
-      for (const child of clients) await stop(child);
-      await stop(server);
-      if (rendererServer?.listening) await new Promise((resolve) => rendererServer.close(resolve));
-      postgres.stop();
-      await writeFile(
-        path.join(directory, "results.json"),
-        `${JSON.stringify(result, null, 2)}\n`,
-        {
-          mode: 0o600,
+    await finishPerformanceRuntime(
+      {
+        stop: async () => {
+          for (const child of clients) await stop(child);
+          await stop(server);
+          if (rendererServer?.listening)
+            await new Promise((resolve) => rendererServer.close(resolve));
+          postgres.stop();
         },
-      );
-      if (!options.keepRuntimeData) await removePerformanceRuntimeData(directory);
-      console.log(`Results: ${directory}/results.json`);
-    }, scenarioError);
+        directory,
+        result,
+        keepRuntimeData: options.keepRuntimeData,
+      },
+      scenarioError,
+    );
   }
 }
 
