@@ -1,7 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
-  AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS,
   AGENT_CONTEXT_PACK_MAX_BYTES,
   ATTACHMENT_MAX_BYTES,
   ATTACHMENTS_PER_MESSAGE_MAX,
@@ -15,7 +14,6 @@ import {
   REACTIONS_PER_MESSAGE_MAX,
   TASK_PAGE_MAX_LIMIT,
   addReactionResponseSchema,
-  agentWakeBootstrapResponseSchema,
   agentContextHistoryResponseSchema,
   attachmentSchema,
   completeFileUploadResponseSchema,
@@ -62,7 +60,6 @@ import {
   isPostgresBigintString,
   type AdvanceReadCursorResponse,
   type AddReactionResponse,
-  type AgentWakeBootstrapResponse,
   type AgentContextAuthor,
   type AgentContextHistoryResponse,
   type AgentContextLocation,
@@ -130,7 +127,8 @@ import {
   type AttachmentStore,
 } from "./file-store.js";
 import type { AuthenticatedBotIdentity } from "../bots/service.js";
-import type { AuthenticatedAgentIdentity, AuthenticatedIdentity } from "../identity/service.js";
+import { hashToken } from "../identity/tokens.js";
+import type { AuthenticatedIdentity } from "../identity/service.js";
 import type { RealtimePrincipal, RealtimePrincipalRevalidation } from "../realtime/auth.js";
 import { GroupDirectClientUpgradeRequiredError } from "./group-direct-capability.js";
 import {
@@ -211,11 +209,6 @@ interface ConversationMembershipRow extends QueryResultRow {
   joined_at: Date | string;
   left_at: Date | string | null;
   updated_at: Date | string;
-}
-
-interface AgentWakeConversationRow extends QueryResultRow {
-  id: string;
-  kind: "channel" | "direct_message";
 }
 
 interface ChannelMemberRow extends UserRow {
@@ -414,8 +407,6 @@ export interface WorkspaceRepositoryHooks {
    * its transaction snapshot.
    */
   readonly afterBootstrapCursorRead?: () => Promise<void>;
-  /** Test seam after the wake bootstrap establishes its high-water snapshot. */
-  readonly afterAgentWakeBootstrapCursorRead?: () => Promise<void>;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
   readonly announcementChannelsEnabled?: boolean;
   /** Requests the one-way cluster cutover; persisted availability remains authoritative afterward. */
@@ -547,6 +538,16 @@ function mapStoredConversation(row: ConversationRow): Conversation {
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
+}
+
+// Preserve id::text equality: PostgreSQL prints UUIDs in canonical lowercase form. Guard the
+// payload cast so malformed or noncanonical stored references stay invisible instead of failing
+// the whole sync page, while allowing the message primary-key index to serve each lookup.
+function canonicalUuidSql(expression: string): string {
+  return `CASE
+    WHEN ${expression} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    THEN (${expression})::uuid
+  END`;
 }
 
 function conversationVisibilitySql(
@@ -1129,52 +1130,6 @@ export class WorkspaceRepository {
             announcementChannels: workspace.announcement_channels_available,
             humansOnlyChannels: workspace.humans_only_channels_available,
           },
-        });
-      },
-      { isolationLevel: "repeatable_read", readOnly: true },
-    );
-  }
-
-  /**
-   * Establishes the future-only agent wake cursor and its visible conversation-kind projection in
-   * one repeatable-read snapshot. The query deliberately selects no summaries, messages, or bodies.
-   * The extra row distinguishes an exactly-full response from unsafe truncation.
-   */
-  async agentWakeBootstrap(
-    identity: AuthenticatedAgentIdentity,
-  ): Promise<AgentWakeBootstrapResponse> {
-    return this.#transaction(
-      async (client) => {
-        const highWaterCursor = await this.#highWater(client, identity.currentUser.workspaceId);
-        await this.hooks.afterAgentWakeBootstrapCursorRead?.();
-        const result = await client.query<AgentWakeConversationRow>(
-          `SELECT conversation.id, conversation.kind
-             FROM conversations AS conversation
-            WHERE conversation.workspace_id = $1
-              AND ${conversationVisibilitySql("conversation", "$2")}
-            ORDER BY conversation.id
-            LIMIT $3`,
-          [
-            identity.currentUser.workspaceId,
-            identity.currentUser.user.id,
-            AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS + 1,
-          ],
-        );
-        if (result.rows.length > AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS) {
-          throw new ApiError(
-            409,
-            "CONFLICT",
-            `Agent wake bootstrap exceeds ${AGENT_WAKE_BOOTSTRAP_MAX_CONVERSATIONS} visible conversations`,
-          );
-        }
-        return agentWakeBootstrapResponseSchema.parse({
-          agentUserId: identity.currentUser.user.id,
-          workspaceId: identity.currentUser.workspaceId,
-          highWaterCursor,
-          conversations: result.rows.map((conversation) => ({
-            conversationId: conversation.id,
-            kind: conversation.kind,
-          })),
         });
       },
       { isolationLevel: "repeatable_read", readOnly: true },
@@ -4448,7 +4403,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS created_message
-                       WHERE created_message.id::text = event.payload #>> '{message,id}'
+                       WHERE created_message.id = ${canonicalUuidSql("event.payload #>> '{message,id}'")}
                          AND created_message.workspace_id = event.workspace_id
                          AND created_message.deleted_at IS NULL
                     )
@@ -4458,7 +4413,7 @@ export class WorkspaceRepository {
                     OR EXISTS (
                       SELECT 1
                         FROM messages AS reaction_message
-                       WHERE reaction_message.id::text = event.payload #>> '{reaction,messageId}'
+                       WHERE reaction_message.id = ${canonicalUuidSql("event.payload #>> '{reaction,messageId}'")}
                          AND reaction_message.workspace_id = event.workspace_id
                          AND reaction_message.deleted_at IS NULL
                     )
@@ -4555,7 +4510,7 @@ export class WorkspaceRepository {
       throw new Error("Realtime tickets require exactly one authenticated credential");
     }
     const token = randomBytes(32).toString("base64url");
-    const hash = createHash("sha256").update(token).digest();
+    const hash = hashToken(token);
     const expiresAt = new Date(Date.now() + REALTIME_TICKET_TTL_MS);
     await this.pool.query(
       `INSERT INTO realtime_tickets
@@ -4592,7 +4547,7 @@ export class WorkspaceRepository {
   }
 
   async consumeRealtimeTicket(token: string): Promise<ConsumedRealtimeTicket | null> {
-    const hash = createHash("sha256").update(token).digest();
+    const hash = hashToken(token);
     const result = await this.pool.query<TicketRow>(
       `WITH consumed_ticket AS (
          UPDATE realtime_tickets AS ticket
