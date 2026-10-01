@@ -16,6 +16,7 @@ import type {
   NotificationContext,
   NotificationState,
   RealtimeSessionScope,
+  SyncPosition,
   ThemeState,
   UpdateState,
 } from "@hype-comms/contracts";
@@ -303,7 +304,7 @@ function createRetryHarness(options: RetryHarnessOptions = {}): RetryHarness {
     chooseAndUploadConversationFiles: async () => ({ status: "cancelled" as const }),
     openConversationFile: async () => ({ opened: true }),
     listConversationTasks: async () => ({ tasks: [], nextCursor: null, hasMore: false }),
-    syncWorkspace: async (after: string) =>
+    syncWorkspace: async (after: SyncPosition) =>
       ({
         status: "accepted",
         response: {
