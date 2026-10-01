@@ -1,42 +1,49 @@
-import { createHash, randomUUID } from "node:crypto";
+import { WorkspaceSyncOperations } from "./sync-operations.js";
+export type { WorkspaceClientCapabilities, WorkspacePrincipal } from "./sync-operations.js";
 import { WorkspaceAttachmentOperations } from "./attachment-operations.js";
+import { WorkspaceConversationOperations } from "./conversation-operations.js";
+import { createHash, randomUUID } from "node:crypto";
+
 import { type ExpiredAttachmentRow } from "./attachment-records.js";
 import { conversationAudience } from "./conversation-access.js";
 import { ConversationEventWriter } from "./conversation-events.js";
-import { WorkspaceConversationOperations } from "./conversation-operations.js";
 import { WorkspaceMessageOperations } from "./message-operations.js";
-import { mapStoredConversation } from "./records.js";
-import { WorkspaceSyncOperations } from "./sync-operations.js";
+
 import { WorkspaceTaskOperations } from "./task-operations.js";
+
 import { runWorkspaceTransaction } from "./transaction.js";
+
 import { auditAnnouncement, type WorkspaceRepositoryHooks } from "./workspace-hooks.js";
-export type {
-  ConsumedRealtimeTicket,
-  WorkspaceClientCapabilities,
-  WorkspacePrincipal,
-} from "./sync-operations.js";
 export type { AnnouncementAuditRecord, WorkspaceRepositoryHooks } from "./workspace-hooks.js";
-
 import type { Pool, QueryResultRow } from "pg";
+import type { AuthenticatedIdentity } from "../identity/service.js";
+import { WorkspaceAuthorization } from "./authorization.js";
 
-import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
-import type { SystemBulletin } from "../system-channels/release-notes.js";
 import {
   insertSyncEvent,
   insertSyncEventWithSequence,
   nextWorkspaceSequence,
 } from "./sync-events.js";
+import type { SystemBulletin } from "../system-channels/release-notes.js";
+import { SYSTEM_USER_ID, type BuiltInChannelDefinition } from "../system-channels/registry.js";
+
+import {
+  mapMessage,
+  mapStoredConversation,
+  type ConversationRow,
+  type MessageRow,
+} from "./records.js";
 const SYNC_RETENTION_DAYS = 90;
 const ATTACHMENT_CLEANUP_BATCH_SIZE = 100;
 const UNCLAIMED_READY_ATTACHMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
-
-import { mapMessage, type ConversationRow, type MessageRow } from "./records.js";
 
 export interface AttachmentCleanupFailure {
   readonly attachmentId: string;
   readonly workspaceId: string;
   readonly error: unknown;
 }
+
+export type { ConsumedRealtimeTicket } from "./authorization.js";
 
 export class WorkspaceRepository {
   private readonly syncOperations: WorkspaceSyncOperations;
@@ -45,6 +52,7 @@ export class WorkspaceRepository {
   private readonly messages: WorkspaceMessageOperations;
   private readonly tasks: WorkspaceTaskOperations;
   private readonly events: ConversationEventWriter;
+  private readonly authz: WorkspaceAuthorization;
 
   constructor(
     private readonly pool: Pool,
@@ -53,9 +61,10 @@ export class WorkspaceRepository {
     this.events = new ConversationEventWriter(this.announcementChannelsEnabled);
     this.tasks = new WorkspaceTaskOperations(pool, this.events);
     this.messages = new WorkspaceMessageOperations(pool, this.events, hooks);
-    this.conversations = new WorkspaceConversationOperations(pool, this.events, hooks);
+    this.authz = new WorkspaceAuthorization(pool);
+    this.syncOperations = new WorkspaceSyncOperations(pool, hooks, this.authz);
+    this.conversations = new WorkspaceConversationOperations(pool, this.events, hooks, this.authz);
     this.attachments = new WorkspaceAttachmentOperations(pool, hooks);
-    this.syncOperations = new WorkspaceSyncOperations(pool, hooks);
   }
 
   get announcementChannelsEnabled(): boolean {
@@ -91,32 +100,86 @@ export class WorkspaceRepository {
     return this.conversations.listMembers(...args);
   }
 
-  requireGroupDirectMessagesForConversations(
-    ...args: Parameters<
-      WorkspaceConversationOperations["requireGroupDirectMessagesForConversations"]
-    >
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForConversations"]> {
-    return this.conversations.requireGroupDirectMessagesForConversations(...args);
+  async requireGroupDirectMessagesForConversations(
+    identity: AuthenticatedIdentity,
+    conversationIds: readonly string[],
+    supported: boolean,
+  ): Promise<void> {
+    return this.authz.requireGroupDirectMessagesForConversations(
+      identity,
+      conversationIds,
+      supported,
+    );
   }
 
-  requireGroupDirectMessagesForMessages(
-    ...args: Parameters<WorkspaceConversationOperations["requireGroupDirectMessagesForMessages"]>
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForMessages"]> {
-    return this.conversations.requireGroupDirectMessagesForMessages(...args);
+  async requireGroupDirectMessagesForMessages(
+    identity: AuthenticatedIdentity,
+    messageIds: readonly string[],
+    supported: boolean,
+    eligibility: "any" | "active" | "retractable" = "any",
+  ): Promise<void> {
+    return this.authz.requireGroupDirectMessagesForMessages(
+      identity,
+      messageIds,
+      supported,
+      eligibility,
+    );
   }
 
-  requireGroupDirectMessagesForAttachments(
-    ...args: Parameters<WorkspaceConversationOperations["requireGroupDirectMessagesForAttachments"]>
-  ): ReturnType<WorkspaceConversationOperations["requireGroupDirectMessagesForAttachments"]> {
-    return this.conversations.requireGroupDirectMessagesForAttachments(...args);
+  async requireGroupDirectMessagesForAttachments(
+    identity: AuthenticatedIdentity,
+    attachmentIds: readonly string[],
+    supported: boolean,
+    eligibility: "any" | "content-write" | "complete" = "any",
+  ): Promise<void> {
+    return this.authz.requireGroupDirectMessagesForAttachments(
+      identity,
+      attachmentIds,
+      supported,
+      eligibility,
+    );
   }
 
-  canViewConversation(
-    ...args: Parameters<WorkspaceConversationOperations["canViewConversation"]>
-  ): ReturnType<WorkspaceConversationOperations["canViewConversation"]> {
-    return this.conversations.canViewConversation(...args);
+  /**
+   * Reuses the canonical conversation visibility predicate for ephemeral delivery. The active
+   * workspace-membership join makes each best-effort authorization reflect revocation immediately
+   * instead of waiting for the socket heartbeat to close the connection. The capability argument
+   * is bound into the realtime ticket, so an older device cannot discover a group conversation
+   * through typing frames merely because another device for the same user supports groups.
+   */
+  async canViewConversation(
+    workspaceId: string,
+    userId: string,
+    conversationId: string,
+    includeGroupDirectMessages: boolean,
+  ): Promise<boolean> {
+    return this.authz.canViewConversation(
+      workspaceId,
+      userId,
+      conversationId,
+      includeGroupDirectMessages,
+    );
   }
 
+  /**
+   * Owner-only administration: every undirected communication link between two distinct active
+   * human or agent members, aggregated from committed messages and memberships. Message bodies
+   * are never read; only counts and timestamps leave the database. Owner authorization happens
+   * at the route, where the authenticated principal's role is already resolved per request.
+   *
+   * Deliberate scope decisions:
+   * - Bots are excluded. They are integrations rather than members: their channel access comes
+   *   from `bot_channel_grants` rather than membership semantics, so treating them as pair
+   *   endpoints would fabricate links no human recognizes.
+   * - Deactivated members are excluded from both endpoints of every path, so revoked members'
+   *   DM history does not resurface in the owner's report.
+   * - Pairs that share channels but have exchanged no messages are still reported (as potential
+   *   paths), but sort strictly below pairs with actual message volume.
+   *
+   * Both reads run in one repeatable-read snapshot so `members` and `paths` can never disagree,
+   * and the result is bounded by the contract's path cap -- with endpoints restricted to active
+   * human/agent members the pair count is at most C(25,2), which equals the cap exactly.
+   */
   communicationPaths(
     ...args: Parameters<WorkspaceConversationOperations["communicationPaths"]>
   ): ReturnType<WorkspaceConversationOperations["communicationPaths"]> {

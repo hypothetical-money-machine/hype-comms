@@ -24,13 +24,13 @@ import { z } from "zod";
 
 import { withTransaction } from "../../db/pool.js";
 import { ApiError } from "../../errors.js";
-import { hashToken } from "./tokens.js";
 import {
   fingerprintApiRequest,
   lockIdempotencyScope,
   runIdempotentMutation,
 } from "../workspace/idempotency.js";
 import { insertSyncEvent } from "../workspace/sync-events.js";
+import { hashToken } from "./tokens.js";
 import { IdentityRepository } from "./repository.js";
 
 const MAX_ACTIVE_MEMBERS = 25;
