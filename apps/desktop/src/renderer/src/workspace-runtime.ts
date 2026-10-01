@@ -1450,7 +1450,7 @@ export class WorkspaceRuntime {
           await this.#serialize(() =>
             this.#commitCacheProjection(async () => {
               if (!this.#isProjectionCurrent(projection, conversationId)) return;
-              const records = replayCollectionPage(
+              let records = replayCollectionPage(
                 page.records,
                 journal.newerThan(page.snapshotPosition),
               );
@@ -1476,7 +1476,13 @@ export class WorkspaceRuntime {
                   return;
                 }
               } else if (identity.kind === "tasks" || identity.kind === "my_tasks") {
-                await cache.upsertTasks(records.tasks, signal, commit);
+                const accepted = await cache.upsertTasks(records.tasks, signal, commit);
+                records = {
+                  ...records,
+                  tasks: accepted.filter((task) =>
+                    this.#isConversationAuthorized(task.conversationId),
+                  ),
+                };
               } else {
                 await cache.commitCollectionMetadata(commit, signal);
               }
@@ -1628,6 +1634,7 @@ export class WorkspaceRuntime {
       let cursor: string | null = null;
       const seen = new Set<string>();
       const seenTasks = new Set<string>();
+      let fetchedPageIds: ReadonlySet<string> = new Set();
       for (let pages = 0; pages < 400; pages += 1) {
         await this.#loadCollection(
           identity,
@@ -1658,6 +1665,7 @@ export class WorkspaceRuntime {
               (page.nextCursor === cursor || seen.has(page.nextCursor))
             )
               throw new Error("The workspace task catalog did not advance its cursor");
+            fetchedPageIds = pageIds;
             return {
               ...page,
               records: {
@@ -1670,7 +1678,9 @@ export class WorkspaceRuntime {
             };
           },
           (records) => {
-            for (const task of records.tasks) seenTasks.add(task.id);
+            // Page limits and duplicate checks count fetched rows, even when the cache keeps a
+            // newer version and excludes an older row from publication.
+            for (const id of fetchedPageIds) seenTasks.add(id);
             this.#setState({ tasks: mergeTasks(this.#state.tasks, records.tasks) });
           },
         );
@@ -1714,6 +1724,10 @@ export class WorkspaceRuntime {
               ...(cursor === null ? {} : { after: cursor }),
               limit: 200,
             });
+            for (const task of page.tasks) {
+              if (task.workspaceId !== this.#scope?.workspaceId)
+                throw new Error("The My Tasks catalog crossed workspace scope");
+            }
             if (page.hasMore !== (page.nextCursor !== null))
               throw new Error("The collection has inconsistent pagination");
             return {

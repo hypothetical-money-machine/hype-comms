@@ -1623,6 +1623,37 @@ async function enqueuePermanentFailure(
 }
 
 describe("WorkspaceRuntime", () => {
+  it("publishes only cache-accepted My Tasks rows", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const inaccessibleTask = { ...task, conversationId: SECOND_CONVERSATION_ID };
+    api.myTaskResults.push({ tasks: [inaccessibleTask], nextCursor: null, hasMore: false });
+    await runtime.loadMyTasks();
+    expect((await cache.load()).tasks).toEqual([]);
+    expect(runtime.state.tasks).toEqual([]);
+    await runtime.stop();
+  });
+
+  it("rejects My Tasks pages crossing workspace scope before committing", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const before = runtime.collectionState({ kind: "my_tasks" });
+    api.myTaskResults.push({
+      tasks: [{ ...task, workspaceId: OTHER_WORKSPACE_ID }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await expect(runtime.loadMyTasks()).rejects.toThrow("crossed workspace scope");
+    expect((await cache.load()).tasks).toEqual([]);
+    expect(runtime.state.tasks).toEqual([]);
+    expect(runtime.collectionState({ kind: "my_tasks" })).toEqual(before);
+    await runtime.stop();
+  });
+
   it.each(["fresh", "cached"] as const)(
     "opens a %s 50-conversation workspace before background metadata finishes",
     async (mode) => {
@@ -5318,6 +5349,26 @@ describe("WorkspaceRuntime", () => {
     ]);
     expect(api.startedCursors).toEqual(["10"]);
     expect(runtime.state.taskError).toBe("The workspace task catalog did not advance its cursor");
+  });
+
+  it("counts fetched task IDs even when their older versions are not published", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const newer = { ...task, version: 2 };
+    api.taskMutationResults.push({ task: newer, syncCursor: testPosition("11") });
+    await runtime.createTask({ conversationId: CONVERSATION_ID, title: task.title });
+    api.conversationTaskResults.push(
+      { tasks: [task], nextCursor: "task-page-1", hasMore: true },
+      { tasks: [task], nextCursor: null, hasMore: false },
+    );
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow(
+      "The workspace task catalog repeated a task",
+    );
+    expect((await cache.load()).tasks).toEqual([newer]);
+    expect(runtime.state.tasks).toEqual([newer]);
+    await runtime.stop();
   });
 
   it("rejects duplicate task IDs across catalog pages", async () => {
