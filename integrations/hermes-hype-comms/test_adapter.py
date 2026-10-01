@@ -1352,6 +1352,200 @@ class AdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted._cursor, "101")
         await restarted.disconnect()
 
+    async def deferred_recovery_fixture(
+        self,
+        *,
+        count: int = 4,
+        capacity: int = 2,
+    ) -> tuple[Any, FakeTurnGateway, FakeProcessFactory, str, FakeWatchProcess]:
+        seed = self.new_adapter(FakeProcessFactory([]))
+        self.prepare_adapter(seed)
+        seed.gateway_runner = FakeBusyGateway(seed)
+        key = f"hype_comms:channel:{CHANNEL_ID}:{CHANNEL_ID}"
+        seed._active_sessions[key] = asyncio.Event()
+        for cursor in range(101, 101 + count):
+            await seed._accept_event(message_event(str(cursor), CHANNEL_ID, USER_ID))
+        last_cursor = str(100 + count)
+        watch = FakeWatchProcess(blocking=True)
+        factory = FakeProcessFactory(
+            startup_specs("500")
+            + [ProcessSpec(("watch", "--json", "--after", last_cursor), watch)]
+        )
+        adapter = self.new_adapter(factory)
+        gateway = FakeTurnGateway(adapter)
+        gateway._BUSY_QUEUE_MAX_PENDING = capacity
+        adapter.gateway_runner = gateway
+        adapter._active_sessions[key] = asyncio.Event()
+        return adapter, gateway, factory, key, watch
+
+    async def finish_recovery_fifo(self, adapter: Any, gateway: FakeTurnGateway, key: str) -> None:
+        events = [adapter._pending_messages.pop(key)]
+        events.extend(gateway._queued_events.pop(key, []))
+        for event in events:
+            await gateway._run_agent_inner(source=event.source, event_message_id=event.message_id)
+
+    async def test_ambient_backlog_connects_and_recovers_without_new_watch_traffic(self) -> None:
+        adapter, gateway, factory, key, watch = await self.deferred_recovery_fixture()
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+        delays: list[Optional[float]] = []
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt
+            delays.append(retry_after)
+            sleeping.set()
+            await resume.wait()
+            resume.clear()
+
+        adapter._backoff = controlled_backoff
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            self.assertIsNotNone(task)
+            self.assertTrue(adapter._running)
+            self.assertIsNone(adapter.fatal_error)
+            self.assertFalse(watch.terminated)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 2)
+            self.assertEqual(len(adapter._pending_ambient_wakes), 4)
+            self.assertEqual(delays, [1.0])
+
+            # Later accepted watch traffic may advance the high cursor while
+            # older recovered anchors are still awaiting FIFO capacity.
+            await adapter._accept_event(message_event("200", DM_ID, USER_ID))
+            await self.finish_recovery_fifo(adapter, gateway, key)
+            resume.set()
+            await asyncio.wait_for(task, timeout=0.5)
+            self.assertEqual(gateway._queue_depth(key, adapter=adapter), 2)
+            await self.finish_recovery_fifo(adapter, gateway, key)
+
+            self.assertEqual(gateway.turns, [message_id_for(str(i)) for i in range(101, 105)])
+            self.assertEqual(adapter._pending_ambient_wakes, {})
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertEqual(adapter._cursor, "200")
+            persisted = json.loads(adapter._cursor_path.read_text())
+            self.assertEqual(persisted["cursor"], "200")
+            self.assertEqual(persisted["pendingAmbientWakes"], {})
+            self.assertEqual(factory.calls[6]["args"], ("watch", "--json", "--after", "104"))
+        finally:
+            await adapter.disconnect()
+
+    async def test_deferred_ambient_batch_does_not_reinfer_a_failed_model_turn(self) -> None:
+        adapter, gateway, factory, key, _watch = await self.deferred_recovery_fixture(
+            count=3, capacity=1
+        )
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await resume.wait()
+            resume.clear()
+            sleeping.clear()
+
+        adapter._backoff = controlled_backoff
+        failed_id = message_id_for("101")
+        gateway.results[failed_id] = {"failed": True, "final_response": ""}
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            await self.finish_recovery_fifo(adapter, gateway, key)
+            resume.set()
+
+            async def finish_second_turn() -> None:
+                while key not in adapter._pending_messages:
+                    await asyncio.sleep(0)
+                await self.finish_recovery_fifo(adapter, gateway, key)
+
+            await asyncio.wait_for(finish_second_turn(), timeout=0.5)
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            resume.set()
+            await asyncio.wait_for(task, timeout=0.5)
+            await self.finish_recovery_fifo(adapter, gateway, key)
+
+            self.assertEqual(gateway.turns, [message_id_for(str(i)) for i in range(101, 104)])
+            self.assertEqual(set(adapter._pending_ambient_wakes), {failed_id})
+            self.assertEqual(
+                len([call for call in context_calls(factory) if call["args"][5] == failed_id]),
+                1,
+            )
+        finally:
+            await adapter.disconnect()
+
+    async def test_disconnect_cancels_sleeping_ambient_recovery_without_losing_anchors(self) -> None:
+        adapter, _gateway, _factory, _key, watch = await self.deferred_recovery_fixture()
+        sleeping = asyncio.Event()
+
+        async def sleep_until_cancelled(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await asyncio.Future()
+
+        adapter._backoff = sleep_until_cancelled
+        self.assertTrue(await adapter.connect())
+        await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+        task = adapter._ambient_replay_task
+        before = adapter._cursor_path.read_bytes()
+
+        await asyncio.wait_for(adapter.disconnect(), timeout=0.5)
+
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(adapter._ambient_replay_task)
+        self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        self.assertTrue(watch.terminated)
+
+    async def test_disconnect_reaps_inflight_ambient_context_retry(self) -> None:
+        adapter, _gateway, factory, _key, _watch = await self.deferred_recovery_fixture()
+        child = FakeBlockingCommandProcess()
+        factory.specs.append(ProcessSpec(context_args(CHANNEL_ID, message_id_for("103")), child))
+
+        async def no_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+
+        adapter._backoff = no_backoff
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(child.started.wait(), timeout=0.5)
+            before = adapter._cursor_path.read_bytes()
+            await asyncio.wait_for(adapter.disconnect(), timeout=0.5)
+            self.assertTrue(child.killed)
+            self.assertTrue(child.reaped.is_set())
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertEqual(adapter._cursor_path.read_bytes(), before)
+        finally:
+            await adapter.disconnect()
+
+    async def test_fatal_ambient_recovery_hands_off_before_detached_disconnect(self) -> None:
+        adapter, _gateway, _factory, _key, _watch = await self.deferred_recovery_fixture()
+        sleeping, resume = asyncio.Event(), asyncio.Event()
+
+        async def controlled_backoff(attempt: int, retry_after: Optional[float]) -> None:
+            del attempt, retry_after
+            sleeping.set()
+            await resume.wait()
+
+        async def detached_disconnect(failed_adapter: Any) -> None:
+            await asyncio.shield(asyncio.create_task(failed_adapter.disconnect()))
+
+        adapter._backoff = controlled_backoff
+        adapter.set_fatal_error_handler(detached_disconnect)
+        try:
+            self.assertTrue(await adapter.connect())
+            await asyncio.wait_for(sleeping.wait(), timeout=0.5)
+            task = adapter._ambient_replay_task
+            failure = adapter_module.CliFailure(6, "INVALID_CONTEXT_PACK", "invalid", False)
+            with patch.object(adapter, "_dispatch_message", side_effect=failure):
+                resume.set()
+                await asyncio.wait_for(task, timeout=0.5)
+            self.assertFalse(task.cancelled())
+            self.assertFalse(adapter._running)
+            self.assertEqual(adapter.fatal_error[0], "INVALID_CONTEXT_PACK")
+            self.assertIsNone(adapter._ambient_replay_task)
+            self.assertIsNone(adapter._watch_task)
+            self.assertEqual(len(adapter._pending_ambient_wakes), 4)
+        finally:
+            await adapter.disconnect()
+
     async def test_failed_ambient_model_decision_retains_durable_anchor(self) -> None:
         adapter = self.new_adapter(FakeProcessFactory([]))
         self.prepare_adapter(adapter)

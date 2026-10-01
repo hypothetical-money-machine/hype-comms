@@ -1089,6 +1089,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         self._ambient_handoff_failures: Dict[int, CliFailure] = {}
         self._pending_ambient_wakes: Dict[str, Dict[str, Any]] = {}
         self._admitted_ambient_wakes: set[str] = set()
+        self._ambient_replay_task: Optional[asyncio.Task[Any]] = None
         self._cursor: Optional[str] = None
         self._cursor_path: Optional[Path] = None
         self._agent_scopes: frozenset[str] = frozenset()
@@ -1670,9 +1671,18 @@ class HypeCommsAdapter(BasePlatformAdapter):
             raise
         self._admitted_ambient_wakes.discard(message_id)
 
-    async def _replay_pending_ambient_wakes(self) -> None:
+    async def _replay_pending_ambient_wakes(
+        self,
+        remaining_ids: Optional[set[str]] = None,
+    ) -> Optional[CliFailure]:
+        if remaining_ids is None:
+            remaining_ids = set(self._pending_ambient_wakes)
         ordered = sorted(
-            self._pending_ambient_wakes.items(),
+            (
+                (message_id, target)
+                for message_id, target in self._pending_ambient_wakes.items()
+                if message_id in remaining_ids
+            ),
             key=lambda item: int(item[1]["workspaceSequence"]),
         )
         for message_id, target in ordered:
@@ -1680,6 +1690,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 message_id not in self._pending_ambient_wakes
                 or message_id in self._admitted_ambient_wakes
             ):
+                remaining_ids.discard(message_id)
                 continue
             replay = {
                 "type": "message.created",
@@ -1700,8 +1711,82 @@ class HypeCommsAdapter(BasePlatformAdapter):
                     },
                 },
             }
-            if not await self._dispatch_message(replay):
-                self._complete_ambient_wake(message_id)
+            try:
+                if not await self._dispatch_message(replay):
+                    self._complete_ambient_wake(message_id)
+            except CliFailure as failure:
+                if not failure.retryable:
+                    raise
+                logger.warning("Hype Comms ambient recovery is pending (%s)", failure.code)
+                return failure
+            # The batch tracks admission, not successful model completion.
+            # Failed model decisions stay durable for the next connection;
+            # this recovery loop must not infer on them repeatedly.
+            remaining_ids.discard(message_id)
+        remaining_ids.intersection_update(self._pending_ambient_wakes)
+        return None
+
+    def _schedule_ambient_replay(
+        self,
+        remaining_ids: set[str],
+        failure: Optional[CliFailure],
+    ) -> None:
+        if not remaining_ids or self._stop_event.is_set():
+            return
+        existing = self._ambient_replay_task
+        if existing is not None and not existing.done():
+            return
+        # Only the new task writes its batch. New live wakes and failed model
+        # decisions do not join it; their anchors remain available on restart.
+        self._ambient_replay_task = asyncio.create_task(
+            self._ambient_replay_loop(set(remaining_ids), failure),
+            name="hype-comms-ambient-recovery",
+        )
+
+    async def _ambient_replay_loop(
+        self,
+        remaining_ids: set[str],
+        failure: Optional[CliFailure],
+    ) -> None:
+        current = asyncio.current_task()
+        attempt = 0
+        try:
+            while remaining_ids and not self._stop_event.is_set():
+                attempt += 1
+                await self._backoff(attempt, failure.retry_after if failure else None)
+                if self._stop_event.is_set():
+                    return
+                failure = await self._replay_pending_ambient_wakes(remaining_ids)
+        except asyncio.CancelledError:
+            raise
+        except CliFailure as failure:
+            await self._supervisor_fatal(failure)
+        except Exception:
+            await self._supervisor_fatal(
+                CliFailure(
+                    5,
+                    "AMBIENT_RECOVERY_FAILED",
+                    "Hype Comms ambient recovery task failed",
+                    True,
+                    error_kind="transient",
+                )
+            )
+        finally:
+            if self._ambient_replay_task is current:
+                self._ambient_replay_task = None
+
+    async def _cancel_ambient_replay(self) -> None:
+        task = self._ambient_replay_task
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._ambient_replay_task is task:
+                self._ambient_replay_task = None
 
     def _queue_read_cursor(
         self,
@@ -1975,6 +2060,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         del is_reconnect
         if self._watch_task is not None and not self._watch_task.done():
             return True
+        await self._cancel_ambient_replay()
         self._stop_event.clear()
         try:
             if not _has_access_policy():
@@ -2025,7 +2111,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
                 self._persist_cursor(self._cursor)
 
             read_cursor_outcome = await self._flush_pending_read_cursors()
-            await self._replay_pending_ambient_wakes()
+            ambient_replay_ids = set(self._pending_ambient_wakes)
+            ambient_replay_failure = await self._replay_pending_ambient_wakes(ambient_replay_ids)
 
             process = await self._spawn_watch()
             self._watch_process = process
@@ -2037,6 +2124,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
             # A failed connect-time flush must keep making progress even if no
             # message arrives after the gateway becomes healthy.
             self._schedule_read_cursor_retry(read_cursor_outcome.retry_after)
+            self._schedule_ambient_replay(ambient_replay_ids, ambient_replay_failure)
             logger.info("Hype Comms adapter connected")
             return True
         except (CliFailure, ValueError) as exc:
@@ -2349,6 +2437,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
         # durable pending targets are intentionally left untouched.
         self._stop_event.set()
         await self._cancel_read_cursor_retry()
+        await self._cancel_ambient_replay()
         self._mark_disconnected()
         # Pinned Hermes awaits this notification from the failing watch task,
         # but handles it in a shielded detached task whose disconnect wrapper
@@ -2357,6 +2446,8 @@ class HypeCommsAdapter(BasePlatformAdapter):
         current = asyncio.current_task()
         if self._watch_task is current:
             self._watch_task = None
+        if self._ambient_replay_task is current:
+            self._ambient_replay_task = None
         await self._notify_fatal_error()
 
     async def _terminate_process(self, process: Any) -> None:
@@ -3448,6 +3539,7 @@ class HypeCommsAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._stop_event.set()
         await self._cancel_read_cursor_retry()
+        await self._cancel_ambient_replay()
         process = self._watch_process
         if process is not None:
             await self._terminate_process(process)

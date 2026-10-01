@@ -363,15 +363,23 @@ before starting watch, so it never answers historical messages. Existing
 installations resume from their persisted cursor. At-least-once duplicate
 events at or below that cursor are ignored.
 
-On restart, the adapter refetches each unfinished ambient anchor's context pack
-before watch resumes. It repeats current sender authorization and strict pack
-validation, then lets the model decide whether to answer. A deleted or
+On restart, the adapter refetches unfinished ambient anchors' context packs.
+It repeats current sender authorization and strict pack validation before
+each model handoff. It admits the backlog until Hermes's FIFO fills, then
+starts watch and retries the remaining anchors in one bounded background task.
+A transient context failure or draining gateway also defers recovery without
+keeping the adapter offline. The task preserves Retry-After within the capped
+backoff policy and makes progress when capacity frees even without new watch
+traffic. Disconnect and fatal shutdown cancel and await this task, including
+any in-flight context CLI child. A deleted or
 inaccessible anchor, or an author denied by the current policy, is retired
 without inference. Recovery never rewinds the accepted workspace cursor.
 This is at-least-once model processing: a crash after a decision or reply but
 before its durable completion write can repeat that turn. Anchors also remain
-durable when FIFO admission is full or the gateway is draining; startup retries
-instead of discarding those turns.
+durable when FIFO admission is full or the gateway is draining. Each recovery
+batch tracks admission separately from successful decisions, so a failed model
+turn remains durable for the next connection without entering an automatic
+inference retry loop during the current connection.
 
 When `read-cursors:write` is present, `handle_message` must return successfully
 before the adapter marks anything read. It then writes the triggering workspace
@@ -462,7 +470,9 @@ retry-task and in-flight child cancellation, fatal-handler teardown ownership,
 v1/v2-to-v3 migration, anchor-only ambient recovery with fresh context and
 authorization, write/fsync failure rollback, reconnect admission deduplication,
 per-turn completion across mixed failed/successful FIFO decisions, isolated
-Hype display configuration, metadata cache updates, equal-cursor resync,
+Hype display configuration, deferred recovery beyond live FIFO capacity,
+failed-turn retry isolation, recovery-task cancellation/reaping and fatal
+teardown ownership, metadata cache updates, equal-cursor resync,
 cursor-expiry recovery, malformed NDJSON cleanup, transient respawn recovery,
 private-stdin send, thread-root resolution for top-level and in-thread wakes,
 fallback delivery threading from the metadata anchor, chunked-reply root
