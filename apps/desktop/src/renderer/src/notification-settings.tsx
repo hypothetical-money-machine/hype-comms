@@ -12,7 +12,7 @@ type PendingOperation = "preference" | "refresh" | null;
 
 const LOAD_ERROR = "Could not load notification settings.";
 const SAVE_ERROR = "Could not save notification settings.";
-const REFRESH_ERROR = "Could not refresh notification capability.";
+const REFRESH_ERROR = "Could not check notification settings.";
 
 function supportLabel(state: NotificationState): string {
   return state.nativeSupport === "supported" ? "Supported" : "Unsupported";
@@ -34,10 +34,10 @@ function capabilityExplanation(state: NotificationState): string {
     return "Native notifications are unavailable in this installation.";
   }
   if (state.osPermission === "denied") {
-    return "Permission and Do Not Disturb are managed by your operating system. Enable Hype Comms in system settings, then refresh capability.";
+    return "Enable Hype Comms notifications in system settings, then check again.";
   }
   if (state.osPermission === "unknown") {
-    return "Permission has not been confirmed. Hype Comms will not repeatedly prompt.";
+    return "Notification permission could not be confirmed. Check your system settings.";
   }
   return "Sound and Do Not Disturb are managed by your operating system.";
 }
@@ -152,7 +152,7 @@ export function NotificationSettings({ transport }: NotificationSettingsProps) {
     return (
       <div className="notification-settings" aria-busy={loading}>
         <p className="notification-settings-loading" role="status">
-          {loading ? "Loading notification settings…" : "Notification state is unavailable."}
+          {loading ? "Loading notification settings…" : "Notification settings are unavailable."}
         </p>
         <button
           type="button"
@@ -160,7 +160,7 @@ export function NotificationSettings({ transport }: NotificationSettingsProps) {
           aria-busy={pending === "refresh"}
           onClick={() => void refreshCapability()}
         >
-          {pending === "refresh" ? "Refreshing…" : "Refresh capability"}
+          {pending === "refresh" ? "Refreshing…" : "Check again"}
         </button>
         {error !== "" && (
           <p className="notification-settings-error" role="alert">
@@ -201,7 +201,9 @@ export function NotificationSettings({ transport }: NotificationSettingsProps) {
       <label className="notification-preference" htmlFor={previewId}>
         <span>
           <strong>Show message previews</strong>
-          <small id={previewDescriptionId}>Off by default; otherwise only metadata is shown.</small>
+          <small id={previewDescriptionId}>
+            When off, notifications show only the sender and conversation.
+          </small>
         </span>
         <input
           id={previewId}
@@ -220,11 +222,11 @@ export function NotificationSettings({ transport }: NotificationSettingsProps) {
 
       <dl className="notification-capability" aria-describedby={capabilityDescriptionId}>
         <div>
-          <dt>Native support</dt>
+          <dt>Desktop notifications</dt>
           <dd>{supportLabel(state)}</dd>
         </div>
         <div>
-          <dt>OS permission</dt>
+          <dt>System permission</dt>
           <dd>{permissionLabel(state)}</dd>
         </div>
       </dl>
@@ -237,7 +239,7 @@ export function NotificationSettings({ transport }: NotificationSettingsProps) {
         aria-busy={pending === "refresh"}
         onClick={() => void refreshCapability()}
       >
-        {pending === "refresh" ? "Refreshing…" : "Refresh capability"}
+        {pending === "refresh" ? "Refreshing…" : "Check again"}
       </button>
       {error !== "" && (
         <p className="notification-settings-error" role="alert">

@@ -582,7 +582,7 @@ describe("PreferencesPage", () => {
 
     expect(await screen.findByRole("checkbox", { name: /Enable notifications/ })).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: /Show message previews/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Refresh capability" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check again" })).toBeTruthy();
   });
 
   it("renders and saves a trimmed profile title", async () => {
