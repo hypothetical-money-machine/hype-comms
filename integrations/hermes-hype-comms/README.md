@@ -388,7 +388,10 @@ messages retain their normal busy-input policy.
 A transient context failure or draining gateway also defers recovery without
 keeping the adapter offline. The task preserves Retry-After within the capped
 backoff policy and makes progress when capacity frees even without new watch
-traffic. Disconnect and fatal shutdown cancel and await this task, including
+traffic. Retry attempts and deadlines are tracked per conversation, so a longer
+Retry-After in one channel cannot postpone another channel's available FIFO slot.
+New pending work wakes the same worker without shortening an existing channel
+deadline. Disconnect and fatal shutdown cancel and await this task, including
 any in-flight context CLI child. A deleted or
 inaccessible anchor, or an author denied by the current policy, is retired
 without inference. Recovery never rewinds the accepted workspace cursor.
