@@ -80,7 +80,7 @@ import type {
 } from "./workspace-cache";
 import { MemoryWorkspaceCache } from "./workspace-cache";
 import { replayCollectionPage } from "./workspace-collections";
-import { WORKSPACE_SNAPSHOT_TASK_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
+import { WORKSPACE_TASK_COLLECTION_LIMIT, WorkspaceRuntime } from "./workspace-runtime";
 
 type MessageHistoryResponse = Omit<WireMessageHistoryResponse, "snapshotPosition" | "reactions"> & {
   readonly snapshotPosition?: SyncPosition;
@@ -589,7 +589,7 @@ class FakeWorkspaceCache extends MemoryWorkspaceCache {
   }
 
   override async refreshMetadata(): Promise<WorkspaceSnapshot | null> {
-    // Tests using this fake exercise the full snapshot fallback; the real cache is exercised
+    // Tests using this fake exercise the metadata installation fallback; the real cache is exercised
     // separately for the unchanged-catalog restart path.
     return null;
   }
@@ -603,9 +603,19 @@ class FakeWorkspaceCache extends MemoryWorkspaceCache {
   }
 
   override async replaceSnapshot(...args: ReplaceSnapshotArgs): Promise<boolean> {
-    this.operations.push("replaceSnapshot");
+    this.operations.push("installSnapshot");
     await this.snapshotReplaceBarriers.shift();
     const replaced = await super.replaceSnapshot(...args);
+    if (replaced) this.#position = args[0].syncCursor;
+    return replaced;
+  }
+
+  override async installMetadataSnapshot(
+    ...args: Parameters<WorkspaceCache["installMetadataSnapshot"]>
+  ): Promise<boolean> {
+    this.operations.push("installSnapshot");
+    await this.snapshotReplaceBarriers.shift();
+    const replaced = await super.installMetadataSnapshot(...args);
     if (replaced) this.#position = args[0].syncCursor;
     return replaced;
   }
@@ -761,7 +771,10 @@ class FakeDesktopApi implements DesktopApi {
   resyncOnStart = false;
   /** When set, every handshake reports itself live first, exactly as the real server does. */
   connectedOnStart = false;
-  readonly conversationPages = new Map<string, ListConversationsResponse>();
+  readonly conversationPages = new Map<
+    string,
+    ListConversationsResponse | Promise<ListConversationsResponse>
+  >();
   readonly histories = new Map<
     string,
     Omit<MessageHistoryResponse, "attachments"> & { readonly attachments?: Attachment[] }
@@ -1657,6 +1670,361 @@ describe("WorkspaceRuntime", () => {
     await runtime.stop();
   });
 
+  it.each(["fresh", "cached"] as const)(
+    "opens a %s 50-conversation workspace before background metadata finishes",
+    async (mode) => {
+      const cache = new FakeWorkspaceCache();
+      const summaries = [
+        channel(CONVERSATION_ID, "general"),
+        ...Array.from({ length: 49 }, (_, index) =>
+          channel(`20000000-0000-4000-8001-${String(index).padStart(12, "0")}`, `channel-${index}`),
+        ),
+      ];
+      const api = new FakeDesktopApi(
+        bootstrapAt("10", {
+          conversations: [summaries[0]!],
+          conversationsHasMore: true,
+          conversationsNextCursor: NEXT_PAGE_CURSOR,
+        }),
+      );
+      const rest = deferred<ListConversationsResponse>();
+      api.conversationPages.set(NEXT_PAGE_CURSOR, rest.promise);
+      api.histories.set(CONVERSATION_ID, {
+        messages: [ownMessage],
+        reactions: [ownReaction],
+        attachments: [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+      const pending = queuedOperation(
+        "20000000-0000-4000-8000-000000000099",
+        "Queued on page two",
+        summaries[1]!.conversation.id,
+      );
+      await cache.replaceSnapshot(bootstrapAt("10", { conversations: summaries }), []);
+      await cache.enqueue(pending);
+      if (mode === "fresh") await cache.clearServerStatePreservingOutbox();
+      api.sendResults.push({ status: "permanent", reason: "validation" });
+      const runtime = runtimeWith(api, cache);
+      const starting = runtime.start(session);
+      try {
+        await settle(
+          () => runtime.state.messages.some((message) => message.id === OWN_MESSAGE_ID),
+          "selected combined timeline before catalog completes",
+        );
+        expect(runtime.state.busy).toBe(false);
+        expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+        expect(api.reactionRequests).toEqual([]);
+        expect(api.conversationTaskRequests).toEqual([]);
+        expect(api.conversationFileRequests).toEqual([]);
+        expect((await cache.load()).outbox[0]?.operation).toEqual(pending);
+        expect(api.sent).toEqual([]);
+        expect(api.startedCursors).toEqual([]);
+        rest.resolve({ conversations: summaries.slice(1), nextCursor: null, hasMore: false });
+        await starting;
+        expect(runtime.state.bootstrap?.conversations).toHaveLength(50);
+        expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+        expect(api.conversationTaskRequests).toEqual([]);
+        expect(api.sent).toEqual([pending]);
+        expect(api.startedCursors).toEqual(["10"]);
+      } finally {
+        rest.resolve({ conversations: summaries.slice(1), nextCursor: null, hasMore: false });
+        await starting;
+        await runtime.stop();
+      }
+    },
+  );
+
+  it("keeps unconfirmed history blocked until catalog replacement commits", async () => {
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    class PausedMetadataCache extends FakeWorkspaceCache {
+      override async replaceMetadata(
+        ...args: Parameters<WorkspaceCache["replaceMetadata"]>
+      ): Promise<boolean> {
+        entered.resolve();
+        await release.promise;
+        return super.replaceMetadata(...args);
+      }
+    }
+    const cache = new PausedMetadataCache();
+    await cache.replaceSnapshot(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "removed"),
+        ],
+      }),
+      [],
+    );
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const runtime = runtimeWith(api, cache);
+    const starting = runtime.start(session);
+    try {
+      await entered.promise;
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      await drain();
+      expect(api.historyRequests).not.toContain(SECOND_CONVERSATION_ID);
+    } finally {
+      release.resolve();
+      await starting;
+      await runtime.stop();
+    }
+  });
+
+  it("retains selected history when a cached metadata reload captured an older view", async () => {
+    const captured = deferred<void>();
+    const release = deferred<void>();
+    class CapturedMetadataCache extends FakeWorkspaceCache {
+      captureNextLoad = false;
+      override async replaceMetadata(
+        ...args: Parameters<WorkspaceCache["replaceMetadata"]>
+      ): Promise<boolean> {
+        const replaced = await super.replaceMetadata(...args);
+        this.captureNextLoad = true;
+        return replaced;
+      }
+      override async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
+        const result = await super.load(options);
+        if (this.captureNextLoad) {
+          this.captureNextLoad = false;
+          captured.resolve();
+          await release.promise;
+        }
+        return result;
+      }
+    }
+    const cache = new CapturedMetadataCache();
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    await cache.replaceSnapshot(api.bootstrap, []);
+    const page = deferred<MessageHistoryResponse>();
+    api.historyResults.set(CONVERSATION_ID, [page.promise]);
+    const runtime = runtimeWith(api, cache);
+    const views: boolean[] = [];
+    const unsubscribe = runtime.subscribe((state) => {
+      views.push(state.messages.some((message) => message.id === OWN_MESSAGE_ID));
+    });
+    const starting = runtime.start(session);
+    try {
+      await captured.promise;
+      expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+      page.resolve({
+        snapshotPosition: testPosition("10"),
+        messages: [ownMessage],
+        reactions: [ownReaction],
+        attachments: [],
+        threadSummaries: [],
+        threadsSupported: true,
+        nextCursor: null,
+      });
+      await drain();
+      release.resolve();
+      await starting;
+      await drain();
+      expect((await cache.load()).messages).toEqual([ownMessage]);
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      expect(runtime.state.reactions).toEqual([ownReaction]);
+      expect(views.slice(views.indexOf(true))).not.toContain(false);
+      expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    } finally {
+      release.resolve();
+      await starting;
+      unsubscribe();
+      await runtime.stop();
+    }
+  });
+
+  it("retires a cached metadata read when membership changes before its write", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const captured = deferred<void>();
+    const release = deferred<void>();
+    class RetiredMetadataCache extends FakeWorkspaceCache {
+      captured = false;
+      override async load(options?: WorkspaceCacheLoadOptions): Promise<CachedWorkspaceState> {
+        const loaded = await super.load(options);
+        if (!this.captured && api.bootstrapRequests > 0) {
+          this.captured = true;
+          captured.resolve();
+          await release.promise;
+        }
+        return loaded;
+      }
+    }
+    const cache = new RetiredMetadataCache();
+    await cache.replaceSnapshot(api.bootstrap, []);
+    const runtime = runtimeWith(api, cache);
+    const starting = runtime.start(session);
+    try {
+      await captured.promise;
+      api.bootstrap = bootstrapAt("11", { conversations: [] });
+      api.emitWorkspaceEvent(membershipChanged(MEMBER_EVENT_ID, "11", "removed"));
+      release.resolve();
+      await starting;
+      await settle(() => api.acknowledged.includes("11"), "membership repair acknowledgement");
+      expect(cache.operations).not.toContain("replaceMetadata");
+      expect((await cache.load()).bootstrap?.conversations).toEqual([]);
+      expect(runtime.state.bootstrap?.conversations).toEqual([]);
+    } finally {
+      release.resolve();
+      await starting;
+      await runtime.stop();
+    }
+  });
+
+  it("retires a failed catalog gate so retained chat and sends stay usable", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "other"),
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    api.channelResults.push({
+      conversation: channel(CONVERSATION_ID, "general"),
+      syncCursor: testPosition("10"),
+    });
+    api.bootstrapFailures = 1;
+    await runtime.archiveChannel(CONVERSATION_ID);
+    expect(runtime.state).toMatchObject({
+      stale: true,
+      busy: false,
+      error: "The workspace is temporarily unavailable",
+    });
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.includes(SECOND_CONVERSATION_ID),
+      "retained conversation hydration after catalog failure",
+    );
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "Send during catalog recovery", []);
+    await settle(() => api.sent.length === 1, "outbox delivery after catalog failure");
+    expect(api.sent[0]?.conversationId).toBe(SECOND_CONVERSATION_ID);
+    await runtime.stop();
+  });
+
+  it("does not let an older catalog request retire a newer partial catalog gate", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "other"),
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    await runtime.start(session);
+    const older = deferred<HumanWorkspaceBootstrapResponse>();
+    const continuation = deferred<ListConversationsResponse>();
+    const pages = vi.spyOn(api, "listConversations");
+    api.bootstrapResults.push(
+      older.promise,
+      bootstrapAt("10", { conversationsHasMore: true, conversationsNextCursor: NEXT_PAGE_CURSOR }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, continuation.promise);
+    api.channelResults.push(
+      { conversation: channel(CONVERSATION_ID, "general"), syncCursor: testPosition("10") },
+      { conversation: channel(CONVERSATION_ID, "general"), syncCursor: testPosition("10") },
+    );
+    const before = api.bootstrapRequests;
+    const first = runtime.archiveChannel(CONVERSATION_ID);
+    await settle(() => api.bootstrapRequests === before + 1, "older catalog request");
+    const second = runtime.archiveChannel(CONVERSATION_ID);
+    await settle(() => pages.mock.calls.length === 1, "newer partial catalog staged");
+    older.resolve(bootstrapAt("10"));
+    await first;
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await drain();
+    expect(api.historyRequests).not.toContain(SECOND_CONVERSATION_ID);
+    continuation.resolve({
+      conversations: [channel(SECOND_CONVERSATION_ID, "other")],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await second;
+    await settle(
+      () => api.historyRequests.includes(SECOND_CONVERSATION_ID),
+      "history after newer catalog commits",
+    );
+    await runtime.stop();
+  });
+
+  it("keeps chat usable when an on-demand task service fails", async () => {
+    class UnavailableTasks extends FakeDesktopApi {
+      override async listConversationTasks(conversationId: string): Promise<WireTaskListResponse> {
+        this.conversationTaskRequests.push(conversationId);
+        throw new Error("Task service unavailable");
+      }
+    }
+    const api = new UnavailableTasks(bootstrapAt("10"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [ownMessage],
+      reactions: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    try {
+      await runtime.start(session);
+      expect(api.conversationTaskRequests).toEqual([]);
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow(
+        "Task service unavailable",
+      );
+      expect(runtime.state.messages).toEqual([ownMessage]);
+      expect(runtime.state.busy).toBe(false);
+      expect(api.startedCursors).toEqual(["10"]);
+      expect(runtime.state.error).toBeNull();
+      expect(runtime.state.taskError).toBe("Task service unavailable");
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("retries a failed partial catalog without losing unseen outbox work", async () => {
+    const cache = new FakeWorkspaceCache();
+    const second = channel(SECOND_CONVERSATION_ID, "second");
+    await cache.replaceSnapshot(
+      bootstrapAt("9", { conversations: [channel(CONVERSATION_ID, "general"), second] }),
+      [],
+    );
+    const pending = queuedOperation(
+      "20000000-0000-4000-8000-000000000098",
+      "Keep through retry",
+      SECOND_CONVERSATION_ID,
+    );
+    await cache.enqueue(pending);
+    await cache.clearServerStatePreservingOutbox();
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", { conversationsHasMore: true, conversationsNextCursor: NEXT_PAGE_CURSOR }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [],
+      nextCursor: "again",
+      hasMore: true,
+    });
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    expect(runtime.state.error).toMatch(/did not make progress/);
+    expect(api.sent).toEqual([]);
+    expect((await cache.load()).outbox[0]?.operation).toEqual(pending);
+    api.conversationPages.set(NEXT_PAGE_CURSOR, {
+      conversations: [second],
+      nextCursor: null,
+      hasMore: false,
+    });
+    api.sendResults.push({ status: "permanent", reason: "validation" });
+    await runtime.start(session);
+    expect(api.sent).toEqual([pending]);
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.error).toBeNull();
+    await runtime.stop();
+  });
+
   it("keeps later file pages scoped to the selected conversation", async () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", {
@@ -1729,19 +2097,20 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
+    const before = runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID });
     api.conversationTaskResults.push({ tasks: [wrongTask], nextCursor: null, hasMore: false });
     await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow(
       `crossed ${kind} scope`,
     );
     expect(runtime.state.tasks).toEqual([]);
     expect((await cache.load()).tasks).toEqual([]);
-    expect(
-      runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }).snapshotPosition,
-    ).toEqual(testPosition("10"));
+    expect(runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID })).toEqual(
+      before,
+    );
     runtime.stop();
   });
 
-  it("keeps the first task-page position for an eager multi-page catalog", async () => {
+  it("keeps the first task-page position for an on-demand multi-page catalog", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     api.conversationTaskResults.push(
       {
@@ -1759,6 +2128,8 @@ describe("WorkspaceRuntime", () => {
     );
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
+    expect(api.conversationTaskRequests).toEqual([]);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(runtime.state.tasks).toHaveLength(2);
     expect(
       runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }),
@@ -2516,7 +2887,7 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
     expect(runtime.state.bootstrap?.conversations).toEqual(snapshot.conversations);
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
-    expect(api.conversationTaskRequests).toEqual([SECOND_CONVERSATION_ID, CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([]);
     expect(api.startedCursors).toEqual(["10"]);
     expect(runtime.state.busy).toBe(false);
     expect((await cache.load()).messages).toEqual([]);
@@ -3651,7 +4022,7 @@ describe("WorkspaceRuntime", () => {
     expect(api.startedCursors).toEqual([]);
     expect(stillBlocked.syncCursor).toEqual(testPosition("11"));
     expect(stillBlocked.repairMarker?.position).toEqual(testPosition("11"));
-    expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(1);
+    expect(cache.operations.filter((operation) => operation === "installSnapshot")).toHaveLength(1);
 
     preflight.resolve({
       status: "accepted",
@@ -3682,7 +4053,7 @@ describe("WorkspaceRuntime", () => {
     expect(api.startedCursors).toEqual(["14"]);
     expect(cache.cursor).toBe("14");
     expect(api.bootstrapRequests).toBe(1);
-    expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(2);
+    expect(cache.operations.filter((operation) => operation === "installSnapshot")).toHaveLength(2);
     expect(
       cache.operations.filter((operation) => operation === "applyEvent:message.created"),
     ).toHaveLength(0);
@@ -3974,7 +4345,8 @@ describe("WorkspaceRuntime", () => {
     const api = new FakeDesktopApi(
       bootstrapAt("10", { members: [user, peer], conversations: [beforeRefresh] }),
     );
-    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
     api.emitWorkspaceEvent({
@@ -4010,6 +4382,8 @@ describe("WorkspaceRuntime", () => {
       conversations: [refreshedSummary],
     });
     api.channelResults.push({ conversation: refreshedSummary, syncCursor: testPosition("11") });
+    // Model bounded message eviction while the summary still retains the last message.
+    await cache.replaceSnapshot(api.bootstrap, []);
     await runtime.archiveChannel(CONVERSATION_ID);
 
     expect(runtime.state.messages.some((message) => message.id === liveMessage.id)).toBe(false);
@@ -5049,7 +5423,7 @@ describe("WorkspaceRuntime", () => {
     const archiving = runtime.archiveChannel(CONVERSATION_ID);
     await settle(() => {
       const replacements = cache.operations.filter(
-        (operation) => operation === "replaceSnapshot",
+        (operation) => operation === "installSnapshot",
       ).length;
       return replacements === 2 && cache.operations[cache.operations.length - 1] === "load";
     }, "full snapshot waits to reload its cache result");
@@ -5072,12 +5446,18 @@ describe("WorkspaceRuntime", () => {
       payload: { messageId: hiddenMessage.id, deletedAt: NOW },
     });
     await settle(
-      () => runtime.state.bootstrap?.conversations[0]?.unreadCount === 0,
-      "source-less retract metadata refresh while the snapshot reload waits",
+      () => api.bootstrapRequests === 3,
+      "source-less retract requests newer metadata while the snapshot reload waits",
     );
 
     snapshotReload.resolve();
     await archiving;
+    await settle(
+      () =>
+        runtime.state.bootstrap?.conversations[0]?.unreadCount === 0 &&
+        runtime.state.threadSummaries.length === 1,
+      "newer metadata and repaired thread summary publish after the snapshot reload",
+    );
 
     expect(runtime.state.bootstrap?.conversations[0]).toMatchObject({
       unreadCount: 0,
@@ -5202,6 +5582,122 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
+  it("refetches an aborted startup metadata preview after HTTP epoch recovery", async () => {
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(bootstrapAt("9"), [ownMessage]);
+    const nextEpoch = "eeeeeeee-0000-4000-8000-000000000002";
+    const nextPosition = testPosition("20", nextEpoch);
+    const recoveredMessage = { ...ownMessage, version: 2, body: "Recovered preview history" };
+    const api = new FakeDesktopApi(bootstrapAt("20", { syncCursor: nextPosition }));
+    api.bootstrapResults.push(bootstrapAt("9"));
+    api.histories.set(CONVERSATION_ID, {
+      messages: [recoveredMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    const barrier = deferred<void>();
+    let waiting = false;
+    let writeSignal: AbortSignal | undefined;
+    const stage = vi
+      .spyOn(cache, "stageMetadataPage")
+      .mockImplementationOnce(async (_page, signal) => {
+        writeSignal = signal;
+        waiting = true;
+        await barrier.promise;
+        signal?.throwIfAborted();
+        return false;
+      });
+    const reset = vi.spyOn(cache, "resetProtocolReplica");
+    const runtime = runtimeWith(api, cache);
+    const positions: SyncPosition[] = [];
+    const unsubscribe = runtime.subscribe((state) => {
+      if (state.bootstrap !== null) positions.push(state.bootstrap.syncCursor);
+    });
+    const starting = runtime.start(session);
+    try {
+      await settle(() => waiting, "pending startup metadata preview");
+      expect(stage.mock.calls[0]?.[0].syncCursor).toEqual(testPosition("9"));
+      expect(writeSignal?.aborted).toBe(false);
+      api.channelResults.push({
+        conversation: channel(CONVERSATION_ID, "general"),
+        syncCursor: nextPosition,
+      });
+      await runtime.archiveChannel(CONVERSATION_ID);
+      expect(runtime.state.bootstrap?.syncCursor).toEqual(nextPosition);
+      expect(writeSignal?.aborted).toBe(true);
+      const recoveredViews = positions.length;
+      barrier.resolve();
+      await starting;
+      await settle(
+        () => runtime.state.messages.some((message) => message.body === recoveredMessage.body),
+        "recovered preview selected history",
+      );
+      expect(api.bootstrapRequests).toBe(3);
+      expect(reset).toHaveBeenCalledTimes(1);
+      expect(runtime.state.bootstrap?.syncCursor).toEqual(nextPosition);
+      expect(runtime.state.messages).toEqual([recoveredMessage]);
+      const loaded = await cache.load();
+      expect(loaded.syncCursor).toEqual(nextPosition);
+      expect(loaded.messages).toEqual([recoveredMessage]);
+      expect(
+        positions.slice(recoveredViews).every((position) => position.epoch === nextEpoch),
+      ).toBe(true);
+      expect(runtime.state.error).toBeNull();
+      expect(runtime.state.busy).toBe(false);
+      expect(api.startedCursors).toEqual(["20"]);
+    } finally {
+      barrier.resolve();
+      await starting;
+      unsubscribe();
+      await runtime.stop();
+    }
+  });
+
+  it("reports a current startup metadata preview failure and releases its catalog gate", async () => {
+    const secondMessage = { ...peerMessage, conversationId: SECOND_CONVERSATION_ID };
+    const cached = bootstrapAt("9", {
+      conversations: [
+        channel(CONVERSATION_ID, "general"),
+        channel(SECOND_CONVERSATION_ID, "design"),
+      ],
+    });
+    const cache = new MemoryWorkspaceCache();
+    await cache.replaceSnapshot(cached, [ownMessage, secondMessage]);
+    const retainedCatalog = (await cache.load()).bootstrap?.conversations;
+    const api = new FakeDesktopApi(bootstrapAt("9"));
+    const failure = new Error("The encrypted metadata preview is unavailable");
+    const stage = vi.spyOn(cache, "stageMetadataPage").mockRejectedValueOnce(failure);
+    const runtime = runtimeWith(api, cache);
+    try {
+      await runtime.start(session);
+      expect(stage).toHaveBeenCalledTimes(1);
+      expect(stage.mock.calls[0]?.[0].syncCursor).toEqual(testPosition("9"));
+      expect(stage.mock.calls[0]?.[1]?.aborted).toBe(false);
+      expect(runtime.state.error).toBe(failure.message);
+      expect(runtime.state.busy).toBe(false);
+      expect(runtime.state.stale).toBe(true);
+      expect(runtime.state.bootstrap?.syncCursor).toEqual(testPosition("9"));
+      expect((await cache.load()).syncCursor).toEqual(testPosition("9"));
+      expect(api.bootstrapRequests).toBe(1);
+      expect(api.startedCursors).toEqual([]);
+
+      runtime.selectConversation(SECOND_CONVERSATION_ID);
+      await settle(
+        () =>
+          runtime.state.messages.some(
+            (message) => message.conversationId === SECOND_CONVERSATION_ID,
+          ) && api.historyRequests.includes(SECOND_CONVERSATION_ID),
+        "retained conversation after metadata preview failure",
+      );
+      expect(runtime.state.messages).toContainEqual(secondMessage);
+      expect(runtime.state.error).toBe(failure.message);
+      expect((await cache.load()).bootstrap?.conversations).toEqual(retainedCatalog);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it.each([
     ["metadata", "abort"],
     ["metadata", "no result"],
@@ -5263,6 +5759,10 @@ describe("WorkspaceRuntime", () => {
         expect(writeSignal?.aborted).toBe(true);
         barrier.resolve();
         await starting;
+        await settle(
+          () => runtime.state.messages.some((message) => message.body === recoveredMessage.body),
+          "recovered selected history loaded on demand",
+        );
         expect(reset).toHaveBeenCalledTimes(1);
         expect(runtime.state.bootstrap?.syncCursor).toEqual(nextPosition);
         expect(runtime.state.messages).toEqual([recoveredMessage]);
@@ -5406,6 +5906,12 @@ describe("WorkspaceRuntime", () => {
           () => runtime.state.bootstrap?.syncCursor.epoch === nextEpoch,
           "new epoch history recovered",
         );
+        await settle(
+          () =>
+            runtime.state.messages.some((message) => message.id === OWN_MESSAGE_ID) &&
+            runtime.state.historyLoading.length === 0,
+          "selected history loaded in the new epoch",
+        );
         expect(runtime.state.historyLoading).toEqual([]);
         expect(runtime.state.historyErrors).toEqual({});
         if (mode === "pending") {
@@ -5486,6 +5992,7 @@ describe("WorkspaceRuntime", () => {
     api.conversationTaskResults.push({ tasks: [task], nextCursor: null, hasMore: false });
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
 
     expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
     expect(runtime.state.tasks).toEqual([task]);
@@ -5580,7 +6087,7 @@ describe("WorkspaceRuntime", () => {
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
 
-  it("hydrates only the opening history while restoring tasks for channels and self DM", async () => {
+  it("loads task boards and other histories on demand after metadata membership repair", async () => {
     const selfDmId = "20000000-0000-4000-8000-000000000030";
     const peerDmId = "20000000-0000-4000-8000-000000000031";
     const groupDmId = "20000000-0000-4000-8000-000000000032";
@@ -5607,11 +6114,24 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([]);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
+    await runtime.loadConversationTasks(selfDmId);
     expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
 
     api.bootstrap = { ...api.bootstrap, syncCursor: testPosition("11") };
     api.emitWorkspaceEvent(membershipChanged(MEMBER_EVENT_ID, "11"));
     await settle(() => api.acknowledged.includes("11"), "full membership repair");
+    await settle(() => api.historyRequests.length === 2, "selected history after repair");
+    expect(api.historyRequests).toEqual([CONVERSATION_ID, CONVERSATION_ID]);
+    expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, selfDmId]);
+
+    for (const conversationId of [selfDmId, peerDmId, groupDmId]) {
+      runtime.selectConversation(conversationId);
+      await runtime.loadOlder(conversationId);
+    }
+    await runtime.loadConversationTasks(CONVERSATION_ID);
+    await runtime.loadConversationTasks(selfDmId);
     expect(api.historyRequests).toEqual([
       CONVERSATION_ID,
       CONVERSATION_ID,
@@ -5625,6 +6145,7 @@ describe("WorkspaceRuntime", () => {
       CONVERSATION_ID,
       selfDmId,
     ]);
+    await runtime.stop();
   });
 
   it("hydrates an announcement channel without asking for a task list it cannot have", async () => {
@@ -5664,7 +6185,7 @@ describe("WorkspaceRuntime", () => {
       // The server rejects tasks for an announcement channel, so requesting one would fail the
       // whole snapshot and leave the workspace stuck loading.
       expect(api.historyRequests).toEqual([CONVERSATION_ID, announcementId, builtInId]);
-      expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID]);
+      expect(api.conversationTaskRequests).toEqual([]);
       expect(runtime.state.historyErrors).toEqual({});
     } finally {
       await runtime.stop();
@@ -5681,7 +6202,7 @@ describe("WorkspaceRuntime", () => {
       page: { tasks: [], nextCursor: "task-page-1", hasMore: false },
     },
   ] satisfies { readonly label: string; readonly page: TaskListResponse }[])(
-    "rejects $label before replacing the task snapshot",
+    "rejects $label without blocking chat",
     async ({ page }) => {
       const api = new FakeDesktopApi(bootstrapAt("10"));
       api.conversationTaskResults.push(page);
@@ -5689,15 +6210,16 @@ describe("WorkspaceRuntime", () => {
       const runtime = runtimeWith(api, cache);
 
       await runtime.start(session);
-
-      expect(cache.operations).not.toContain("replaceSnapshot");
-      expect(runtime.state.bootstrap).toBeNull();
-      expect(runtime.state.error).toBe("The workspace task catalog had inconsistent pagination");
-      expect(api.startedCursors).toEqual([]);
+      await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
+      expect(runtime.state.bootstrap).not.toBeNull();
+      expect(runtime.state.taskError).toBe(
+        "The workspace task catalog had inconsistent pagination",
+      );
+      expect(api.startedCursors).toEqual(["10"]);
     },
   );
 
-  it("rejects an empty advancing task page instead of committing a partial snapshot", async () => {
+  it("rejects an empty advancing task page during on-demand loading", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
     api.conversationTaskResults.push({
       tasks: [],
@@ -5708,9 +6230,10 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe("The workspace task catalog did not make progress");
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe("The workspace task catalog did not make progress");
   });
 
   it("rejects an empty terminal task continuation instead of accepting an incomplete page", async () => {
@@ -5723,10 +6246,11 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
     expect(api.conversationTaskPageRequests).toHaveLength(2);
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe("The workspace task catalog did not make progress");
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe("The workspace task catalog did not make progress");
   });
 
   it("rejects a task cursor cycle without repeating requests", async () => {
@@ -5740,14 +6264,45 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
     expect(api.conversationTaskPageRequests.map((request) => request.after)).toEqual([
       undefined,
       "task-page-1",
       "task-page-2",
     ]);
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe("The workspace task catalog did not advance its cursor");
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe("The workspace task catalog did not advance its cursor");
+  });
+
+  it("counts fetched task IDs even when their older versions are not published", async () => {
+    const api = new FakeDesktopApi(bootstrapAt("10"));
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    const newer = { ...task, version: 2 };
+    api.taskMutationResults.push(
+      { task, syncCursor: testPosition("11") },
+      { task: newer, syncCursor: testPosition("12") },
+    );
+    await runtime.createTask({ conversationId: CONVERSATION_ID, title: task.title });
+    await runtime.updateTask(task.id, {
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      assigneeId: task.assigneeId,
+      dueOn: task.dueOn,
+    });
+    api.conversationTaskResults.push(
+      { tasks: [task], nextCursor: "task-page-1", hasMore: true },
+      { tasks: [task], nextCursor: null, hasMore: false },
+    );
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow(
+      "The workspace task catalog repeated a task",
+    );
+    expect((await cache.load()).tasks).toEqual([newer]);
+    expect(runtime.state.tasks).toEqual([newer]);
+    await runtime.stop();
   });
 
   it("rejects duplicate task IDs across catalog pages", async () => {
@@ -5760,9 +6315,10 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe("The workspace task catalog repeated a task");
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe("The workspace task catalog repeated a task");
   });
 
   it.each([
@@ -5787,36 +6343,39 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe(error);
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe(error);
   });
 
-  it("accepts a complete task catalog at the 20,000-task snapshot capacity", async () => {
+  it("accepts a complete task catalog at the 20,000-task collection capacity", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    addTaskCatalogPages(api, WORKSPACE_SNAPSHOT_TASK_LIMIT);
+    addTaskCatalogPages(api, WORKSPACE_TASK_COLLECTION_LIMIT);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
 
-    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT / 200);
-    expect(runtime.state.tasks).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT);
-    expect(cache.operations).toContain("replaceSnapshot");
-    expect(runtime.state.error).toBeNull();
+    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_TASK_COLLECTION_LIMIT / 200);
+    expect(runtime.state.tasks).toHaveLength(WORKSPACE_TASK_COLLECTION_LIMIT);
+    expect(cache.operations).toContain("installSnapshot");
+    expect(runtime.state.taskError).toBeNull();
   });
 
-  it("rejects a task catalog above the 20,000-task snapshot capacity", async () => {
+  it("rejects a task catalog above the 20,000-task collection capacity", async () => {
     const api = new FakeDesktopApi(bootstrapAt("10"));
-    addTaskCatalogPages(api, WORKSPACE_SNAPSHOT_TASK_LIMIT + 1);
+    addTaskCatalogPages(api, WORKSPACE_TASK_COLLECTION_LIMIT + 1);
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
 
     await runtime.start(session);
+    await expect(runtime.loadConversationTasks(CONVERSATION_ID)).rejects.toThrow();
 
-    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_SNAPSHOT_TASK_LIMIT / 200);
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.error).toBe("The workspace task catalog exceeded local capacity");
+    expect(api.conversationTaskPageRequests).toHaveLength(WORKSPACE_TASK_COLLECTION_LIMIT / 200);
+    expect(api.startedCursors).toEqual(["10"]);
+    expect(runtime.state.taskError).toBe("The workspace task catalog exceeded local capacity");
   });
 
   it("keeps a task updated concurrently with a realtime membership refresh", async () => {
@@ -5831,6 +6390,7 @@ describe("WorkspaceRuntime", () => {
     const cache = new FakeWorkspaceCache();
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
+    await runtime.loadConversationTasks(CONVERSATION_ID);
 
     api.bootstrap = bootstrapAt("12");
     api.conversationTaskResults.push({
@@ -5848,6 +6408,11 @@ describe("WorkspaceRuntime", () => {
     await drain();
     expect(api.acknowledged.filter((cursor) => cursor === "12")).toHaveLength(1);
     expect(cache.cursor).toBe("12");
+    expect(runtime.state.tasks).toEqual([task]);
+    expect(
+      runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }).invalidatedAt,
+    ).toEqual(testPosition("12"));
+    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(runtime.state.tasks).toEqual([currentTask]);
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
@@ -5861,10 +6426,7 @@ describe("WorkspaceRuntime", () => {
     };
     const api = new FakeDesktopApi(bootstrapAt("12"));
     api.bootstrapResults.push(bootstrapAt("10"));
-    api.conversationTaskResults.push(
-      { tasks: [task], nextCursor: null, hasMore: false },
-      { tasks: [currentTask], nextCursor: null, hasMore: false },
-    );
+    api.conversationTaskResults.push({ tasks: [currentTask], nextCursor: null, hasMore: false });
     api.syncResults.push({
       status: "accepted",
       response: {
@@ -5888,6 +6450,11 @@ describe("WorkspaceRuntime", () => {
     expect(api.acknowledged).toEqual(["12"]);
     expect(api.startedCursors).toEqual(["12"]);
     expect(cache.cursor).toBe("12");
+    expect(runtime.state.tasks).toEqual([]);
+    expect(runtime.collectionState({ kind: "tasks", conversationId: CONVERSATION_ID }).loaded).toBe(
+      false,
+    );
+    await runtime.loadConversationTasks(CONVERSATION_ID);
     expect(runtime.state.tasks).toEqual([currentTask]);
     expect((await cache.load()).tasks).toEqual([currentTask]);
   });
@@ -6722,7 +7289,7 @@ describe("WorkspaceRuntime", () => {
     expect(cache.cursor).toBe("10");
   });
 
-  it("opens a cached direct message immediately without a snapshot or history refresh", async () => {
+  it("opens a cached direct message immediately while refreshing its selected history", async () => {
     const peerDm = directConversation(DIRECT_CONVERSATION_ID, [USER_ID, PEER_ID]);
     const cachedDirectMessage: Message = {
       ...peerMessage,
@@ -6743,24 +7310,26 @@ describe("WorkspaceRuntime", () => {
       threadsSupported: true,
       nextCursor: null,
     });
-    const runtime = runtimeWith(api, new FakeWorkspaceCache());
+    const cache = new FakeWorkspaceCache();
+    await cache.replaceSnapshot(api.bootstrap, [cachedDirectMessage]);
+    const runtime = runtimeWith(api, cache);
     await runtime.start(session);
-    runtime.selectConversation(DIRECT_CONVERSATION_ID);
-    await settle(
-      () => runtime.state.messages.some((message) => message.id === DIRECT_MESSAGE_ID),
-      "first direct history hydration",
-    );
-    runtime.selectConversation(CONVERSATION_ID);
     const bootstrapRequestsAfterStart = api.bootstrapRequests;
     const historyRequestsAfterStart = api.historyRequests.length;
     expect(runtime.state.selectedConversationId).toBe(CONVERSATION_ID);
     expect(runtime.state.messages).toContainEqual(cachedDirectMessage);
 
     await runtime.createDirectConversation(PEER_ID);
+    await settle(
+      () =>
+        api.historyRequests.length === historyRequestsAfterStart + 1 &&
+        runtime.state.messages.some((message) => message.id === DIRECT_MESSAGE_ID),
+      "cached direct history restored and refreshed",
+    );
 
     expect(api.createdDirectConversations).toEqual([]);
     expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
-    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart + 1);
     expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
     expect(
       runtime.state.messages.filter((item) => item.conversationId === DIRECT_CONVERSATION_ID),
@@ -6769,7 +7338,7 @@ describe("WorkspaceRuntime", () => {
     runtime.selectConversation(CONVERSATION_ID);
     runtime.selectConversation(DIRECT_CONVERSATION_ID);
     expect(api.bootstrapRequests).toBe(bootstrapRequestsAfterStart);
-    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart);
+    expect(api.historyRequests).toHaveLength(historyRequestsAfterStart + 1);
     expect(runtime.state.selectedConversationId).toBe(DIRECT_CONVERSATION_ID);
   });
 
@@ -7691,7 +8260,7 @@ describe("WorkspaceRuntime", () => {
     runtime.selectConversation(SECOND_CONVERSATION_ID);
     await settle(
       () => runtime.state.messages.some((message) => message.id === privateMessage.id),
-      "private history hydration",
+      "selected private history",
     );
     expect(runtime.state.messages).toContainEqual(privateMessage);
 
@@ -7915,6 +8484,16 @@ describe("WorkspaceRuntime", () => {
       thirdConversationId,
     );
 
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === firstMessage.id),
+      "first private history",
+    );
+    runtime.selectConversation(thirdConversationId);
+    await settle(
+      () => runtime.state.messages.some((message) => message.id === secondMessage.id),
+      "second private history",
+    );
     const staleFirstRefresh = deferred<HumanWorkspaceBootstrapResponse>();
     api.bootstrapResults.push(
       staleFirstRefresh.promise,
@@ -7970,6 +8549,95 @@ describe("WorkspaceRuntime", () => {
     expect(runtime.state.outbox).toEqual([]);
     expect(api.sent).toEqual([]);
     expect(runtime.state.error).toBeNull();
+  });
+
+  it("drops an older-history response released after membership repair is acknowledged", async () => {
+    const privateSummary: ConversationSummary = {
+      ...channel(SECOND_CONVERSATION_ID, "leadership"),
+      conversation: {
+        ...channel(SECOND_CONVERSATION_ID, "leadership").conversation,
+        access: "members",
+      },
+      participantIds: [USER_ID],
+      membershipRole: "owner",
+    };
+    const currentPrivateMessage: Message = {
+      ...peerMessage,
+      id: "20000000-0000-4000-8000-000000000076",
+      clientMessageId: "20000000-0000-4000-8000-000000000077",
+      conversationId: SECOND_CONVERSATION_ID,
+    };
+    const olderPrivateMessage: Message = {
+      ...currentPrivateMessage,
+      id: "20000000-0000-4000-8000-000000000078",
+      clientMessageId: "20000000-0000-4000-8000-000000000079",
+      conversationSequence: "0",
+      body: "Must stay purged after a delayed history response",
+    };
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [channel(CONVERSATION_ID, "general"), privateSummary],
+      }),
+    );
+    api.histories.set(SECOND_CONVERSATION_ID, {
+      messages: [currentPrivateMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: "older-private-history",
+    });
+    const cache = new FakeWorkspaceCache();
+    const runtime = runtimeWith(api, cache);
+    await runtime.start(session);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () =>
+        runtime.state.messages.some((message) => message.id === currentPrivateMessage.id) &&
+        runtime.state.historyLoading.length === 0,
+      "private history before older page",
+    );
+
+    const delayedHistory = deferred<MessageHistoryResponse>();
+    api.historyResults.set(SECOND_CONVERSATION_ID, [delayedHistory.promise]);
+    const requestsBeforeLoad = api.historyRequests.length;
+    const loading = runtime.loadOlder(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.length === requestsBeforeLoad + 1,
+      "delayed private history request",
+    );
+
+    api.bootstrapResults.push(bootstrapAt("11"));
+    api.emitWorkspaceEvent(
+      membershipChanged(
+        "20000000-0000-4000-8000-00000000007a",
+        "11",
+        "removed",
+        SECOND_CONVERSATION_ID,
+      ),
+    );
+    await settle(
+      () => api.acknowledged.includes("11"),
+      "history membership repair acknowledgement",
+    );
+
+    delayedHistory.resolve({
+      messages: [olderPrivateMessage],
+      threadSummaries: [],
+      threadsSupported: true,
+      attachments: [],
+      nextCursor: null,
+    });
+    await loading;
+    await drain();
+
+    expect(
+      runtime.state.messages.filter((message) => message.conversationId === SECOND_CONVERSATION_ID),
+    ).toEqual([]);
+    expect(
+      (await cache.load()).messages.filter(
+        (message) => message.conversationId === SECOND_CONVERSATION_ID,
+      ),
+    ).toEqual([]);
+    await runtime.stop();
   });
 
   it.each([false, true])(
@@ -9064,8 +9732,9 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.bootstrap).toBeNull();
+    expect(cache.operations).not.toContain("installSnapshot");
+    expect((await cache.load()).bootstrap).toBeNull();
+    expect((await cache.load()).syncCursor).toBeNull();
     expect(runtime.state.error).toBe(
       "The workspace conversation catalog had inconsistent pagination",
     );
@@ -9086,8 +9755,9 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR]);
-    expect(cache.operations).not.toContain("replaceSnapshot");
-    expect(runtime.state.bootstrap).toBeNull();
+    expect(cache.operations).not.toContain("installSnapshot");
+    expect((await cache.load()).bootstrap).toBeNull();
+    expect((await cache.load()).syncCursor).toBeNull();
     expect(runtime.state.error).toBe("The workspace conversation catalog did not make progress");
   });
 
@@ -9105,7 +9775,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR]);
-    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(cache.operations).not.toContain("installSnapshot");
     expect(runtime.state.error).toBe(
       "The workspace conversation catalog did not advance its cursor",
     );
@@ -9130,7 +9800,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.listedAfter).toEqual([NEXT_PAGE_CURSOR, "page-2"]);
-    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(cache.operations).not.toContain("installSnapshot");
     expect(runtime.state.error).toBe(
       "The workspace conversation catalog did not advance its cursor",
     );
@@ -9149,7 +9819,7 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(cache.operations).not.toContain("installSnapshot");
     expect(runtime.state.error).toBe("The workspace conversation catalog repeated a conversation");
   });
 
@@ -9174,7 +9844,7 @@ describe("WorkspaceRuntime", () => {
     const runtime = runtimeWith(api, cache);
     await runtime.start(session);
 
-    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(cache.operations).not.toContain("installSnapshot");
     expect(runtime.state.error).toBe("The workspace conversation catalog crossed workspace scope");
   });
 
@@ -9189,7 +9859,7 @@ describe("WorkspaceRuntime", () => {
 
     expect(api.listedAfter).toHaveLength(50);
     expect(runtime.state.bootstrap?.conversations).toHaveLength(5_000);
-    expect(cache.operations).toContain("replaceSnapshot");
+    expect(cache.operations).toContain("installSnapshot");
     expect(runtime.state.error).toBeNull();
   });
 
@@ -9203,7 +9873,7 @@ describe("WorkspaceRuntime", () => {
     await runtime.start(session);
 
     expect(api.listedAfter).toHaveLength(50);
-    expect(cache.operations).not.toContain("replaceSnapshot");
+    expect(cache.operations).not.toContain("installSnapshot");
     expect(runtime.state.error).toBe("The workspace conversation catalog exceeded local capacity");
   });
 
@@ -9239,7 +9909,7 @@ describe("WorkspaceRuntime", () => {
       const runtime = runtimeWith(api, cache);
       await runtime.start(session);
       const replacementsBeforeRemoval = cache.operations.filter(
-        (operation) => operation === "replaceSnapshot",
+        (operation) => operation === "installSnapshot",
       ).length;
 
       api.bootstrap = bootstrapAt("11", {
@@ -9273,7 +9943,7 @@ describe("WorkspaceRuntime", () => {
       await settle(() => api.stopRequests === 1, "malformed membership repair block");
       await drain();
 
-      expect(cache.operations.filter((operation) => operation === "replaceSnapshot")).toHaveLength(
+      expect(cache.operations.filter((operation) => operation === "installSnapshot")).toHaveLength(
         replacementsBeforeRemoval,
       );
       expect(cache.cursor).toBe("11");
@@ -9469,7 +10139,7 @@ describe("workspace tasks during deferred history startup", () => {
     }
   });
 
-  it("persists all task boards on a fresh start while fetching only the opening history", async () => {
+  it("persists requested task boards for offline restart without fetching other histories", async () => {
     const cache = new MemoryWorkspaceCache();
     const api = new FakeDesktopApi(snapshot);
     api.histories.set(CONVERSATION_ID, {
@@ -9486,6 +10156,10 @@ describe("workspace tasks during deferred history startup", () => {
     await runtime.start(session);
     try {
       expect(api.historyRequests).toEqual([CONVERSATION_ID]);
+      expect(api.conversationTaskRequests).toEqual([]);
+      expect(runtime.state.tasks).toEqual([]);
+      await runtime.loadConversationTasks(CONVERSATION_ID);
+      await runtime.loadConversationTasks(SECOND_CONVERSATION_ID);
       expect(api.conversationTaskRequests).toEqual([CONVERSATION_ID, SECOND_CONVERSATION_ID]);
       expect((await cache.load()).tasks).toEqual([task, secondTask]);
       await runtime.stop();

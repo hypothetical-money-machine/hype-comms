@@ -979,7 +979,12 @@ describe("main composer focus on conversation changes", () => {
         list.scrollTop = 200;
         if (input !== "browser anchoring") bounds.mockReturnValue(new DOMRect(0, -100, 500, 30));
         if (input === "scroll" || input === "browser anchoring") fireEvent.scroll(list);
-        bounds.mockReturnValue(new DOMRect(0, 600, 500, 30));
+        // Scrolling changes the row's viewport position after each anchor restoration.
+        const prependedRowContentTop = list.scrollTop + 600;
+        Object.defineProperty(list, "scrollHeight", { configurable: true, value: 1_500 });
+        bounds.mockImplementation(
+          () => new DOMRect(0, prependedRowContentTop - list.scrollTop, 500, 30),
+        );
         await act(async () =>
           resolveHistory({
             snapshotPosition: testPosition("10"),

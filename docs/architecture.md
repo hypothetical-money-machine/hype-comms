@@ -394,29 +394,33 @@ temporary downloads are removed on logout and on the next startup. Offline full-
 and offline attachment uploads are deferred: queued sends contain text, mentions, and thread
 context only, and the UI requires connectivity before attaching a file.
 
-A full snapshot replacement authoritatively pages task boards for every visible channel and the
-signed-in person's self DM; peer and group DMs are not task targets and are never queried. The
-aggregate replacement is capped at 20,000 tasks. Inconsistent or cyclic pagination, duplicate task
-IDs, crossed workspace/conversation scope, or capacity overflow fails the entire replacement before
-its bootstrap high-water cursor is committed, so cached task state is never silently retained or
-partially advanced past.
+The renderer loads task boards when opened. Each collection load is capped at 20,000 tasks and
+checks cursor progress, duplicate IDs and workspace/conversation scope. Task pages commit records
+and collection metadata without advancing the workspace replay position. A task-service failure
+leaves the selected chat and realtime connection usable.
 
-Renderer startup and authoritative recovery use this sequence. An ordinary socket reconnect resumes
-from the last durable acknowledgement without rebuilding the snapshot:
+Renderer startup and authoritative recovery use this sequence. An ordinary socket reconnect
+resumes from the last durable acknowledgement without rebuilding the catalog:
 
 1. Render decrypted cache with an explicit stale/offline state while main restores a session.
-2. When an encrypted replica exists, page `/sync` from its durable cursor and apply that catch-up
-   before replacing the snapshot. This repairs any interval main observed while macOS had no
-   renderer without treating notification progress as UI progress.
-3. Build an authoritative snapshot from bootstrap plus every conversation, history, reaction,
-   and eligible task page, then commit it atomically at the bootstrap high-water cursor.
-4. Page `/sync` again from that committed cursor until its current high-water cursor.
-5. Obtain a realtime ticket and connect with the last durably applied cursor; the server
-   replays the connection gap.
-6. For each event, validate its version/audience, apply an idempotent entity upsert/delete and
-   cursor advance in one IndexedDB transaction, then update visible state.
-7. Once membership/conversation state is current, flush the outbox FIFO within each
-   conversation and with at most three conversations in flight.
+2. When an encrypted replica exists, page `/v2/sync` from its durable position before replacing
+   metadata. Notification progress in main is separate from durable renderer progress.
+3. Stage the first bootstrap metadata page and load the selected timeline through one bounded
+   request containing messages, reactions, attachments, thread summaries and its snapshot position.
+   Continue conversation-summary pagination in the background. A cached catalog ahead of the
+   applied position waits for catch-up before its counters replace cached counters.
+4. Commit the complete catalog and bootstrap position, then perform final HTTP catch-up. Staged
+   pages never remove unseen outbox work or advance replay; only the complete catalog can prune
+   revoked conversations. Histories and task boards for unselected conversations are not fetched.
+5. Activate realtime at the applied position. Each event commits its records and position before
+   acknowledgement. Collection reads retain their independent snapshot positions.
+6. Open outbox delivery after complete metadata and final catch-up establish current access.
+   A failed catalog refresh keeps queued work and displays a Retry action that restarts loading.
+
+Older history, other conversations, file lists, task boards and inactive threads load on demand.
+Metadata and collection commits share a publication queue so a metadata reload cannot overwrite a
+page that just committed. Network pagination happens outside that queue. Membership barriers and
+session replacement cancel pending publication; an older operation cannot publish into its replacement.
 
 Duplicate event IDs are ignored, older entity versions cannot overwrite newer data, and a
 cursor is advanced only after durable application. On `CURSOR_EXPIRED`, preserve the
