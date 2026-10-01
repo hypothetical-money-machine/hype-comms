@@ -11,7 +11,7 @@ import {
   workspaceEventSchema,
 } from "@hype-comms/contracts";
 import { escapeIdentifier, type Pool, type QueryResultRow } from "pg";
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { z } from "zod";
 
 import { runMigrations } from "../src/db/migrate.js";
@@ -20,15 +20,7 @@ import { IdentityRepository } from "../src/modules/identity/repository.js";
 import { IdentityService } from "../src/modules/identity/service.js";
 import { hashToken } from "../src/modules/identity/tokens.js";
 import { SignInThrottle } from "../src/throttle.js";
-
-const testDatabaseUrl = process.env.HYPE_COMMS_TEST_DATABASE_URL;
-const describeWithPostgres = testDatabaseUrl === undefined ? describe.skip : describe;
-
-function schemaScopedUrl(databaseUrl: string, schemaName: string): string {
-  const url = new URL(databaseUrl);
-  url.searchParams.set("options", `-csearch_path=${schemaName},public`);
-  return url.toString();
-}
+import { describeWithPostgres, schemaScopedUrl, testDatabaseUrl } from "./helpers/database.js";
 
 async function withFreshSchema(fn: (pool: Pool) => Promise<void>): Promise<void> {
   if (testDatabaseUrl === undefined) return;
@@ -139,6 +131,7 @@ describeWithPostgres("runMigrations", () => {
           "0028_channel_webhooks.sql",
           "0029_humans_only_channels.sql",
           "0030_attachment_retention.sql",
+          "0031_system_channels.sql",
         ],
       });
       await expect(runMigrations(pool)).resolves.toEqual({ applied: [] });
@@ -178,6 +171,7 @@ describeWithPostgres("runMigrations", () => {
         { filename: "0028_channel_webhooks.sql" },
         { filename: "0029_humans_only_channels.sql" },
         { filename: "0030_attachment_retention.sql" },
+        { filename: "0031_system_channels.sql" },
       ]);
 
       const userId = randomUUID();

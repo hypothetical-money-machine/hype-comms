@@ -42,8 +42,8 @@ const THEME_FOUNDATIONS: readonly {
   readonly description: string;
 }[] = [
   { id: "system", label: "System", description: "Match this device" },
-  { id: "light", label: "Light", description: "Bright and crisp" },
-  { id: "dark", label: "Dark", description: "Calm and focused" },
+  { id: "light", label: "Light", description: "Light background" },
+  { id: "dark", label: "Dark", description: "Dark background" },
 ];
 
 function asFoundation(preference: ThemePreference): ThemeFoundation {
@@ -275,12 +275,12 @@ export function ThemeDesigner({
 
       <div className={`theme-designer-editor${mobilePanel === "edit" ? "" : " mobile-hidden"}`}>
         <div className="theme-designer-intro">
-          <p>Build a look that feels like yours.</p>
+          <p>Choose your theme and accent color.</p>
           <span>Your draft stays in this preview until you save it.</span>
         </div>
 
         <fieldset className="theme-foundation-options">
-          <legend>Foundation</legend>
+          <legend>Appearance</legend>
           <div>
             {THEME_FOUNDATIONS.map((foundation) => (
               <label key={foundation.id} className="theme-foundation-option">
@@ -308,7 +308,7 @@ export function ThemeDesigner({
 
         <fieldset className="theme-accent-options">
           <legend>Accent</legend>
-          <p>Choose a signature color. Hype Comms tunes each role for readable contrast.</p>
+          <p>Choose a color for buttons, links, and highlights.</p>
           <div className="theme-accent-presets" role="group" aria-label="Accent presets">
             {THEME_ACCENT_PRESETS.map((preset) => {
               const selected =
@@ -386,14 +386,6 @@ export function ThemeDesigner({
             Use theme default
           </button>
         </fieldset>
-
-        <div className="theme-designer-safety">
-          <span aria-hidden="true">✓</span>
-          <div>
-            <strong>Contrast-aware palette</strong>
-            <p>Text, controls, focus rings, and highlights are derived from your accent.</p>
-          </div>
-        </div>
       </div>
 
       <aside
@@ -404,7 +396,7 @@ export function ThemeDesigner({
           <div>
             <p className="eyebrow">Live preview</p>
             <h3 id="theme-preview-title">
-              {preference === "system" ? "System foundation" : `${preference} foundation`}
+              {THEME_FOUNDATIONS.find((option) => option.id === preference)?.label} theme
             </h3>
           </div>
           <span>
@@ -448,7 +440,7 @@ export function ThemeDesigner({
                 <div>
                   <strong>Claire</strong>
                   <small>10:42 AM</small>
-                  <p>I gave our workspace a fresh new look.</p>
+                  <p>Can you review the channel list?</p>
                   <span className="theme-preview-reaction">✨ 3</span>
                 </div>
               </article>
@@ -457,7 +449,7 @@ export function ThemeDesigner({
                 <div>
                   <strong>Woots</strong>
                   <small>10:43 AM</small>
-                  <p>The new accent feels right at home.</p>
+                  <p>Yes, I will check it this afternoon.</p>
                 </div>
               </article>
             </div>

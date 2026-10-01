@@ -41,6 +41,7 @@ const ALICE_ID = "10000000-0000-4000-8000-000000000009";
 const ZEBRA_ID = "10000000-0000-4000-8000-000000000031";
 const DIRECT_ID = "10000000-0000-4000-8000-000000000032";
 const ALPHA_ID = "10000000-0000-4000-8000-000000000033";
+const BUILT_IN_ID = "10000000-0000-4000-8000-000000000034";
 
 /** Primary-key order is sequence 2, 10, 1 — neither insertion nor sequence order. */
 const MESSAGE_SEQUENCE_2_ID = "10000000-0000-4000-8000-000000000041";
@@ -95,6 +96,19 @@ function channelSummary(id: string, name: string, slug: string): ConversationSum
     unreadCount: 0,
     mentionCount: 0,
     readCursor: null,
+  };
+}
+
+/** A server-owned built-in channel: reserved slug namespace plus the explicit marker. */
+function builtInSummary(): ConversationSummary {
+  const base = channelSummary(BUILT_IN_ID, "Release notes", "hype/release-notes");
+  return {
+    ...base,
+    conversation: {
+      ...base.conversation,
+      channelMode: "announcement",
+      isBuiltIn: true,
+    },
   };
 }
 
@@ -569,6 +583,29 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(alpha?.lastMessage?.id).toBe(MESSAGE_SEQUENCE_2_ID);
     expect(alpha?.unreadCount).toBe(1);
     expect(alpha?.mentionCount).toBe(1);
+  });
+
+  it("round-trips a built-in channel and a conversation cached without the marker", async () => {
+    const cache = create();
+    await cache.replaceSnapshot(
+      { ...snapshot, conversations: [...snapshot.conversations, builtInSummary()] },
+      [],
+    );
+
+    const loaded = await cache.load();
+    const restored = loaded.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === BUILT_IN_ID,
+    );
+    expect(restored?.conversation).toMatchObject({
+      slug: "hype/release-notes",
+      channelMode: "announcement",
+      isBuiltIn: true,
+    });
+    // An ordinary channel keeps the key absent, matching what a pre-built-in cache record holds.
+    const ordinary = loaded.bootstrap?.conversations.find(
+      (summary) => summary.conversation.id === ZEBRA_ID,
+    );
+    expect(ordinary?.conversation).not.toHaveProperty("isBuiltIn");
   });
 
   it("orders messages by conversation sequence after an out-of-order upsertHistory", async () => {
