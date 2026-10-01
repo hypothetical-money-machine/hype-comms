@@ -7,6 +7,7 @@ import type {
   ChatSessionState,
   HumanWorkspaceBootstrapResponse,
   Message,
+  MessageHistoryResponse,
   NotificationAction,
   NotificationActionAcknowledgement,
   NotificationContext,
@@ -19,7 +20,7 @@ import type {
   UpdateState,
 } from "@hype-comms/contracts";
 import { createElement } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopApi } from "../../shared/desktop-api";
 import type { AttachmentUploadResult } from "../../shared/attachment-upload";
@@ -462,6 +463,46 @@ function parkFocus(): { readonly sentinel: HTMLButtonElement; readonly dispose: 
 }
 
 afterEach(() => cleanup());
+
+describe("conversation history loading", () => {
+  it("shows the pending first visit, reports failure, and retries from the conversation pane", async () => {
+    const harness = await renderWorkspace();
+    let rejectHistory: (error: Error) => void = () => undefined;
+    const history = new Promise<MessageHistoryResponse>((_resolve, reject) => {
+      rejectHistory = reject;
+    });
+    const request = vi
+      .spyOn(harness.client, "getConversationMessages")
+      .mockReturnValueOnce(history);
+    fireEvent.click(screen.getByRole("button", { name: "Launch Planning" }));
+
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Loading messages…" }).disabled,
+    ).toBe(true);
+    expect(screen.getByText("Loading conversation history…").getAttribute("role")).toBe("status");
+    await act(async () => rejectHistory(new Error("History is temporarily unavailable")));
+    expect(screen.getByRole("alert").textContent).toBe("History is temporarily unavailable");
+    expect(screen.queryByText("Loading conversation history…")).toBeNull();
+
+    request.mockResolvedValueOnce({
+      messages: [launchMessage],
+      attachments: [],
+      threadSummaries: [],
+      threadsSupported: true,
+      nextCursor: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading messages" }));
+    await waitFor(() =>
+      expect(
+        document.querySelector(`article[data-message-id="${LAUNCH_MESSAGE_ID}"]`),
+      ).not.toBeNull(),
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry loading messages" })).toBeNull();
+    expect(request).toHaveBeenCalledTimes(2);
+    request.mockRestore();
+  });
+});
 
 describe("composer attachment uploads", () => {
   it("uses the attachment count when a multi-file message has no text", async () => {
