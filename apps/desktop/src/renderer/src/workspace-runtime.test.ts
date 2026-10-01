@@ -1825,8 +1825,15 @@ describe("WorkspaceRuntime", () => {
     }
   });
 
-  it("exposes a catalog retry when refresh fails after an archive mutation", async () => {
-    const api = new FakeDesktopApi(bootstrapAt("10"));
+  it("retires a failed catalog gate so retained chat and sends stay usable", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "other"),
+        ],
+      }),
+    );
     const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
     api.channelResults.push({
@@ -1840,13 +1847,61 @@ describe("WorkspaceRuntime", () => {
       busy: false,
       error: "The workspace is temporarily unavailable",
     });
-    await runtime.sendMessage(CONVERSATION_ID, "Queued during catalog recovery", []);
-    expect(api.sent).toEqual([]);
-    expect(runtime.state.outbox).toHaveLength(1);
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await settle(
+      () => api.historyRequests.includes(SECOND_CONVERSATION_ID),
+      "retained conversation hydration after catalog failure",
+    );
     api.sendResults.push({ status: "permanent", reason: "validation" });
+    await runtime.sendMessage(SECOND_CONVERSATION_ID, "Send during catalog recovery", []);
+    await settle(() => api.sent.length === 1, "outbox delivery after catalog failure");
+    expect(api.sent[0]?.conversationId).toBe(SECOND_CONVERSATION_ID);
+    await runtime.stop();
+  });
+
+  it("does not let an older catalog request retire a newer partial catalog gate", async () => {
+    const api = new FakeDesktopApi(
+      bootstrapAt("10", {
+        conversations: [
+          channel(CONVERSATION_ID, "general"),
+          channel(SECOND_CONVERSATION_ID, "other"),
+        ],
+      }),
+    );
+    const runtime = runtimeWith(api, new FakeWorkspaceCache());
     await runtime.start(session);
-    expect(api.sent).toHaveLength(1);
-    expect(runtime.state.error).toBeNull();
+    const older = deferred<HumanWorkspaceBootstrapResponse>();
+    const continuation = deferred<ListConversationsResponse>();
+    const pages = vi.spyOn(api, "listConversations");
+    api.bootstrapResults.push(
+      older.promise,
+      bootstrapAt("10", { conversationsHasMore: true, conversationsNextCursor: NEXT_PAGE_CURSOR }),
+    );
+    api.conversationPages.set(NEXT_PAGE_CURSOR, continuation.promise);
+    api.channelResults.push(
+      { conversation: channel(CONVERSATION_ID, "general"), syncCursor: testPosition("10") },
+      { conversation: channel(CONVERSATION_ID, "general"), syncCursor: testPosition("10") },
+    );
+    const before = api.bootstrapRequests;
+    const first = runtime.archiveChannel(CONVERSATION_ID);
+    await settle(() => api.bootstrapRequests === before + 1, "older catalog request");
+    const second = runtime.archiveChannel(CONVERSATION_ID);
+    await settle(() => pages.mock.calls.length === 1, "newer partial catalog staged");
+    older.resolve(bootstrapAt("10"));
+    await first;
+    runtime.selectConversation(SECOND_CONVERSATION_ID);
+    await drain();
+    expect(api.historyRequests).not.toContain(SECOND_CONVERSATION_ID);
+    continuation.resolve({
+      conversations: [channel(SECOND_CONVERSATION_ID, "other")],
+      nextCursor: null,
+      hasMore: false,
+    });
+    await second;
+    await settle(
+      () => api.historyRequests.includes(SECOND_CONVERSATION_ID),
+      "history after newer catalog commits",
+    );
     await runtime.stop();
   });
 

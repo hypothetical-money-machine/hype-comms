@@ -2839,6 +2839,17 @@ export class WorkspaceRuntime {
         if (this.#membershipRepairPending) throw error;
       }
       return false;
+    } finally {
+      // Only this request can retire its partial-catalog gate. A superseding refresh keeps
+      // its own gate until the complete catalog has committed and been published.
+      if (
+        generation === this.#generation &&
+        request === this.#catalogRequest &&
+        this.#catalogConfirmedIds === confirmed
+      ) {
+        this.#catalogPending = false;
+        this.#catalogConfirmedIds = null;
+      }
     }
   }
 
