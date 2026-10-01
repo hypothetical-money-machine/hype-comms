@@ -116,6 +116,54 @@ export function conversationVisibilitySql(
     )
   )`;
 }
+export async function requireVisibleConversation(
+  client: PoolClient,
+  identity: AuthenticatedTaskIdentity,
+  conversationId: string,
+  requireWritable: boolean,
+  lock = false,
+): Promise<ConversationRow> {
+  const result = await client.query<ConversationRow>(
+    `SELECT *
+         FROM conversations AS conversation
+        WHERE conversation.id = $1
+          AND conversation.workspace_id = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}
+          AND ($4::boolean = false OR conversation.is_archived = false)
+        ${lock ? "FOR UPDATE" : ""}`,
+    [
+      conversationId,
+      identity.currentUser.workspaceId,
+      identity.currentUser.user.id,
+      requireWritable,
+    ],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
+  return row;
+}
+
+export async function requireVisibleChannelBySlug(
+  client: PoolClient,
+  identity: AuthenticatedTaskIdentity,
+  channelSlug: string,
+  requireWritable: boolean,
+): Promise<ConversationRow> {
+  const result = await client.query<ConversationRow>(
+    `SELECT *
+         FROM conversations AS conversation
+        WHERE conversation.workspace_id = $1
+          AND conversation.kind = 'channel'
+          AND conversation.slug = $2
+          AND ${conversationVisibilitySql("conversation", "$3")}
+          AND ($4::boolean = false OR conversation.is_archived = false)`,
+    [identity.currentUser.workspaceId, channelSlug, identity.currentUser.user.id, requireWritable],
+  );
+  const row = result.rows[0];
+  if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
+  return row;
+}
+
 export class WorkspaceAuthorization {
   constructor(private readonly pool: Pool) {}
 
@@ -425,24 +473,7 @@ export class WorkspaceAuthorization {
     requireWritable: boolean,
     lock = false,
   ): Promise<ConversationRow> {
-    const result = await client.query<ConversationRow>(
-      `SELECT *
-         FROM conversations AS conversation
-        WHERE conversation.id = $1
-          AND conversation.workspace_id = $2
-          AND ${conversationVisibilitySql("conversation", "$3")}
-          AND ($4::boolean = false OR conversation.is_archived = false)
-        ${lock ? "FOR UPDATE" : ""}`,
-      [
-        conversationId,
-        identity.currentUser.workspaceId,
-        identity.currentUser.user.id,
-        requireWritable,
-      ],
-    );
-    const row = result.rows[0];
-    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Conversation not found");
-    return row;
+    return requireVisibleConversation(client, identity, conversationId, requireWritable, lock);
   }
 
   async requireActivePrincipal(
@@ -560,24 +591,7 @@ export class WorkspaceAuthorization {
     channelSlug: string,
     requireWritable: boolean,
   ): Promise<ConversationRow> {
-    const result = await client.query<ConversationRow>(
-      `SELECT *
-         FROM conversations AS conversation
-        WHERE conversation.workspace_id = $1
-          AND conversation.kind = 'channel'
-          AND conversation.slug = $2
-          AND ${conversationVisibilitySql("conversation", "$3")}
-          AND ($4::boolean = false OR conversation.is_archived = false)`,
-      [
-        identity.currentUser.workspaceId,
-        channelSlug,
-        identity.currentUser.user.id,
-        requireWritable,
-      ],
-    );
-    const row = result.rows[0];
-    if (row === undefined) throw new ApiError(404, "NOT_FOUND", "Channel not found");
-    return row;
+    return requireVisibleChannelBySlug(client, identity, channelSlug, requireWritable);
   }
 
   async requireManagedChannel(
