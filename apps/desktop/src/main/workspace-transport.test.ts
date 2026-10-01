@@ -396,6 +396,176 @@ describe("WorkspaceTransport credential rotation", () => {
       }
     },
   );
+
+  it.each(["bootstrap", "channel creation"] as const)(
+    "keeps general %s requests transient when another rotation supersedes the rejected retry",
+    async (operation) => {
+      const cookies = new MemoryCookies();
+      cookies.values.set("hype_comms_session", "initial-cookie");
+      let startFirst!: () => void;
+      let finishFirst!: () => void;
+      let startRetry!: () => void;
+      let finishRetry!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        startFirst = resolve;
+      });
+      const firstCanFinish = new Promise<void>((resolve) => {
+        finishFirst = resolve;
+      });
+      const retryStarted = new Promise<void>((resolve) => {
+        startRetry = resolve;
+      });
+      const retryCanFinish = new Promise<void>((resolve) => {
+        finishRetry = resolve;
+      });
+      const requests: {
+        readonly credential: string | undefined;
+        readonly url: string;
+        readonly method: RequestInit["method"];
+        readonly key: string | null;
+        readonly body: RequestInit["body"];
+      }[] = [];
+      const staleRejection = jsonResponse(
+        { error: { code: "UNAUTHORIZED", message: "Authentication required", requestId: "old" } },
+        401,
+      );
+      staleRejection.headers.set("retry-after", "9");
+      const staleBody = staleRejection.body;
+      if (staleBody === null) throw new Error("Expected the rejection body");
+      const cancelStaleBody = vi.spyOn(staleBody, "cancel");
+      const readStaleBody = vi.spyOn(staleRejection, "json");
+      const accepted =
+        operation === "bootstrap"
+          ? BOOTSTRAP_RESPONSE
+          : { conversation: BOOTSTRAP_RESPONSE.conversations[0], syncCursor: "43" };
+      let rotations = 0;
+      const session = new ChatSession({
+        apiOrigin: API_ORIGIN,
+        authVariant: "production",
+        cookies,
+        request: async (url, init) => {
+          if (url.endsWith("/v1/auth/me")) return jsonResponse(CURRENT_USER);
+          if (url.endsWith("/v1/auth/session/refresh")) {
+            rotations += 1;
+            cookies.values.set("hype_comms_session", `rotated-cookie-${rotations}`);
+            return statusResponse(204);
+          }
+          requests.push({
+            credential: cookies.values.get("hype_comms_session"),
+            url,
+            method: init.method,
+            key: new Headers(init.headers).get("idempotency-key"),
+            body: init.body,
+          });
+          if (requests.length === 1) {
+            startFirst();
+            await firstCanFinish;
+            return statusResponse(401);
+          }
+          if (requests.length === 2) {
+            startRetry();
+            await retryCanFinish;
+            return staleRejection;
+          }
+          return jsonResponse(accepted);
+        },
+      });
+      const transport = new WorkspaceTransport(API_ORIGIN, session);
+      const attempt = () =>
+        operation === "bootstrap"
+          ? transport.bootstrap()
+          : transport.createChannel({
+              name: "Alpha Team",
+              slug: "alpha-team",
+              topic: null,
+              access: "workspace",
+              idempotencyKey: CLIENT_MESSAGE_ID,
+            });
+
+      try {
+        await session.restore();
+        const firstAttempt = attempt();
+        await firstStarted;
+        await session.renewSession();
+        finishFirst();
+        await retryStarted;
+        await session.renewSession();
+        finishRetry();
+
+        await expect(firstAttempt).rejects.toMatchObject({
+          name: "WorkspaceRequestError",
+          message: "Workspace request was interrupted. Please retry.",
+          status: 503,
+          retryAfterMs: null,
+        });
+        expect(readStaleBody).not.toHaveBeenCalled();
+        expect(cancelStaleBody).toHaveBeenCalledOnce();
+        expect(requests).toHaveLength(2);
+        expect(cookies.removals).toEqual([]);
+        expect(cookies.values.get("hype_comms_session")).toBe("rotated-cookie-2");
+        expect(session.state).toMatchObject({ status: "signed-in" });
+
+        await expect(attempt()).resolves.toEqual(accepted);
+        expect(requests.map((request) => request.credential)).toEqual([
+          "initial-cookie",
+          "rotated-cookie-1",
+          "rotated-cookie-2",
+        ]);
+        expect(new Set(requests.map((request) => request.url)).size).toBe(1);
+        expect(new Set(requests.map((request) => request.method))).toEqual(
+          new Set([operation === "bootstrap" ? "GET" : "POST"]),
+        );
+        expect(requests.map((request) => request.key)).toEqual(
+          Array<string | null>(3).fill(operation === "bootstrap" ? null : CLIENT_MESSAGE_ID),
+        );
+        expect(requests.map((request) => request.body)).toEqual(
+          Array<RequestInit["body"]>(3).fill(
+            operation === "bootstrap"
+              ? undefined
+              : JSON.stringify({
+                  name: "Alpha Team",
+                  slug: "alpha-team",
+                  topic: null,
+                  access: "workspace",
+                }),
+          ),
+        );
+      } finally {
+        finishFirst();
+        finishRetry();
+        session.stop();
+      }
+    },
+  );
+
+  it("keeps a current general-request credential rejection as 401 and signs out", async () => {
+    const { transport, session } = createTransport(async (url) =>
+      url.endsWith("/v1/auth/me")
+        ? jsonResponse(CURRENT_USER)
+        : jsonResponse(
+            {
+              error: {
+                code: "UNAUTHORIZED",
+                message: "Authentication required",
+                requestId: "current",
+              },
+            },
+            401,
+          ),
+    );
+    try {
+      await session.restore();
+      await expect(transport.bootstrap()).rejects.toMatchObject({
+        name: "WorkspaceRequestError",
+        message: "Authentication required",
+        status: 401,
+        retryAfterMs: null,
+      });
+      expect(session.state).toEqual({ status: "signed-out" });
+    } finally {
+      session.stop();
+    }
+  });
 });
 
 describe("WorkspaceTransport bootstrap compatibility", () => {
