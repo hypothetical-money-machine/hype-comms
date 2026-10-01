@@ -27,8 +27,54 @@ export function writeResult(io: CliIo, value: unknown, json: boolean): void {
   );
 }
 
-export function writeEvent(io: CliIo, value: unknown): boolean {
-  return write(io.stdout, JSON.stringify(value));
+/** A watch position is accepted only when the writable confirms delivery of its NDJSON line. */
+export class EventWriter {
+  static readonly #abandonedStreams = new WeakSet<CliIo["stdout"]>();
+  static isOutputAbandoned(stream: CliIo["stdout"]): boolean {
+    return this.#abandonedStreams.has(stream);
+  }
+  #failure: Error | undefined;
+  readonly #pending = new Set<(error: Error) => void>();
+  readonly #failed = (error: Error): void => {
+    this.#failure = error;
+    for (const reject of this.#pending) reject(error);
+    this.#pending.clear();
+  };
+  readonly #closed = (): void => this.#failed(new Error("Event output closed"));
+  constructor(private readonly stream: CliIo["stdout"]) {
+    stream.on("error", this.#failed);
+    stream.on("close", this.#closed);
+  }
+  async write(value: unknown): Promise<void> {
+    if (this.#failure !== undefined) throw this.#failure;
+    if (this.stream.destroyed || this.stream.writableEnded)
+      throw new Error("Event output is unavailable");
+    await new Promise<void>((resolve, reject) => {
+      this.#pending.add(reject);
+      try {
+        this.stream.write(`${JSON.stringify(value)}\n`, (error) => {
+          this.#pending.delete(reject);
+          if (error != null) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        this.#pending.delete(reject);
+        reject(error);
+      }
+    });
+  }
+  dispose(): void {
+    const pending = this.#pending.size > 0;
+    this.#closed();
+    // A stopped watch must release an OS pipe write whose reader has stopped consuming. Merely
+    // rejecting our promise leaves that write keeping the process alive.
+    if (pending) {
+      EventWriter.#abandonedStreams.add(this.stream);
+      this.stream.destroy();
+    }
+    this.stream.off("error", this.#failed);
+    this.stream.off("close", this.#closed);
+  }
 }
 
 export function writeDiagnostic(io: CliIo, value: string): void {

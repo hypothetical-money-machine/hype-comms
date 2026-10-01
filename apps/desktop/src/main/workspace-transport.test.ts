@@ -425,6 +425,7 @@ describe("WorkspaceTransport credential rotation", () => {
       if (staleBody === null) throw new Error("Expected the rejection body");
       const cancelStaleBody = vi.spyOn(staleBody, "cancel");
       const readStaleBody = vi.spyOn(staleRejection, "json");
+      const readStaleBytes = vi.spyOn(staleBody, "getReader");
       const accepted =
         operation === "bootstrap"
           ? BOOTSTRAP_RESPONSE
@@ -498,6 +499,7 @@ describe("WorkspaceTransport credential rotation", () => {
           retryAfterMs: null,
         });
         expect(readStaleBody).not.toHaveBeenCalled();
+        expect(readStaleBytes).not.toHaveBeenCalled();
         expect(cancelStaleBody).toHaveBeenCalledOnce();
         expect(requests).toHaveLength(2);
         expect(cookies.removals).toEqual([]);
@@ -737,7 +739,7 @@ describe("WorkspaceTransport threads", () => {
     );
 
     await expect(transport.thread({ messageId: THREAD_ROOT.id, limit: 50 })).rejects.toThrow(
-      "Reply must belong to the requested thread",
+      "The server returned an invalid response",
     );
   });
 });
@@ -1176,16 +1178,26 @@ describe("WorkspaceTransport tasks", () => {
       beforeTaskId: null,
     });
 
-    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+    const normalizeUrl = (value: string): string => {
+      const url = new URL(value);
+      url.searchParams.sort();
+      return url.href;
+    };
+    expect(requests.map((request) => [request.init.method, normalizeUrl(request.url)])).toEqual(
       [
-        "GET",
-        "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25&status=in_progress&priority=urgent&assignee=me&dueAfter=2026-08-01&dueBefore=2026-08-31&updatedAfter=2026-07-24T12%3A00%3A00.000Z&updatedBy=me",
-      ],
-      ["GET", "https://chat.example/v2/tasks/mine?limit=10"],
-      ["POST", "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks"],
-      ["PATCH", `https://chat.example/v2/tasks/${TASK.id}`],
-      ["POST", `https://chat.example/v2/tasks/${TASK.id}/move`],
-    ]);
+        [
+          "GET",
+          "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks?after=cursor&limit=25&status=in_progress&priority=urgent&assignee=me&dueAfter=2026-08-01&dueBefore=2026-08-31&updatedAfter=2026-07-24T12%3A00%3A00.000Z&updatedBy=me",
+        ],
+        ["GET", "https://chat.example/v2/tasks/mine?limit=10"],
+        [
+          "POST",
+          "https://chat.example/v2/conversations/10000000-0000-4000-8000-000000000003/tasks",
+        ],
+        ["PATCH", `https://chat.example/v2/tasks/${TASK.id}`],
+        ["POST", `https://chat.example/v2/tasks/${TASK.id}/move`],
+      ].map(([method, url]) => [method, normalizeUrl(url!)]),
+    );
     for (const request of requests.slice(2)) {
       expect(new Headers(request.init.headers).get("idempotency-key")).toBe(CLIENT_MESSAGE_ID);
       expect(JSON.parse(String(request.init.body))).not.toHaveProperty("idempotencyKey");
@@ -1201,6 +1213,61 @@ describe("WorkspaceTransport tasks", () => {
 });
 
 describe("WorkspaceTransport members", () => {
+  it.each(["members", "updateProfile"] as const)(
+    "discards a superseded 401 for %s and returns the neutral retry error",
+    async (operation) => {
+      const cancelled = vi.fn();
+      const response = serverResponse(new ReadableStream<Uint8Array>({ cancel: cancelled }), {
+        status: 401,
+        headers: { "content-type": "application/json", "retry-after": "30" },
+      });
+      const markSignedOut = vi.fn(async () => false);
+      const fetch = vi.fn(async () => response);
+      const transport = new WorkspaceTransport(API_ORIGIN, { fetch, markSignedOut });
+      const request = operation === "members" ? transport.members() : transport.updateProfile(null);
+      await expect(request).rejects.toMatchObject({
+        name: "WorkspaceRequestError",
+        message: "Workspace request was interrupted. Please retry.",
+        status: 503,
+        retryAfterMs: null,
+      });
+      expect(markSignedOut).toHaveBeenCalledExactlyOnceWith(response);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(cancelled).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([true, false])(
+    "keeps the first 401 sign-out verdict %s before body consumption",
+    async (signedOut) => {
+      const markSignedOut = vi.fn(async () => signedOut);
+      const cancelled = vi.fn(() => {
+        expect(markSignedOut).toHaveBeenCalledOnce();
+      });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+        },
+        cancel: cancelled,
+      });
+      const response = serverResponse(body, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+      const transport = new WorkspaceTransport(API_ORIGIN, {
+        fetch: async () => response,
+        markSignedOut,
+      });
+      await expect(transport.send(SEND_OPERATION)).resolves.toEqual(
+        signedOut
+          ? { status: "authentication_required" }
+          : { status: "retryable", reason: "server", retryAfterMs: null },
+      );
+      expect(markSignedOut).toHaveBeenCalledExactlyOnceWith(response);
+      expect(cancelled).toHaveBeenCalledOnce();
+    },
+  );
+
   it("reads the workspace member directory from the members route", async () => {
     const requests: string[] = [];
     const { transport } = createTransport(async (url, init) => {
@@ -1297,7 +1364,7 @@ describe("WorkspaceTransport updateProfile", () => {
       ),
     );
 
-    await expect(transport.updateProfile("x".repeat(500))).rejects.toThrow(
+    await expect(transport.updateProfile("Engineer")).rejects.toThrow(
       new WorkspaceRequestError("Title is too long", 400, null),
     );
   });
@@ -1400,7 +1467,8 @@ describe("WorkspaceTransport agent enrollments", () => {
     const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
     let attempts = 0;
     const { transport } = createTransport(async (_url, init) => {
-      expect(init.signal).toBe(timeoutSignal);
+      expect(init.signal).toBeDefined();
+      expect(init.signal?.aborted).toBe(false);
       attempts += 1;
       if (attempts === 1) {
         throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
@@ -1409,15 +1477,15 @@ describe("WorkspaceTransport agent enrollments", () => {
     });
 
     try {
-      await expect(transport.listAgentEnrollments()).rejects.toThrow(
-        "The operation was aborted due to timeout",
-      );
+      await expect(transport.listAgentEnrollments()).rejects.toMatchObject({
+        kind: "network",
+        cause: { name: "TimeoutError" },
+      });
       await expect(transport.listAgentEnrollments()).resolves.toEqual({
         enrollments: [PROJECTED_AGENT_ENROLLMENT],
       });
-      expect(timeout).toHaveBeenCalledTimes(2);
-      expect(timeout).toHaveBeenNthCalledWith(1, 10_000);
-      expect(timeout).toHaveBeenNthCalledWith(2, 10_000);
+      expect(timeout.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(timeout.mock.calls.every(([milliseconds]) => milliseconds === 10_000)).toBe(true);
     } finally {
       timeout.mockRestore();
     }

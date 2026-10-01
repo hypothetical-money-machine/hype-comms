@@ -43,11 +43,15 @@ describe("scoped workspace networking", () => {
         start(controller) {
           body = controller;
         },
-        pull() {
-          reading.resolve();
-        },
       }),
+      { headers: { "content-type": "application/json" } },
     );
+    const originalReader = response.body!.getReader.bind(response.body!);
+    vi.spyOn(response.body!, "getReader").mockImplementation(() => {
+      const reader = originalReader();
+      reading.resolve();
+      return reader;
+    });
     const scoped = scopedWorkspaceSession(
       { fetch: async () => response, markSignedOut: async () => true },
       session,
@@ -96,10 +100,12 @@ describe("scoped workspace networking", () => {
       async () => new Response(),
     );
     let signOutGuard: (() => boolean) | undefined;
+    let signOutResponse: Response | undefined;
     const scoped = scopedWorkspaceSession(
       {
         fetch,
-        markSignedOut: async (_response, isCurrent) => {
+        markSignedOut: async (response, isCurrent) => {
+          signOutResponse = response;
           signOutGuard = isCurrent;
           return false;
         },
@@ -110,7 +116,9 @@ describe("scoped workspace networking", () => {
     const signal = fetch.mock.calls[0]?.[1].signal;
     caller.abort();
     expect(signal?.aborted).toBe(true);
-    await expect(scoped.markSignedOut(new Response(null, { status: 401 }))).resolves.toBe(false);
+    const rejected = new Response(null, { status: 401 });
+    await expect(scoped.markSignedOut(rejected)).resolves.toBe(false);
+    expect(signOutResponse).toBe(rejected);
     expect(signOutGuard?.()).toBe(true);
     let callerIsCurrent = false;
     await expect(

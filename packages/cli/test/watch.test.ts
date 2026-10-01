@@ -1,19 +1,19 @@
 import { testPosition } from "./support/sync-position.js";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 
-import {} from "@hype-comms/contracts";
+import { productRealtimeEventSchema } from "@hype-comms/contracts";
 
 import { executeCli } from "../src/cli.js";
-import { RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
+import { ApiClient, RESPONSE_BODY_MAX_BYTES } from "../src/client.js";
 import { MAX_RETRY_AFTER_MS } from "../src/errors.js";
-import { laterCursor, watchRetryDelayMs } from "../src/watch.js";
+import { laterCursor, watchProductRealtime, watchRetryDelayMs } from "../src/watch.js";
 import {
   bootstrap,
   CLIENT_MESSAGE_ID,
@@ -79,6 +79,308 @@ describe("watch", () => {
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: { code: "INVALID_SERVER_CONTRACT", retryable: false },
     });
+  });
+
+  it("keeps reconnect at the old position until delayed output succeeds", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing server address");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const abort = new AbortController();
+    let release: () => void = () => undefined;
+    const output = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const positions: string[] = [];
+    const delivered: string[] = [];
+    let second: WebSocket | undefined;
+    const envelope = {
+      version: 1,
+      id: crypto.randomUUID(),
+      occurredAt: TIMESTAMP,
+      workspaceId: WORKSPACE_ID,
+      conversationId: null,
+      conversationSequence: null,
+      entityVersion: 1,
+      delivery: "at_least_once",
+    };
+    const connected = productRealtimeEventSchema.parse({
+      ...envelope,
+      type: "system.connected",
+      position: testPosition("5"),
+      payload: { connectionId: crypto.randomUUID(), userId: USER_ID },
+    });
+    const member = productRealtimeEventSchema.parse({
+      ...envelope,
+      id: crypto.randomUUID(),
+      type: "member.updated",
+      position: testPosition("6"),
+      payload: { member: bootstrap().currentUser.user },
+    });
+    server.on("connection", (socket, request) => {
+      const url = new URL(request.url!, origin);
+      positions.push((JSON.parse(url.searchParams.get("after")!) as { sequence: string }).sequence);
+      if (positions.length === 1) {
+        socket.send(JSON.stringify(connected));
+        socket.send(JSON.stringify(member), () => socket.close(1011));
+      } else if (positions.length === 2) second = socket;
+      else
+        socket.send(
+          JSON.stringify({
+            ...envelope,
+            type: "system.resync_required",
+            position: testPosition("6"),
+            payload: { reason: "cursor_expired" },
+          }),
+        );
+    });
+    const client = new ApiClient({
+      profile: {
+        name: "test",
+        apiOrigin: origin,
+        credentialFromEnvironment: false,
+        configDirectory: "/unused",
+      },
+      fetch: async () =>
+        jsonResponse({ ticket: "t".repeat(32), position: testPosition("5"), expiresAt: TIMESTAMP }),
+      timeoutMs: 5_000,
+    });
+    const watching = watchProductRealtime({
+      client,
+      origin,
+      after: testPosition("5"),
+      workspaceId: WORKSPACE_ID,
+      userId: USER_ID,
+      timeoutMs: 5_000,
+      random: () => 0,
+      signal: abort.signal,
+      async onEvent(event) {
+        if (event.type === "member.updated") await output;
+        delivered.push(event.type);
+      },
+    });
+    const result = expect(watching).rejects.toMatchObject({ code: "RESYNC_REQUIRED" });
+    try {
+      await vi.waitFor(() => expect(positions).toHaveLength(2), { timeout: 2_000 });
+      expect(positions).toEqual(["5", "5"]);
+      expect(delivered).toEqual(["system.connected"]);
+      release();
+      await vi.waitFor(() => expect(delivered).toContain("member.updated"));
+      second!.close(1011);
+      await result;
+      expect(positions).toEqual(["5", "5", "6"]);
+    } finally {
+      release();
+      abort.abort();
+      await watching.catch(() => undefined);
+    }
+  });
+
+  it.each(["abort", "revoked", "resync"] as const)(
+    "bounds shutdown after %s while output is stalled and ignores late completion",
+    async (terminal) => {
+      const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+      servers.push(server);
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        throw new Error("Missing server address");
+      const origin = `http://127.0.0.1:${address.port}`;
+      const abort = new AbortController();
+      let release: () => void = () => undefined;
+      const output = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let socket: WebSocket | undefined;
+      const delivered: string[] = [];
+      server.on("connection", (connected) => {
+        socket = connected;
+        connected.send(
+          JSON.stringify({
+            version: 1,
+            id: crypto.randomUUID(),
+            type: "system.connected",
+            occurredAt: TIMESTAMP,
+            workspaceId: WORKSPACE_ID,
+            conversationId: null,
+            conversationSequence: null,
+            position: testPosition("6"),
+            entityVersion: 1,
+            delivery: "at_least_once",
+            payload: { connectionId: crypto.randomUUID(), userId: USER_ID },
+          }),
+        );
+      });
+      const client = new ApiClient({
+        profile: {
+          name: "test",
+          apiOrigin: origin,
+          credentialFromEnvironment: false,
+          configDirectory: "/unused",
+        },
+        fetch: async () =>
+          jsonResponse({
+            ticket: "t".repeat(32),
+            position: testPosition("5"),
+            expiresAt: TIMESTAMP,
+          }),
+        timeoutMs: 5_000,
+      });
+      const watching = watchProductRealtime({
+        client,
+        origin,
+        after: testPosition("5"),
+        workspaceId: WORKSPACE_ID,
+        userId: USER_ID,
+        timeoutMs: 5_000,
+        random: () => 0,
+        signal: abort.signal,
+        async onEvent(event) {
+          delivered.push(event.type);
+          await output;
+        },
+      });
+      const observed = watching.then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+      try {
+        await vi.waitFor(() => expect(delivered).toEqual(["system.connected"]));
+        if (terminal === "abort") abort.abort();
+        else socket!.close(terminal === "revoked" ? 4401 : 4009);
+        const outcome = await Promise.race([
+          observed,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("Watch did not stop")), 1_500),
+          ),
+        ]);
+        if (terminal === "abort") expect(outcome).toEqual({ value: { cursor: testPosition("5") } });
+        else
+          expect(outcome).toMatchObject({
+            error: { code: terminal === "revoked" ? "REALTIME_AUTH_REVOKED" : "RESYNC_REQUIRED" },
+          });
+        release();
+        await output;
+        await Promise.resolve();
+        expect(delivered).toEqual(["system.connected"]);
+        expect(await observed).toEqual(outcome);
+      } finally {
+        release();
+        abort.abort();
+        await watching.catch(() => undefined);
+      }
+    },
+  );
+
+  it("exits the CLI after a signal when the real stdout pipe is unread", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing server address");
+    const origin = `http://127.0.0.1:${address.port}`;
+    server.on("connection", (socket) => {
+      const envelope = {
+        version: 1,
+        occurredAt: TIMESTAMP,
+        workspaceId: WORKSPACE_ID,
+        entityVersion: 1,
+        delivery: "at_least_once",
+      };
+      socket.send(
+        JSON.stringify({
+          ...envelope,
+          id: crypto.randomUUID(),
+          type: "system.connected",
+          conversationId: null,
+          conversationSequence: null,
+          position: testPosition("5"),
+          payload: { connectionId: crypto.randomUUID(), userId: USER_ID },
+        }),
+      );
+      for (let sequence = 6; sequence < 206; sequence++) {
+        socket.send(
+          JSON.stringify({
+            ...envelope,
+            id: crypto.randomUUID(),
+            type: "message.created",
+            conversationId: CONVERSATION_ID,
+            conversationSequence: String(sequence),
+            position: testPosition(String(sequence)),
+            payload: {
+              message: {
+                id: MESSAGE_ID,
+                conversationId: CONVERSATION_ID,
+                conversationSequence: String(sequence),
+                version: 1,
+                clientMessageId: CLIENT_MESSAGE_ID,
+                authorId: USER_ID,
+                threadRootId: null,
+                body: "a".repeat(4_000),
+                bodyFormat: "hype_comms_markdown_v1",
+                editedAt: null,
+                deletedAt: null,
+                createdAt: TIMESTAMP,
+                updatedAt: TIMESTAMP,
+              },
+              mentionedUserIds: [],
+            },
+          }),
+        );
+      }
+    });
+    const script = `
+      process.env.HYPE_COMMS_API_ORIGIN = ${JSON.stringify(origin)};
+      process.env.HYPE_COMMS_TOKEN = ${JSON.stringify(`hype_comms_agent_${"a".repeat(43)}`)};
+      process.env.HYPE_COMMS_CONFIG_DIR = ${JSON.stringify(await mkdtemp(join(tmpdir(), "hype-watch-pipe-")))};
+      process.argv = [process.execPath, "hype-comms-cli", "watch", "--json"];
+      globalThis.fetch = async (input) => new Response(JSON.stringify(
+        new URL(String(input)).pathname === "/v2/bootstrap"
+          ? ${JSON.stringify(bootstrap())}
+          : { position: ${JSON.stringify(testPosition("5"))}, ticket: "t".repeat(32), expiresAt: ${JSON.stringify(TIMESTAMP)} }
+      ), { headers: { "content-type": "application/json", "x-hype-comms-protocol": "2" } });
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      let writes = 0;
+      process.stdout.write = (chunk, callback) => {
+        const result = originalWrite(chunk, callback);
+        if (++writes === 2) setTimeout(() => process.stderr.write("OUTPUT_QUEUED\\n"), 100);
+        return result;
+      };
+      process.stdin.once("data", () => {
+        process.stdin.pause();
+        process.emit("SIGTERM");
+      });
+      await import(${JSON.stringify(new URL("../dist/bin.js", import.meta.url).href)});
+    `;
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let diagnostics = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      diagnostics += chunk.toString("utf8");
+    });
+    const exited = new Promise<number | null>((resolve, reject) => {
+      child.once("exit", resolve);
+      child.once("error", reject);
+    });
+    try {
+      await vi.waitFor(() => expect(diagnostics).toContain("OUTPUT_QUEUED"), { timeout: 2_000 });
+      child.stdin.end("stop\n");
+      const exitCode = await Promise.race([
+        exited,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("CLI remained alive with unread stdout")), 2_000),
+        ),
+      ]);
+      expect(exitCode).toBe(0);
+      expect(diagnostics).toBe("OUTPUT_QUEUED\n");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await exited;
+      child.stdout.destroy();
+    }
   });
 
   it("streams wire replay before the handshake, reconnects from its cursor, and exits with resync", async () => {
@@ -209,7 +511,7 @@ describe("watch", () => {
     });
   });
 
-  it("streams a large replay incrementally before the handshake", async () => {
+  it("requires bootstrap when pre-handshake replay exceeds the shared event limit", async () => {
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     servers.push(server);
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -279,7 +581,7 @@ describe("watch", () => {
           conversationSequence: null,
           entityVersion: 1,
           delivery: "at_least_once",
-          payload: { reason: "cursor_expired" },
+          payload: { reason: "client_replay_overflow" },
         }),
       );
     });
@@ -312,16 +614,13 @@ describe("watch", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { type: string; payload?: { reason?: string } });
-    expect(records).toHaveLength(1_200 + 3);
-    expect(records[0]).toMatchObject({ type: "message.created" });
-    expect(records[1_200 + 1]).toMatchObject({
-      type: "system.connected",
-    });
+    expect(records).toHaveLength(1);
+
     expect(records.at(-1)).toMatchObject({
       type: "system.resync_required",
-      payload: { reason: "cursor_expired" },
+      payload: { reason: "client_replay_overflow" },
     });
-    expect(runtime.stdoutText()).not.toContain("client_replay_overflow");
+    expect(runtime.stdoutText()).toContain("client_replay_overflow");
     expect(JSON.parse(runtime.stderrText())).toMatchObject({
       error: {
         code: "RESYNC_REQUIRED",
@@ -384,9 +683,10 @@ describe("watch", () => {
       };
       const originalWrite = process.stdout.write.bind(process.stdout);
       let writeCount = 0;
-      process.stdout.write = () => {
+      process.stdout.write = (_chunk, callback) => {
         writeCount += 1;
         if (writeCount === 2) throw new Error("stdout pipe failed");
+        queueMicrotask(() => callback?.());
         return true;
       };
       await import(${JSON.stringify(cliBundleUrl)});

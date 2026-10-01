@@ -61,7 +61,7 @@
     "verify:desktop-package:windows-release": "node scripts/verify-windows-release.mjs",
     "test:integration": "npm run test:postgres",
     "verify:test-database": "node scripts/test-postgres.mjs --ready",
-    "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts"
+    "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts && npm test --workspace @hype-comms/api-client"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",

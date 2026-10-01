@@ -1,16 +1,5 @@
-import {
-  agentTokenScopeSchema,
-  createAgentRequestSchema,
-  createAgentResponseSchema,
-  createAgentTokenRequestSchema,
-  createAgentTokenResponseSchema,
-  createInvitationSchema,
-  entityIdSchema,
-  invitationSchema,
-  listAgentTokensResponseSchema,
-  listAgentsResponseSchema,
-  listInvitationsResponseSchema,
-} from "@hype-comms/contracts";
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
+import { agentTokenScopeSchema, entityIdSchema } from "@hype-comms/contracts";
 
 import {
   multipleOption,
@@ -28,10 +17,7 @@ async function resolveAgent(client: ApiClient, selector: string): Promise<string
   const id = entityIdSchema.safeParse(selector);
   if (id.success) return id.data;
   const normalized = selector.replace(/^@/u, "").toLocaleLowerCase("en-US");
-  const response = await client.request({
-    path: "/v2/agents",
-    responseSchema: listAgentsResponseSchema,
-  });
+  const response = await client.request({ ...endpoints.agents() });
   const matches = response.agents.filter(
     (agent) => agent.user.username.toLocaleLowerCase("en-US") === normalized,
   );
@@ -49,10 +35,7 @@ export async function invitationsCommand(
   const client = await clientFromContext(context);
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
-    const response = await client.request({
-      path: "/v2/invitations",
-      responseSchema: listInvitationsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.invitations() });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -60,11 +43,7 @@ export async function invitationsCommand(
     const parsed = parseCommandArguments(args, {});
     const [email] = requirePositionals(parsed, 1);
     const response = await client.request({
-      method: "POST",
-      path: "/v2/invitations",
-      body: { email: email!, role: "member" as const },
-      requestSchema: createInvitationSchema,
-      responseSchema: invitationSchema,
+      ...endpoints.createInvitation({ email: email!, role: "member" as const }),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -76,10 +55,7 @@ export async function invitationsCommand(
     if (!invitationId.success) {
       throw new UsageError("The invitation ID must be a UUID", "INVALID_INVITATION_ID");
     }
-    await client.requestEmpty({
-      method: "DELETE",
-      path: `/v2/invitations/${invitationId.data}`,
-    });
+    await client.requestEmpty({ ...endpoints.removeInvitation(invitationId.data) });
     writeResult(context.runtime.io, { revoked: invitationId.data }, context.options.json);
     return;
   }
@@ -94,10 +70,7 @@ export async function agentsCommand(
   const client = await clientFromContext(context);
   if (subcommand === "list") {
     requirePositionals(parseCommandArguments(args, {}), 0);
-    const response = await client.request({
-      path: "/v2/agents",
-      responseSchema: listAgentsResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.agents() });
     writeResult(context.runtime.io, response, context.options.json);
     return;
   }
@@ -109,11 +82,7 @@ export async function agentsCommand(
     const displayName = stringOption(parsed, "display-name");
     if (displayName === undefined) throw new UsageError("agents create requires --display-name");
     const response = await client.request({
-      method: "POST",
-      path: "/v2/agents",
-      body: { username: username!, displayName },
-      requestSchema: createAgentRequestSchema,
-      responseSchema: createAgentResponseSchema,
+      ...endpoints.createAgent({ username: username!, displayName }),
     });
     writeResult(context.runtime.io, response, context.options.json);
     return;
@@ -122,7 +91,7 @@ export async function agentsCommand(
     const parsed = parseCommandArguments(args, {});
     const [selector] = requirePositionals(parsed, 1);
     const id = await resolveAgent(client, selector!);
-    await client.requestEmpty({ method: "DELETE", path: `/v2/agents/${id}` });
+    await client.requestEmpty({ ...endpoints.removeAgent(id) });
     writeResult(context.runtime.io, { disabled: id }, context.options.json);
     return;
   }
@@ -139,10 +108,7 @@ export async function agentTokensCommand(
     const parsed = parseCommandArguments(args, {});
     const [agentSelector] = requirePositionals(parsed, 1);
     const agentId = await resolveAgent(client, agentSelector!);
-    const response = await client.request({
-      path: `/v2/agents/${agentId}/tokens`,
-      responseSchema: listAgentTokensResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.agentTokens(agentId) });
     writeResult(context.runtime.io, { agentId, ...response }, context.options.json);
     return;
   }
@@ -164,13 +130,7 @@ export async function agentTokensCommand(
       label,
       ...(scopes.length === 0 ? {} : { scopes }),
     };
-    const response = await client.request({
-      method: "POST",
-      path: `/v2/agents/${agentId}/tokens`,
-      body,
-      requestSchema: createAgentTokenRequestSchema,
-      responseSchema: createAgentTokenResponseSchema,
-    });
+    const response = await client.request({ ...endpoints.createAgentToken(agentId, body) });
     writeResult(context.runtime.io, { agentId, ...response }, context.options.json);
     return;
   }
@@ -180,10 +140,7 @@ export async function agentTokensCommand(
     const tokenId = entityIdSchema.safeParse(tokenValue);
     if (!tokenId.success) throw new UsageError("The token ID must be a UUID", "INVALID_TOKEN_ID");
     const agentId = await resolveAgent(client, agentSelector!);
-    await client.requestEmpty({
-      method: "DELETE",
-      path: `/v2/agents/${agentId}/tokens/${tokenId.data}`,
-    });
+    await client.requestEmpty({ ...endpoints.removeAgentToken(agentId, tokenId.data) });
     writeResult(context.runtime.io, { agentId, revoked: tokenId.data }, context.options.json);
     return;
   }

@@ -1,13 +1,5 @@
-import {
-  currentPrincipalSchema,
-  currentUserSchema,
-  deviceSessionSchema,
-  entityIdSchema,
-  magicLinkRequestedSchema,
-  requestMagicLinkSchema,
-  sessionTokenSchema,
-  verifyMagicLinkSchema,
-} from "@hype-comms/contracts";
+import { workspaceEndpoints as endpoints } from "@hype-comms/api-client";
+import { entityIdSchema, sessionTokenSchema, verifyMagicLinkSchema } from "@hype-comms/contracts";
 
 import { parseCommandArguments, requirePositionals } from "../argv.js";
 import { ApiClient, sessionTokenFromHeaders } from "../client.js";
@@ -36,11 +28,7 @@ export async function authCommand(
     const [email] = requirePositionals(parsed, 1);
     const client = await clientFromContext(context);
     const response = await client.request({
-      method: "POST",
-      path: "/v2/auth/magic-link",
-      body: { email: email! },
-      requestSchema: requestMagicLinkSchema,
-      responseSchema: magicLinkRequestedSchema,
+      ...endpoints.requestMagicLink({ email: email! }),
       includeCredential: false,
     });
     writeResult(context.runtime.io, response, context.options.json);
@@ -61,11 +49,7 @@ export async function authCommand(
       timeoutMs: context.options.timeoutMs,
     });
     const result = await client.requestWithResponse({
-      method: "POST",
-      path: "/v2/auth/session",
-      body: input.data,
-      requestSchema: verifyMagicLinkSchema,
-      responseSchema: currentUserSchema,
+      ...endpoints.verifyMagicLink(input.data),
       includeCredential: false,
     });
     const sessionToken = sessionTokenFromHeaders(result.response.headers);
@@ -104,10 +88,7 @@ export async function authCommand(
       fetch: context.runtime.fetch,
       timeoutMs: context.options.timeoutMs,
     });
-    const principal = await client.request({
-      path: "/v2/auth/me",
-      responseSchema: currentPrincipalSchema,
-    });
+    const principal = await client.request({ ...endpoints.currentPrincipal() });
     if (!("type" in principal) || principal.type !== "agent") {
       throw contractError("The supplied credential did not authenticate an agent");
     }
@@ -136,10 +117,7 @@ export async function authCommand(
     requirePositionals(parseCommandArguments(args, {}), 0);
     const principal = await (
       await clientFromContext(context)
-    ).request({
-      path: "/v2/auth/me",
-      responseSchema: currentPrincipalSchema,
-    });
+    ).request({ ...endpoints.currentPrincipal() });
     writeResult(context.runtime.io, principal, context.options.json);
     return;
   }
@@ -169,10 +147,7 @@ export async function authCommand(
         fetch: context.runtime.fetch,
         timeoutMs: context.options.timeoutMs,
       });
-      const response = await client.requestEmpty({
-        method: "POST",
-        path: "/v2/auth/session/refresh",
-      });
+      const response = await client.requestEmpty({ ...endpoints.refreshSession() });
       const rotated = sessionTokenSchema.safeParse(sessionTokenFromHeaders(response.headers));
       if (!rotated.success) throw contractError("The server did not rotate the session credential");
       stored.credential = { kind: "human", sessionToken: rotated.data };
@@ -207,7 +182,7 @@ export async function authCommand(
           profile,
           fetch: context.runtime.fetch,
           timeoutMs: context.options.timeoutMs,
-        }).requestEmpty({ method: "DELETE", path: "/v2/auth/session" });
+        }).requestEmpty({ ...endpoints.signOut() });
       }
       delete stored.credential;
       delete stored.enrollmentOffer;
@@ -224,10 +199,7 @@ export async function authCommand(
       requirePositionals(parseCommandArguments(rest, {}), 0);
       const devices = await (
         await clientFromContext(context)
-      ).request({
-        path: "/v2/auth/devices",
-        responseSchema: deviceSessionSchema.array(),
-      });
+      ).request({ ...endpoints.deviceSessions() });
       writeResult(context.runtime.io, devices, context.options.json);
       return;
     }
@@ -238,10 +210,7 @@ export async function authCommand(
       if (!id.success) throw new UsageError("The device ID must be a UUID", "INVALID_DEVICE_ID");
       await (
         await clientFromContext(context)
-      ).requestEmpty({
-        method: "DELETE",
-        path: `/v2/auth/devices/${id.data}`,
-      });
+      ).requestEmpty({ ...endpoints.removeDeviceSession(id.data) });
       writeResult(context.runtime.io, { revoked: id.data }, context.options.json);
       return;
     }
