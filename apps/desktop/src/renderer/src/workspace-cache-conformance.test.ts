@@ -1,3 +1,4 @@
+import type { OutboxItem } from "./workspace-cache";
 import { CollectionRetry, type CollectionCommit } from "./workspace-collections";
 import { MAX_RETRACT_RESERVATIONS, upsertRetractReservation } from "./workspace-projection";
 
@@ -31,6 +32,11 @@ import {
   type CachedWorkspaceState,
   type WorkspaceCache,
 } from "./workspace-cache";
+
+function expectRetainedUnsent(items: readonly OutboxItem[], operation: SendMessageOperation): void {
+  expect(items).toMatchObject([{ operation, status: "permanent_failure", nextAttemptAt: null }]);
+  expect(items[0]?.failureReason).toContain("retained on this device");
+}
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const WORKSPACE_ID = "10000000-0000-4000-8000-000000000002";
@@ -700,7 +706,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     await cache.installMetadataSnapshot({ ...snapshot, syncCursor: testPosition("10") });
     expect((await cache.load()).outbox[0]?.operation).toEqual(queuedAlphaMessage);
     await cache.installMetadataSnapshot({ ...firstPage, syncCursor: testPosition("11") });
-    expect((await cache.load()).outbox).toEqual([]);
+    expectRetainedUnsent((await cache.load()).outbox, queuedAlphaMessage);
     expect((await cache.load()).messages).toEqual([]);
   });
 
@@ -1577,7 +1583,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
-  it("purges every conversation-scoped row when the current user is removed", async () => {
+  it("purges server records and retains unsent work without retry after access removal", async () => {
     const cache = create();
     await cache.replaceSnapshot(
       snapshot,
@@ -1596,7 +1602,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     expect(state.messages.filter((message) => message.conversationId === ALPHA_ID)).toEqual([]);
     expect(state.reactions).toEqual([]);
     expect(state.tasks.filter((item) => item.conversationId === ALPHA_ID)).toEqual([]);
-    expect(state.outbox.filter((item) => item.operation.conversationId === ALPHA_ID)).toEqual([]);
+    expectRetainedUnsent(state.outbox, queuedAlphaMessage);
     expect(state.syncCursor).toEqual(selfRemovedEvent.position);
     await expect(cache.applyEvent(reactionAddedEvent)).rejects.toThrow(
       "Membership repair must complete",
@@ -1659,7 +1665,7 @@ describe.each(implementations)("$name conformance", ({ create }) => {
     });
   });
 
-  it("prunes only outbox rows outside an authoritative conversation catalog", async () => {
+  it("blocks retained outbox rows outside an authoritative conversation catalog", async () => {
     const cache = create();
     await cache.replaceSnapshot(snapshot, []);
     await cache.enqueue(queuedAlphaMessage, NOW);
@@ -1676,9 +1682,20 @@ describe.each(implementations)("$name conformance", ({ create }) => {
       [],
     );
 
-    expect((await cache.load()).outbox.map((item) => item.operation)).toEqual([
-      queuedDirectMessage,
-    ]);
+    const items = (await cache.load()).outbox;
+    expectRetainedUnsent(
+      items.filter((item) => item.operation.conversationId === ALPHA_ID),
+      queuedAlphaMessage,
+    );
+    expect(items.find((item) => item.operation.conversationId === DIRECT_ID)).toMatchObject({
+      operation: queuedDirectMessage,
+      status: "pending",
+    });
+    await cache.replaceSnapshot({ ...snapshot, syncCursor: testPosition("13") }, []);
+    expectRetainedUnsent(
+      (await cache.load()).outbox.filter((item) => item.operation.conversationId === ALPHA_ID),
+      queuedAlphaMessage,
+    );
   });
 
   it("updates an outbox status only for the current attempt and projection", async () => {
@@ -1919,7 +1936,7 @@ describe("PersistentWorkspaceCache durability", () => {
     const state = await cache.load();
     expect(state.repairMarker?.eventId).toBe(selfRemovedEvent.id);
     expect(state.messages).toEqual([]);
-    expect(state.outbox).toEqual([]);
+    expectRetainedUnsent(state.outbox, queuedAlphaMessage);
     expect(
       state.bootstrap?.conversations.some((summary) => summary.conversation.id === ALPHA_ID),
     ).toBe(false);
@@ -2055,7 +2072,7 @@ describe("PersistentWorkspaceCache durability", () => {
     expect(state.messages).toEqual([]);
     expect(state.reactions).toEqual([]);
     expect(state.tasks).toEqual([]);
-    expect(state.outbox).toEqual([]);
+    expectRetainedUnsent(state.outbox, queuedAlphaMessage);
     expect(state.repairMarker?.conversationId).toBe(ALPHA_ID);
   });
 
@@ -2110,7 +2127,16 @@ describe("PersistentWorkspaceCache durability", () => {
     const purged = new Dexie(`hype-comms-cache-v1-${scope.workspaceId}-${scope.userId}`);
     await purged.open();
     expect(await purged.table("messages").count()).toBe(0);
-    expect(await purged.table("outbox").count()).toBe(0);
+    expect(await purged.table("outbox").toArray()).toMatchObject([
+      {
+        clientMessageId: queuedAlphaMessage.message.clientMessageId,
+        conversationId: queuedAlphaMessage.conversationId,
+        status: "permanent_failure",
+        attemptCount: 0,
+        nextAttemptAt: null,
+        failureReason: expect.stringContaining("retained on this device"),
+      },
+    ]);
     expect((await purged.table("metadata").get("state")).repairMarker).not.toBeNull();
     purged.close();
     const state = await reopened.load();
@@ -2120,7 +2146,7 @@ describe("PersistentWorkspaceCache durability", () => {
     expect(state.messages).toEqual([]);
     expect(state.reactions).toEqual([]);
     expect(state.tasks).toEqual([]);
-    expect(state.outbox).toEqual([]);
+    expectRetainedUnsent(state.outbox, queuedAlphaMessage);
     expect(state.syncCursor).toEqual(selfRemovedEvent.position);
   });
 
@@ -2480,7 +2506,7 @@ describe("workspace cache implementation parity", () => {
       await cache.stageMembershipRepair(selfRemovedEvent);
       const removed = await cache.load({ conversationId: ALPHA_ID });
       expect(removed.messages).toEqual([]);
-      expect(removed.outbox).toEqual([]);
+      expectRetainedUnsent(removed.outbox, queuedAlphaMessage);
       expect(removed.repairMarker?.eventId).toBe(selfRemovedEvent.id);
       expect((await cache.load({ conversationId: null, includeAllTasks: true })).tasks).toEqual([]);
     }

@@ -1,5 +1,7 @@
 import { runProtocolEpochCli } from "../src/modules/workspace/protocol-epoch-cli.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { WorkspaceRepository } from "../src/modules/workspace/repository.js";
+import type { AuthenticatedIdentity } from "../src/modules/identity/service.js";
 import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +24,17 @@ import { runWorkspaceTransaction } from "../src/modules/workspace/transaction.js
 const ownerId = randomUUID();
 const oldWorkspaceId = randomUUID();
 const oldSessionId = randomUUID();
+const oldConversationId = randomUUID();
+const oldMessageId = randomUUID();
+const oldAgentId = randomUUID();
+const oldAcceptedInput = {
+  clientMessageId: randomUUID(),
+  body: "Accepted before cutover 😀",
+  bodyFormat: "hype_comms_markdown_v1" as const,
+  threadRootId: null,
+  mentionedUserIds: [],
+  attachmentIds: [],
+};
 let database: TestDatabase;
 let oldMigrations: string;
 let beforeMigration: unknown;
@@ -31,6 +44,12 @@ async function retainedRecords(): Promise<unknown> {
     `
     SELECT (SELECT jsonb_agg(to_jsonb(row)) FROM users AS row) AS users,
            (SELECT jsonb_agg(to_jsonb(row)) FROM device_sessions AS row WHERE id = $2) AS sessions,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM conversations AS row WHERE workspace_id = $1) AS conversations,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM messages AS row WHERE workspace_id = $1) AS messages,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM tasks AS row WHERE workspace_id = $1) AS tasks,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM attachments AS row WHERE workspace_id = $1) AS attachments,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM agents AS row WHERE workspace_id = $1) AS agents,
+           (SELECT jsonb_agg(to_jsonb(row)) FROM agent_tokens AS row WHERE workspace_id = $1) AS agent_tokens,
            (SELECT jsonb_agg(to_jsonb(row)) FROM sync_events AS row WHERE workspace_id = $1) AS events,
            (SELECT jsonb_agg(to_jsonb(row)) FROM api_idempotency_records AS row WHERE idempotency_key = 'accepted-before-cutover') AS receipts
   `,
@@ -93,6 +112,67 @@ beforeAll(async () => {
       (actor_user_id, route, idempotency_key, request_fingerprint, response_status, response_body)
      VALUES ($1, '/v1/channels', 'accepted-before-cutover', $2, 201, '{"syncCursor":"7"}'::jsonb)`,
     [ownerId, Buffer.alloc(32, 8)],
+  );
+  await database.pool.query(
+    "INSERT INTO users (id, kind, username, display_name) VALUES ($1, 'agent', 'preserved-agent', 'Preserved agent')",
+    [oldAgentId],
+  );
+  await database.pool.query(
+    "INSERT INTO workspace_memberships (workspace_id, user_id, role, status) VALUES ($1, $2, 'owner', 'active'), ($1, $3, 'member', 'active')",
+    [oldWorkspaceId, ownerId, oldAgentId],
+  );
+  await database.pool.query(
+    "INSERT INTO agents (user_id, workspace_id, created_by) VALUES ($1, $2, $3)",
+    [oldAgentId, oldWorkspaceId, ownerId],
+  );
+  await database.pool.query(
+    `INSERT INTO agent_tokens (id, workspace_id, agent_user_id, token_hash, label, scopes, created_by)
+     VALUES ($1, $2, $3, $4, 'Existing Hermes token', ARRAY['workspace:read', 'messages:write'], $5)`,
+    [randomUUID(), oldWorkspaceId, oldAgentId, Buffer.alloc(32, 10), ownerId],
+  );
+  await database.pool.query(
+    `INSERT INTO conversations (id, workspace_id, kind, name, slug, created_by, last_message_sequence, channel_access)
+     VALUES ($1, $2, 'channel', 'General', 'general', $3, 1, 'workspace')`,
+    [oldConversationId, oldWorkspaceId, ownerId],
+  );
+  // Freeze the protocol-1 request fingerprint encoding used by an already accepted desktop send.
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        conversationId: oldConversationId,
+        threadRootId: null,
+        body: oldAcceptedInput.body,
+        bodyFormat: oldAcceptedInput.bodyFormat,
+        clientMessageId: oldAcceptedInput.clientMessageId,
+        mentionedUserIds: [],
+        attachmentIds: [],
+      }),
+    )
+    .digest();
+  await database.pool.query(
+    `INSERT INTO messages (id, workspace_id, conversation_id, conversation_sequence, committed_workspace_sequence,
+      client_message_id, request_fingerprint, author_id, body, body_format)
+     VALUES ($1, $2, $3, 1, 6, $4, $5, $6, $7, 'hype_comms_markdown_v1')`,
+    [
+      oldMessageId,
+      oldWorkspaceId,
+      oldConversationId,
+      oldAcceptedInput.clientMessageId,
+      fingerprint,
+      ownerId,
+      oldAcceptedInput.body,
+    ],
+  );
+  await database.pool.query(
+    `INSERT INTO tasks (id, workspace_id, conversation_id, number, title, status, rank, created_by, source_message_id)
+     VALUES ($1, $2, $3, 1, 'Existing task', 'todo', 1, $4, $5)`,
+    [randomUUID(), oldWorkspaceId, oldConversationId, ownerId, oldMessageId],
+  );
+  await database.pool.query(
+    `INSERT INTO attachments (id, workspace_id, conversation_id, message_id, uploaded_by, file_name,
+      content_type, size_bytes, content_sha256, status, content_received_at)
+     VALUES ($1, $2, $3, $4, $5, 'existing.txt', 'text/plain', 3, $6, 'ready', now())`,
+    [randomUUID(), oldWorkspaceId, oldConversationId, oldMessageId, ownerId, Buffer.alloc(32, 11)],
   );
   beforeMigration = await retainedRecords();
   await runMigrations(database.pool);
@@ -346,6 +426,34 @@ describe("workspace protocol epoch migration", () => {
     });
     expect(await retainedRecords()).toEqual(beforeMigration);
     expect((await runMigrations(database.pool)).applied).toEqual([]);
+    const identity: AuthenticatedIdentity = {
+      principalKind: "human",
+      sessionId: oldSessionId,
+      currentUser: {
+        user: {
+          id: ownerId,
+          kind: "human",
+          username: "epoch-owner",
+          displayName: "Epoch owner",
+          avatarUrl: null,
+          createdAt: "2026-09-12T00:00:00.000Z",
+          updatedAt: "2026-09-12T00:00:00.000Z",
+        },
+        email: "epoch@example.test",
+        workspaceId: oldWorkspaceId,
+        role: "owner",
+      },
+    };
+    const repository = new WorkspaceRepository(database.pool);
+    const results = await Promise.all(
+      [1, 2].map(() => repository.sendMessage(identity, oldConversationId, oldAcceptedInput)),
+    );
+    for (const response of results) {
+      expect(response.message.id).toBe(oldMessageId);
+      expect(response.syncCursor).toEqual({ epoch, sequence: "7" });
+    }
+    expect(await retainedRecords()).toEqual(beforeMigration);
+    expect(await read(oldWorkspaceId)).toEqual({ epoch, sequence: "7", replayFloor: "7" });
   });
 
   it("starts a newly created workspace in its own epoch with floor zero", async () => {
