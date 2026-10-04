@@ -5,6 +5,10 @@ candidate revision, compatible rollback revision, package checksums and backup/r
 one release record. A green pull-request package job alone does not establish a signed release,
 installed upgrade, or safe production rollback.
 
+The Kubernetes target, maintenance sequence, backup procedure and rollback rules are in
+[the production cutover runbook](production-cutover.md). Its disposable server rehearsal checks a
+separate protocol-2 rollback image against messages accepted after epoch activation.
+
 ## Repeatable checks
 
 Run `npm run check` with the documented PostgreSQL and Python tools. It includes the memory and
@@ -56,6 +60,16 @@ These candidates retain the current desktop version for rehearsal only. They mus
 published over the existing version. Prepare the next unused stable version through the normal
 release command after the stack is integrated, then rerun the package checks on that final revision.
 
+The [2026-09-12 native record](evidence/native-rehearsal-2026-09-12.json) contains the successful
+run at `e28770d`, package checksums verified against downloaded bytes, and each native-cache result.
+It covers macOS, Windows and Linux ARM64 native storage, plus x64 and ARM64 packages on each OS.
+macOS signatures and stapled notarization tickets passed; Windows was unsigned under the existing
+policy. The earlier Linux/x64 native run is recorded in the decision trail.
+
+The [server cutover record](evidence/server-cutover-2026-09-12.json) covers 35 restored table
+fingerprints, attachment restoration and a separately built compatible server rollback retaining
+post-cutover messages. Both records state their limits and do not establish production acceptance.
+
 ## Remaining acceptance before the maintenance window
 
 For each supported platform, install the previous production package in a disposable OS user or VM.
@@ -70,6 +84,9 @@ profile or a manifest-only check cannot substitute for this test. Keep productio
 the public update feed out of the rehearsal.
 
 Restore the actual maintenance backup procedure into an isolated database and attachment volume.
+The disposable server command requires three distinct images: the previous protocol-1 baseline,
+the candidate, and a protocol-2-compatible rollback. Seed and back up the baseline before applying
+the candidate migrations; a backup produced by the candidate does not test the cutover migration.
 Verify data, credentials and idempotency receipts before applying the additive migration. Activate
 its new epoch with writers stopped, then exercise login, send/reply, attachments, tasks, reconnect
 and retained outbox delivery against matching server, desktop, CLI and Hermes builds. Repeat with the

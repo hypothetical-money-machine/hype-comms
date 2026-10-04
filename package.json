@@ -64,7 +64,8 @@
     "test:unit": "npm run build:contracts && npm run test:scripts && npm run test:hermes-plugin && npm test --workspace @hype-comms/desktop && npm run test:unit --workspace @hype-comms/server && npm test --workspace @hype-comms/cli && npm test --workspace @hype-comms/contracts && npm test --workspace @hype-comms/api-client",
     "verify:zod-alignment": "node scripts/verify-zod-alignment.mjs",
     "rehearse:native-cache": "tsc -b packages/api-client && node scripts/rehearse-native-cache.mjs",
-    "rehearse:claude": "npm run build --workspace @hype-comms/desktop && node scripts/rehearse-claude.mjs"
+    "rehearse:claude": "npm run build --workspace @hype-comms/desktop && node scripts/rehearse-claude.mjs",
+    "rehearse:server-cutover": "tsc -b packages/api-client && node scripts/rehearse-server-cutover.mjs"
   },
   "devDependencies": {
     "@electron/asar": "4.2.1",
