@@ -49,7 +49,7 @@ audits run after the database commit.
 
 ## Prerequisites for development
 
-- Node.js 24.18.x
+- Node.js 24.22.x
 - npm 11.16.x
 - PostgreSQL 16, normally through Docker Compose
 - Python 3.11 or newer, with venv and pip, for mandatory Hermes verification

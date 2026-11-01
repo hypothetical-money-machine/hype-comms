@@ -67,6 +67,28 @@ describe("CLI build artifact", () => {
     ).toThrow("additional native module-loader capability");
   });
 
+  it("ignores loader prose in comments but rejects loaders in code and literals", () => {
+    const prefix = `#!/usr/bin/env node\n${SELF_CONTAINED_NODE_REQUIRE_BANNER}\n`;
+    expect(() =>
+      assertSelfContainedNodeBundle(
+        `${prefix}class Generator {\n  // emits an indexed access rather than an inline \`import()\`\n  /* require("x") */\n  get value() {\n    return 1;\n  }\n}`,
+        nodeBuiltinModules,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSelfContainedNodeBundle(
+        `${prefix}// comment\nconst value = await import(process.env.RUNTIME_MODULE);`,
+        nodeBuiltinModules,
+      ),
+    ).toThrow("unverified runtime module load");
+    expect(() =>
+      assertSelfContainedNodeBundle(
+        `${prefix}const source = \`return import("./neighbor.js")\`;`,
+        nodeBuiltinModules,
+      ),
+    ).toThrow("unverified runtime module load");
+  });
+
   it("runs directly under the explicitly selected Node runtime", async () => {
     const result = await executeFile(process.execPath, [bundlePath, "--help"], {
       env: { LANG: "C", NO_COLOR: "1" },

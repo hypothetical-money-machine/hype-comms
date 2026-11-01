@@ -19,7 +19,7 @@ services:
 
 steps:
   - name: check
-    image: node:24.18.0-bookworm
+    image: node:24.22.2-bookworm
     commands:
       - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
       - python3 -m venv .venv/hermes

@@ -24,11 +24,11 @@
   },
   "dependencies": {
     "@hype-comms/contracts": "*",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
     "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

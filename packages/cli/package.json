@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "ws": "8.21.3",
-    "zod": "4.4.3",
+    "zod": "4.6.7",
     "@hype-comms/api-client": "*"
   },
   "devDependencies": {
@@ -32,6 +32,6 @@
     "@types/ws": "8.18.1",
     "esbuild": "0.28.2",
     "typescript": "6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }

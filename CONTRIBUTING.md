@@ -8,7 +8,7 @@ organization.
 Pull requests, including pull requests from forks, run on disposable GitHub-hosted infrastructure.
 The workflows receive a read-only token and no repository secrets.
 
-Before pushing a fork pull request, use Node.js 24.18.x from `.node-version` and npm 11.16.x, then
+Before pushing a fork pull request, use Node.js 24.22.x from `.node-version` and npm 11.16.x, then
 run:
 
 ```bash

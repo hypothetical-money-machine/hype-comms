@@ -1,3 +1,5 @@
+import { transformSync } from "esbuild";
+
 export const SELF_CONTAINED_NODE_REQUIRE_BANNER =
   'import { builtinModules as __builtinModules, createRequire as __createRequire } from "node:module"; const require = (() => { const allowed = new Set(__builtinModules.map((name) => name.replace(/^node:/u, ""))); const nativeRequire = __createRequire(import.meta.url); return (specifier) => { if (typeof specifier !== "string" || !specifier.startsWith("node:") || !allowed.has(specifier.slice(5))) throw new Error("The CLI bundle attempted an unpinned module load"); return nativeRequire(specifier); }; })();';
 
@@ -11,7 +13,7 @@ export function assertSelfContainedNodeBundle(bundle, builtinModuleNames) {
   if (!bundle.startsWith(guardedPrefix)) {
     throw new Error("The CLI bundle is missing its exact runtime module guard");
   }
-  const guardedBody = bundle.slice(guardedPrefix.length);
+  const guardedBody = withoutComments(bundle.slice(guardedPrefix.length));
   if (
     /\b(?:createRequire|__createRequire|__nativeRequire)\b/u.test(guardedBody) ||
     /["']node:module["']/u.test(guardedBody)
@@ -35,4 +37,22 @@ export function assertSelfContainedNodeBundle(bundle, builtinModuleNames) {
   if (/(?<!_)\brequire\s*\(/u.test(guardedBody) || /\bimport\s*\(/u.test(guardedBody)) {
     throw new Error("The CLI bundle contains an unverified runtime module load");
   }
+}
+
+/**
+ * esbuild keeps dependency comments in unminified output (Zod 4.6 ships one that mentions
+ * "`import()`"). Comments cannot load modules, so the scans above run on a reprint of the body
+ * without them. esbuild parses the code, so string, template and regular-expression literals stay
+ * verbatim and a loader spelled inside one is still rejected.
+ */
+function withoutComments(code) {
+  return transformSync(code, {
+    charset: "utf8",
+    format: "esm",
+    legalComments: "none",
+    loader: "js",
+    minifyWhitespace: true,
+    platform: "node",
+    target: "esnext",
+  }).code;
 }
