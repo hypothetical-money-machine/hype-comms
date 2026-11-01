@@ -134,7 +134,7 @@ test("keeps the Docker smoke internal and disposable with a restricted applicati
   assert.doesNotMatch(compose, /\/var\/run\/docker\.sock|privileged:|^\s+ports:/mu);
   assert.doesNotMatch(compose, /^\s+image: hype-comms-headless-smoke:/mu);
 
-  assert.match(dockerfile, /FROM node:24\.18\.0-bookworm-slim@sha256:[a-f0-9]{64}/u);
+  assert.match(dockerfile, /FROM node:24\.22\.2-bookworm-slim@sha256:[a-f0-9]{64}/u);
   assert.match(dockerfile, /dbus-run-session/u);
   assert.match(dockerfile, /xvfb-run/u);
   assert.match(dockerfile, /install-electron --no/u);

@@ -21,7 +21,7 @@ publishes installers to `https://updates.hypemm.com/desktop`, and creates the Gi
 1. `git fetch origin --tags` and update from `origin/main`.
 2. Work on a short-lived branch from that tip. The worktree must have no unrelated changes;
    `npm run release` rejects them.
-3. Use Node 24.18.x and npm 11.16.x. If `node_modules` is missing, `npm ci` from the lockfile.
+3. Use Node 24.22.x and npm 11.16.x. If `node_modules` is missing, `npm ci` from the lockfile.
 4. Confirm the current desktop version in `apps/desktop/package.json` and that `v<current>` already
    exists. The next patch is current + 1 unless the user named a different stable version.
 5. Confirm that the release workflow's `HYPE_COMMS_API_ORIGIN` names the deployed HTTPS API.

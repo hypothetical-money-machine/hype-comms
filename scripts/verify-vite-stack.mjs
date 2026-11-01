@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import semver from "semver";
 
-export const EXPECTED_VITE_VERSION = "8.2.1";
+export const EXPECTED_VITE_VERSION = "8.3.5";
 export const EXPECTED_ZOD_VERSION = "4.4.3";
 
 const vitePackagePathPattern = /(?:^|\/)node_modules\/vite$/u;

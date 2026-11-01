@@ -31,7 +31,7 @@ scope to every platform. Native-notification rollout evidence is explicitly plat
 
 ## Build, Test, and Development Commands
 
-Use Node 24.18.x and npm 11.16.x, then install exactly from the lockfile with `npm ci`.
+Use Node 24.22.x and npm 11.16.x, then install exactly from the lockfile with `npm ci`.
 
 - `npm run dev`: start the Fastify server and Electron client together.
 - `npm run dev:server` / `npm run dev:desktop`: run one workspace in watch mode.

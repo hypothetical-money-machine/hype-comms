@@ -134,5 +134,5 @@ test("gates every published server image through the guarded PostgreSQL entrypoi
     { event: "push", branch: "main" },
     { event: "manual", branch: "main" },
   ]);
-  assert.match(dockerfile, /FROM node:24\.18\.0-alpine@sha256:[a-f0-9]{64} AS base/);
+  assert.match(dockerfile, /FROM node:24\.22\.2-alpine@sha256:[a-f0-9]{64} AS base/);
 });
